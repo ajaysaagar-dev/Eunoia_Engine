@@ -8,6 +8,7 @@ import EunoiaEngine_Meshes from "../../plugins/meshes.plugins";
 import EunoiaEngine_Light from "../../plugins/lights.plugins";
 import EunoiaEngine_Shadows from "../../plugins/shadows.plugins";
 import EunoiaEngine_Materials from "../../plugins/materials.plugins";
+import EunoiaEngine_EditorTools from "../../plugins/editor-tools.plugins";
 
 
 async function start() {
@@ -17,6 +18,7 @@ async function start() {
     await EunoiaEngine_Scene();
     await EunoiaEngine_Camera();
     await EunoiaEngine_Stats.ShowFPS();
+    await EunoiaEngine_EditorTools.Init();
 
     // Test ---------------------------->
     const cube = await EunoiaEngine_Meshes.CreateBox('Name 01', { size: 2 });

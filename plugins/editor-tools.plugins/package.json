@@ -1,0 +1,10 @@
+{
+  "name": "@eunoiaengine/editor-tools",
+  "version": "1.0.0",
+  "description": "Editor Tools Plugin for Eunoia Engine",
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module"
+}
