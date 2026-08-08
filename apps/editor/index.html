@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Eunoia Editor</title>
+</head>
+
+<style>
+    html,
+    body {
+        margin: 0;
+        position: absolute;
+        overflow: hidden;
+    }
+
+    #viewport {
+        outline: none;
+        border: none;
+    }
+</style>
+
+<body>
+    <canvas id="viewport" width="1080" height="720"></canvas>
+    <h1 id="fps" style="color: white; position: absolute; z-index: 100; left: 1px; top: 1px; margin: 0;">FPS</h1>
+</body>
+<script type="module" src="index.ts"></script>
+
+</html>
