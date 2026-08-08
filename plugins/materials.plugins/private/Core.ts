@@ -7,8 +7,9 @@ import {
     TexturesPath_Interface,
     TextureUVScale_Interface
 } from "./types";
+import EngineRegistry from "../../registry.plugins";
 
-(window as any).EunoiaEngine_Materials = (window as any).EunoiaEngine_Materials ?? [];
+EngineRegistry.EunoiaEngine_Materials ??= [];
 
 export async function PBRMaterial_(
     name: string,
@@ -19,7 +20,7 @@ export async function PBRMaterial_(
     values: MaterialValues_Interface = {}
 ): Promise<PBRMaterial> {
 
-    const scene = (window as any).EunoiaEngine_Scene as Scene;
+    const scene = EngineRegistry.EunoiaEngine_Scene as Scene;
     const material = new PBRMaterial(name, scene);
 
     const loaded = await LoadTextures(textures);
@@ -52,7 +53,8 @@ export async function PBRMaterial_(
 
     ApplyMaterialValues(material, values);
 
-    ((window as any).EunoiaEngine_Materials as PBRMaterial[]).push(material);
+    EngineRegistry.EunoiaEngine_Materials ??= [];
+    (EngineRegistry.EunoiaEngine_Materials as PBRMaterial[]).push(material);
 
     return material;
 }
@@ -136,7 +138,7 @@ async function LoadSingleTexture(path?: string): Promise<Texture | null> {
         return null;
     }
 
-    const scene = (window as any).EunoiaEngine_Scene as Scene;
+    const scene = EngineRegistry.EunoiaEngine_Scene as Scene;
 
     return new Promise<Texture>((resolve, reject) => {
         const texture = new Texture(

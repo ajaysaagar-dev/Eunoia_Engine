@@ -1,14 +1,15 @@
 import { Scene } from "@babylonjs/core";
+import EngineRegistry from "../../registry.plugins";
 
-(window as any).EunoiaEngine_Scene = null!;
+EngineRegistry.EunoiaEngine_Scene = null;
 
 export default async function EunoiaEngine_Scene(scene?: string) {
 
-    if ((window as any).EunoiaEngine_Scene !== null)
-        ((window as any).EunoiaEngine_Scene as Scene).dispose();
+    if (EngineRegistry.EunoiaEngine_Scene)
+        (EngineRegistry.EunoiaEngine_Scene as Scene).dispose();
 
     if (!scene) {
-        (window as any).EunoiaEngine_Scene = new Scene((window as any).EunoiaEngine_Engine);
+        EngineRegistry.EunoiaEngine_Scene = new Scene(EngineRegistry.EunoiaEngine_Engine);
         SceneLog(scene ? scene : 'ID827EMNCNQCBNJ782987HSDM');
         return;
     }
@@ -16,7 +17,6 @@ export default async function EunoiaEngine_Scene(scene?: string) {
     return;
 
 }
-
 
 function SceneLog(scene: any) {
     console.log(`EUNOIAENGINE > Scene > ${scene} Initialized`);
