@@ -1,5 +1,5 @@
 import { AreaLight, DirectionalLight, HemisphericLight, PointLight, RectAreaLight, Scene, SpotLight, Vector3 } from "@babylonjs/core";
-import EngineRegistry from "../../registry.plugins";
+import EngineRegistry from "../../../engine/registry.plugins";
 
 const EunoiaEngine_Light = {
     CreatePointLight: async (name: string, position: Vector3) => new PointLight(name, position, (EngineRegistry.EunoiaEngine_Scene as Scene)),

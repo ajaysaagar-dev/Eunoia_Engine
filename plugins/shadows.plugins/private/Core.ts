@@ -1,5 +1,5 @@
 import { AbstractMesh, IShadowLight, Scene, ShadowGenerator } from "@babylonjs/core";
-import EngineRegistry from "../../registry.plugins";
+import EngineRegistry from "../../../engine/registry.plugins";
 
 EngineRegistry.EunoiaEngine_ShadowGenerators ??= [];
 

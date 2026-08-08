@@ -1,24 +1,47 @@
-import { Engine, Epsilon } from "@babylonjs/core";
-import EngineRegistry from "../../registry.plugins";
+import { Engine } from "@babylonjs/core";
+import EngineRegistry from "../../../engine/registry.plugins";
 
-const FPS = typeof document !== 'undefined' ? document.getElementById('fps') as HTMLElement : null;
+let FPS: HTMLElement | null = null;
+let lastFpsText = '';
+let lastUpdateTime = 0;
+
+function getFPSElement(): HTMLElement | null {
+    if (!FPS && typeof document !== 'undefined') {
+        FPS = document.getElementById('fps');
+    }
+    return FPS;
+}
 
 const EunoiaEngine_Stats = {
     ShowFPS: async (show?: boolean) => {
         if (!show) show = !show;
         EngineRegistry.EunoiaEngine_Renderers ??= [];
         if (show) {
-            EngineRegistry.EunoiaEngine_Renderers.push(UpdateFPS);
+            if (!EngineRegistry.EunoiaEngine_Renderers.includes(UpdateFPS)) {
+                EngineRegistry.EunoiaEngine_Renderers.push(UpdateFPS);
+            }
         } else {
-            EngineRegistry.EunoiaEngine_Renderers = EngineRegistry.EunoiaEngine_Renderers.filter(item => item.name !== 'UpdateFPS');
-            if (FPS) FPS.innerHTML = '';
+            EngineRegistry.EunoiaEngine_Renderers = EngineRegistry.EunoiaEngine_Renderers.filter(item => item !== UpdateFPS);
+            const el = getFPSElement();
+            if (el) el.textContent = '';
         }
     }
 }
 
 function UpdateFPS() {
-    if (FPS && EngineRegistry.EunoiaEngine_Engine) {
-        FPS.innerHTML = (EngineRegistry.EunoiaEngine_Engine as Engine).getFps().toFixed(0);
+    const now = performance.now();
+    // Throttle DOM updates to 4 times per second (every 250ms)
+    if (now - lastUpdateTime < 250) return;
+    lastUpdateTime = now;
+
+    const engine = EngineRegistry.EunoiaEngine_Engine as Engine;
+    const el = getFPSElement();
+    if (el && engine) {
+        const currentFps = engine.getFps().toFixed(0);
+        if (currentFps !== lastFpsText) {
+            lastFpsText = currentFps;
+            el.textContent = currentFps;
+        }
     }
 }
 

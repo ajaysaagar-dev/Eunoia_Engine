@@ -1,20 +1,19 @@
 import { Scene } from "@babylonjs/core";
-import EngineRegistry from "../../registry.plugins";
+import EngineRegistry from "../../../engine/registry.plugins";
 
-EngineRegistry.EunoiaEngine_Scene = null;
+export default async function EunoiaEngine_Scene(sceneName?: string) {
 
-export default async function EunoiaEngine_Scene(scene?: string) {
-
-    if (EngineRegistry.EunoiaEngine_Scene)
+    if (EngineRegistry.EunoiaEngine_Scene) {
         (EngineRegistry.EunoiaEngine_Scene as Scene).dispose();
-
-    if (!scene) {
-        EngineRegistry.EunoiaEngine_Scene = new Scene(EngineRegistry.EunoiaEngine_Engine);
-        SceneLog(scene ? scene : 'ID827EMNCNQCBNJ782987HSDM');
-        return;
     }
 
-    return;
+    if (!sceneName) {
+        const scene = new Scene(EngineRegistry.EunoiaEngine_Engine);
+        scene.skipPointerMovePicking = true; // Optimization: avoid automatic scene raycasting on pointer movement
+        EngineRegistry.EunoiaEngine_Scene = scene;
+        SceneLog('ID827EMNCNQCBNJ782987HSDM');
+        return;
+    }
 
 }
 

@@ -1,6 +1,6 @@
 import { CreateBox, CreateGround, Scene } from "@babylonjs/core";
 import { BoxMeshInterface, GroundMeshInterface } from "../../../types/meshes.types";
-import EngineRegistry from "../../registry.plugins";
+import EngineRegistry from "../../../engine/registry.plugins";
 
 const EunoiaEngine_Meshes = {
     CreateBox: async (name: string, options: BoxMeshInterface) =>

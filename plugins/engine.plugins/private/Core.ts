@@ -1,6 +1,6 @@
 import { Engine, WebGPUEngine } from '@babylonjs/core';
 import ViewportResize from './ViewportResize';
-import EngineRegistry from '../../registry.plugins';
+import EngineRegistry from '../../../engine/registry.plugins';
 
 EngineRegistry.EunoiaEngine_Viewport = document.getElementById('viewport');
 EngineRegistry.EunoiaEngine_Engine = null;

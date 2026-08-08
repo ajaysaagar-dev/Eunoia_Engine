@@ -1,4 +1,4 @@
-import EngineRegistry from '../../registry.plugins';
+import EngineRegistry from '../../../engine/registry.plugins';
 
 export default function ViewportResize() {
     if (EngineRegistry.EunoiaEngine_Viewport) {
