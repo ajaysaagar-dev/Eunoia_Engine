@@ -1,6 +1,6 @@
 import { FreeCamera, Scene } from "@babylonjs/core";
 import ViewportCamera from "./ViewportCamera";
-import EngineRegistry from "../../registry.plugins";
+import EngineRegistry from "../../../engine/registry.plugins";
 
 EngineRegistry.EunoiaEngine_Camera = null;
 
