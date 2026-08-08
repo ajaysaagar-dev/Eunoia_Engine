@@ -1,4 +1,4 @@
-﻿# Eunoia Engine — Project Details
+# Eunoia Engine — Project Details
 
 > A modular, plugin-based 3D engine built on top of **BabylonJS**, running inside an **Electron** window with a **Vite** dev server. Written entirely in **TypeScript**.
 
@@ -52,16 +52,17 @@ Eunoia Engine Development/
 │       └── index.ts            # Editor entry point — wires all plugins
 │
 ├── plugins/                    # All engine plugins (modular, independent)
-│   ├── camera/
-│   ├── engine/
-│   ├── file-system/
-│   ├── lights/
-│   ├── materials/
-│   ├── meshes/
-│   ├── renderer/
-│   ├── scene/
-│   ├── shadows/
-│   └── stats/
+│   ├── registry.plugins.ts     # Centralized EngineRegistry state locator
+│   ├── camera.plugins/
+│   ├── engine.plugins/
+│   ├── file-system.plugins/
+│   ├── lights.plugins/
+│   ├── materials.plugins/
+│   ├── meshes.plugins/
+│   ├── renderer.plugins/
+│   ├── scene.plugins/
+│   ├── shadows.plugins/
+│   └── stats.plugins/
 │
 ├── types/
 │   └── meshes.types.ts         # Shared TypeScript interfaces for meshes
@@ -76,7 +77,7 @@ Eunoia Engine Development/
 ### Each Plugin Structure
 
 ```
-plugins/<name>/
+plugins/<name>.plugins/
 ├── index.ts              # Public API — re-exports from private/
 ├── package.json          # Plugin package metadata
 └── private/
@@ -107,22 +108,22 @@ Electron Main Process (window/index.js)
 
 ---
 
-## Global State Model
+## Centralized State Model (`EngineRegistry`)
 
-All plugins share state through `window` properties. This avoids circular imports and acts as a service-locator pattern.
+All plugins share state through `EngineRegistry` exported from `plugins/registry.plugins.ts`. This decouples plugins from `window`, avoids circular imports, and acts as a centralized service-locator pattern.
 
-| Global Key | Type | Written By | Read By |
+| Registry Key | Type | Written By | Read By |
 |---|---|---|---|
-| `window.EunoiaEngine_Viewport` | `HTMLCanvasElement` | `engine` | `engine`, `renderer`, `camera` |
-| `window.EunoiaEngine_Engine` | `Engine \| WebGPUEngine` | `engine` | `scene`, `renderer`, `stats`, `camera` |
-| `window.EunoiaEngine_GraphicsAPI` | `'WEB_GL' \| 'WEB_GPU'` | `engine` | informational |
-| `window.EunoiaEngine_Scene` | `Scene` | `scene` | `camera`, `meshes`, `lights`, `materials`, `shadows` |
-| `window.EunoiaEngine_Camera` | `FreeCamera` | `camera` | `camera` |
-| `window.EunoiaEngine_Camera_TN` | `TransformNode` | `camera` | camera controls |
-| `window.EunoiaEngine_Renderer` | loop ref | `renderer` | `renderer` |
-| `window.EunoiaEngine_Renderers` | `Function[]` | `renderer` | `camera`, `stats` |
-| `window.EunoiaEngine_Materials` | `PBRMaterial[]` | `materials` | materials registry |
-| `window.EunoiaEngine_ShadowGenerators` | `ShadowGenerator[]` | `shadows` | `shadows` |
+| `EngineRegistry.EunoiaEngine_Viewport` | `HTMLCanvasElement` | `engine.plugins` | `engine.plugins`, `renderer.plugins`, `camera.plugins` |
+| `EngineRegistry.EunoiaEngine_Engine` | `Engine \| WebGPUEngine` | `engine.plugins` | `scene.plugins`, `renderer.plugins`, `stats.plugins`, `camera.plugins` |
+| `EngineRegistry.EunoiaEngine_GraphicsAPI` | `'WEB_GL' \| 'WEB_GPU'` | `engine.plugins` | informational |
+| `EngineRegistry.EunoiaEngine_Scene` | `Scene` | `scene.plugins` | `camera.plugins`, `meshes.plugins`, `lights.plugins`, `materials.plugins`, `shadows.plugins` |
+| `EngineRegistry.EunoiaEngine_Camera` | `FreeCamera` | `camera.plugins` | `camera.plugins` |
+| `EngineRegistry.EunoiaEngine_Camera_TN` | `TransformNode` | `camera.plugins` | camera controls |
+| `EngineRegistry.EunoiaEngine_Renderer` | loop ref | `renderer.plugins` | `renderer.plugins` |
+| `EngineRegistry.EunoiaEngine_Renderers` | `Function[]` | `renderer.plugins` | `camera.plugins`, `stats.plugins` |
+| `EngineRegistry.EunoiaEngine_Materials` | `PBRMaterial[]` | `materials.plugins` | materials registry |
+| `EngineRegistry.EunoiaEngine_ShadowGenerators` | `ShadowGenerator[]` | `shadows.plugins` | `shadows.plugins` |
 
 ---
 
