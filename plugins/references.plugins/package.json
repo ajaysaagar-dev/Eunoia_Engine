@@ -1,0 +1,9 @@
+{
+  "name": "references.plugins",
+  "version": "1.0.0",
+  "description": "Project-wide stable numeric reference system for Eunoia Engine",
+  "main": "index.ts",
+  "keywords": [],
+  "author": "Eunoia Engine Team",
+  "license": "ISC"
+}
