@@ -5,25 +5,832 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Eunoia Editor</title>
+    <style>
+        html,
+        body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0b0f19;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            user-select: none;
+        }
+
+        #viewport {
+            outline: none;
+            border: none;
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Top Mode Toggle Bar & Scene Badge */
+        .mode-bar {
+            position: fixed;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 24px;
+            padding: 4px 8px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+
+        .scene-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            background: rgba(59, 130, 246, 0.15);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 18px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #60a5fa;
+        }
+
+        .mode-divider {
+            width: 1px;
+            height: 18px;
+            background: rgba(255, 255, 255, 0.12);
+            margin: 0 4px;
+        }
+
+        .mode-btn {
+            background: transparent;
+            color: rgba(255, 255, 255, 0.6);
+            border: none;
+            padding: 8px 22px;
+            border-radius: 18px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 0.6px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            outline: none;
+        }
+
+        .mode-btn:hover {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.08);
+        }
+
+        .mode-btn.active[data-mode="Editor"] {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+            color: #ffffff;
+            box-shadow: 0 2px 12px rgba(37, 99, 235, 0.45);
+        }
+
+        .mode-btn.active[data-mode="Game"] {
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: #ffffff;
+            box-shadow: 0 2px 12px rgba(16, 185, 129, 0.45);
+        }
+
+        /* Left Floating Scene Hierarchy Panel */
+        .hierarchy-panel {
+            position: fixed;
+            top: 60px;
+            left: 16px;
+            width: 260px;
+            max-height: calc(100vh - 270px);
+            z-index: 999;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            color: #e2e8f0;
+        }
+
+        .hierarchy-header {
+            padding: 12px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .hierarchy-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: #94a3b8;
+        }
+
+        .hierarchy-badge {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            font-size: 10px;
+            font-weight: 700;
+            padding: 1px 6px;
+            border-radius: 10px;
+        }
+
+        .hierarchy-refresh-btn {
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 13px;
+            padding: 4px;
+            border-radius: 6px;
+            transition: all 0.15s ease;
+        }
+
+        .hierarchy-refresh-btn:hover {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .hierarchy-tree {
+            padding: 6px 0;
+            margin: 0;
+            list-style: none;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .hierarchy-tree::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .hierarchy-tree::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+
+        .hierarchy-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 12px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            color: #cbd5e1;
+            transition: background 0.15s ease, color 0.15s ease;
+            border-left: 2px solid transparent;
+        }
+
+        .hierarchy-item:hover {
+            background: rgba(255, 255, 255, 0.06);
+            color: #ffffff;
+        }
+
+        .hierarchy-item.selected {
+            background: rgba(59, 130, 246, 0.18);
+            color: #60a5fa;
+            border-left-color: #3b82f6;
+            font-weight: 600;
+        }
+
+        .node-type-icon {
+            font-size: 13px;
+            width: 16px;
+            text-align: center;
+        }
+
+        .node-name {
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .node-visibility-btn {
+            background: transparent;
+            border: none;
+            color: rgba(255, 255, 255, 0.5);
+            cursor: pointer;
+            font-size: 11px;
+            padding: 2px 4px;
+            border-radius: 4px;
+            opacity: 0.6;
+            transition: opacity 0.15s ease;
+        }
+
+        .node-visibility-btn:hover {
+            opacity: 1;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .hierarchy-empty {
+            padding: 20px 16px;
+            text-align: center;
+            font-size: 12px;
+            color: #64748b;
+            font-style: italic;
+        }
+
+        /* Right Floating Properties Panel */
+        .properties-panel {
+            position: fixed;
+            top: 60px;
+            right: 16px;
+            width: 270px;
+            max-height: calc(100vh - 270px);
+            z-index: 999;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            color: #e2e8f0;
+        }
+
+        .properties-header {
+            padding: 12px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .properties-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: #94a3b8;
+            width: 100%;
+        }
+
+        .properties-badge {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            font-size: 10px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            margin-left: auto;
+            max-width: 130px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-transform: none;
+        }
+
+        .properties-content {
+            padding: 12px;
+            overflow-y: auto;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .properties-content::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .properties-content::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+
+        .prop-group {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .prop-group-title {
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: #3b82f6;
+            margin-bottom: 2px;
+        }
+
+        .prop-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .prop-label {
+            font-size: 11px;
+            font-weight: 500;
+            color: #94a3b8;
+            width: 65px;
+        }
+
+        .prop-input-group {
+            display: flex;
+            gap: 4px;
+            flex: 1;
+        }
+
+        .prop-number-input {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            color: #ffffff;
+            font-size: 11px;
+            padding: 4px 6px;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        .prop-number-input:focus {
+            border-color: #3b82f6;
+        }
+
+        .prop-text-input {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            color: #ffffff;
+            font-size: 11px;
+            padding: 4px 8px;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.15s ease;
+        }
+
+        .prop-text-input:focus {
+            border-color: #3b82f6;
+        }
+
+        .properties-empty {
+            padding: 24px 12px;
+            text-align: center;
+            font-size: 12px;
+            color: #64748b;
+            font-style: italic;
+        }
+
+        /* Bottom Floating Asset Browser Panel */
+        .asset-browser-panel {
+            position: fixed;
+            bottom: 16px;
+            left: 290px;
+            right: 16px;
+            height: 180px;
+            z-index: 998;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .asset-browser-panel.collapsed {
+            transform: translateY(calc(100% - 38px));
+        }
+
+        .browser-header {
+            padding: 8px 14px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            background: rgba(255, 255, 255, 0.02);
+            gap: 12px;
+        }
+
+        .browser-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
+            color: #94a3b8;
+            white-space: nowrap;
+        }
+
+        .browser-back-btn {
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            color: #ffffff;
+            border-radius: 6px;
+            padding: 2px 6px;
+            font-size: 11px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.15s ease;
+        }
+
+        .browser-back-btn:hover {
+            background: rgba(59, 130, 246, 0.3);
+        }
+
+        .asset-project-badge {
+            font-size: 9px;
+            font-weight: 500;
+            color: #64748b;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 2px 6px;
+            border-radius: 6px;
+            max-width: 220px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-transform: none;
+            letter-spacing: normal;
+        }
+
+        .browser-tabs {
+            display: flex;
+            gap: 4px;
+            overflow-x: auto;
+        }
+
+        .browser-tab {
+            background: transparent;
+            color: #94a3b8;
+            border: none;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .browser-tab:hover {
+            color: #ffffff;
+            background: rgba(255, 255, 255, 0.06);
+        }
+
+        .browser-tab.active {
+            background: rgba(59, 130, 246, 0.2);
+            color: #60a5fa;
+        }
+
+        .browser-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .browser-search {
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 8px;
+            padding: 4px 10px;
+            font-size: 11px;
+            color: #ffffff;
+            outline: none;
+            width: 140px;
+            transition: border-color 0.15s ease;
+        }
+
+        .browser-search:focus {
+            border-color: #3b82f6;
+        }
+
+        .browser-collapse-btn {
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 2px 4px;
+            border-radius: 4px;
+            transition: color 0.15s ease;
+        }
+
+        .browser-collapse-btn:hover {
+            color: #ffffff;
+        }
+
+        .asset-grid {
+            padding: 12px;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+            gap: 10px;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .asset-grid::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .asset-grid::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+
+        .asset-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 10px;
+            padding: 10px 6px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            cursor: pointer;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .asset-card:hover {
+            background: rgba(59, 130, 246, 0.12);
+            border-color: rgba(59, 130, 246, 0.4);
+            transform: translateY(-2px);
+        }
+
+        .asset-card.selected {
+            background: rgba(59, 130, 246, 0.2);
+            border-color: #3b82f6;
+        }
+
+        .asset-card.drag-over {
+            background: rgba(59, 130, 246, 0.25) !important;
+            border-color: #3b82f6 !important;
+            box-shadow: 0 0 16px rgba(59, 130, 246, 0.4);
+            transform: scale(1.04);
+        }
+
+        .asset-icon {
+            font-size: 22px;
+        }
+
+        .asset-name {
+            font-size: 11px;
+            font-weight: 500;
+            color: #cbd5e1;
+            text-align: center;
+            word-break: break-all;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .asset-name-input {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #3b82f6;
+            border-radius: 4px;
+            color: #ffffff;
+            font-size: 11px;
+            font-family: inherit;
+            text-align: center;
+            width: 90%;
+            padding: 2px 4px;
+            outline: none;
+        }
+
+        .asset-size {
+            font-size: 9px;
+            color: #64748b;
+        }
+
+        .asset-grid-empty {
+            grid-column: 1 / -1;
+            padding: 20px;
+            text-align: center;
+            font-size: 12px;
+            color: #64748b;
+            font-style: italic;
+        }
+
+        /* Context Menu */
+        .asset-context-menu {
+            position: fixed;
+            z-index: 10000;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 12px;
+            padding: 6px;
+            box-shadow: 0 10px 38px rgba(0, 0, 0, 0.6);
+            display: none;
+            flex-direction: column;
+            gap: 2px;
+            min-width: 140px;
+        }
+
+        .asset-context-menu.active {
+            display: flex;
+        }
+
+        .menu-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 12px;
+            font-size: 12px;
+            font-weight: 500;
+            color: #e2e8f0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s ease, color 0.15s ease;
+        }
+
+        .menu-item:hover {
+            background: rgba(59, 130, 246, 0.25);
+            color: #ffffff;
+        }
+
+        .menu-item.danger:hover {
+            background: rgba(239, 68, 68, 0.25);
+            color: #fca5a5;
+        }
+
+        .menu-divider {
+            height: 1px;
+            background: rgba(255, 255, 255, 0.08);
+            margin: 4px 0;
+        }
+
+        /* Save Notification Toast */
+        .save-toast {
+            position: fixed;
+            bottom: 210px;
+            right: 24px;
+            z-index: 10001;
+            background: rgba(16, 185, 129, 0.9);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #ffffff;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            box-shadow: 0 6px 24px rgba(16, 185, 129, 0.4);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: opacity 0.25s ease, transform 0.25s ease;
+            pointer-events: none;
+        }
+
+        .save-toast.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* FPS Overlay */
+        #fps {
+            color: rgba(255, 255, 255, 0.7);
+            position: absolute;
+            z-index: 100;
+            left: 12px;
+            top: 12px;
+            margin: 0;
+            font-size: 13px;
+            font-weight: 600;
+            font-family: monospace;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 4px 8px;
+            border-radius: 6px;
+            backdrop-filter: blur(6px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+    </style>
 </head>
 
-<style>
-    html,
-    body {
-        margin: 0;
-        position: absolute;
-        overflow: hidden;
-    }
-
-    #viewport {
-        outline: none;
-        border: none;
-    }
-</style>
-
 <body>
+    <!-- Top Mode Toggle Bar & Scene Badge -->
+    <div class="mode-bar">
+        <div id="top-scene-badge" class="scene-badge" title="Active Scene">
+            <span>🎬</span>
+            <span id="top-scene-name">MainLevel</span>
+        </div>
+        <div class="mode-divider"></div>
+        <button id="btn-mode-editor" class="mode-btn active" data-mode="Editor">Editor</button>
+        <button id="btn-mode-game" class="mode-btn" data-mode="Game">Game</button>
+    </div>
+
+    <!-- Left Floating Hierarchy Panel -->
+    <div class="hierarchy-panel">
+        <div class="hierarchy-header">
+            <div class="hierarchy-title">
+                <span>📁</span>
+                <span>Hierarchy</span>
+                <span id="hierarchy-node-count" class="hierarchy-badge">0</span>
+            </div>
+            <button id="btn-refresh-hierarchy" class="hierarchy-refresh-btn" title="Refresh Hierarchy">🔄</button>
+        </div>
+        <ul id="hierarchy-tree" class="hierarchy-tree"></ul>
+    </div>
+
+    <!-- Right Floating Properties / Inspector Panel -->
+    <div id="properties-panel" class="properties-panel">
+        <div class="properties-header">
+            <div class="properties-title">
+                <span>⚙️</span>
+                <span>Inspector</span>
+                <span id="prop-object-name" class="properties-badge">No Selection</span>
+            </div>
+        </div>
+        <div id="properties-content" class="properties-content">
+            <div class="properties-empty">Select an object to inspect properties</div>
+        </div>
+    </div>
+
+    <!-- Bottom Floating Asset Browser Panel -->
+    <div id="asset-browser-panel" class="asset-browser-panel">
+        <div class="browser-header">
+            <div class="browser-title">
+                <button id="btn-browser-back" class="browser-back-btn" title="Back to parent folder">⬅️</button>
+                <span>📂</span>
+                <span>Assets</span>
+                <span id="asset-project-path" class="asset-project-badge">C:\Users\Windows\Documents\Eunoia Projects</span>
+            </div>
+            <div class="browser-tabs">
+                <button class="browser-tab active" data-category="all">All</button>
+                <button class="browser-tab" data-category="mesh">Meshes</button>
+                <button class="browser-tab" data-category="material">Materials</button>
+                <button class="browser-tab" data-category="texture">Textures</button>
+                <button class="browser-tab" data-category="script">Scripts</button>
+                <button class="browser-tab" data-category="scene">Scenes</button>
+            </div>
+            <div class="browser-controls">
+                <input id="asset-search-input" type="text" class="browser-search" placeholder="Search assets..." />
+                <button id="btn-toggle-browser" class="browser-collapse-btn" title="Toggle Panel">🔽</button>
+            </div>
+        </div>
+        <div id="asset-grid" class="asset-grid"></div>
+    </div>
+
+    <!-- Floating Asset Context Menu -->
+    <div id="asset-context-menu" class="asset-context-menu">
+        <div class="menu-item" id="ctx-new-folder">
+            <span>📁</span>
+            <span>New Folder</span>
+        </div>
+        <div class="menu-item" id="ctx-new-scene">
+            <span>🎬</span>
+            <span>New Scene</span>
+        </div>
+        <div class="menu-item" id="ctx-rename" style="display: none;">
+            <span>✏️</span>
+            <span>Rename</span>
+        </div>
+        <div class="menu-item danger" id="ctx-delete" style="display: none;">
+            <span>🗑️</span>
+            <span>Delete</span>
+        </div>
+        <div class="menu-divider"></div>
+        <div class="menu-item" id="ctx-refresh">
+            <span>🔄</span>
+            <span>Refresh</span>
+        </div>
+    </div>
+
+    <!-- Floating Save Notification Toast -->
+    <div id="save-toast" class="save-toast">
+        <span>💾</span>
+        <span id="save-toast-msg">Scene Saved</span>
+    </div>
+
     <canvas id="viewport" width="1080" height="720"></canvas>
-    <h1 id="fps" style="color: white; position: absolute; z-index: 100; left: 1px; top: 1px; margin: 0;">FPS</h1>
+    <div id="fps">FPS</div>
 </body>
 <script type="module" src="index.ts"></script>
 
