@@ -32,6 +32,33 @@ export default function ViewportCamera() {
 
 }
 
+export function ResetViewportCamera() {
+    const camTN = EngineRegistry.EunoiaEngine_Camera_TN as TransformNode;
+    if (camTN) {
+        camTN.position.set(0, 2, -10);
+        camTN.rotation.set(0, 0, 0);
+    }
+    if (EngineRegistry.EunoiaEngine_Camera) {
+        (EngineRegistry.EunoiaEngine_Camera as FreeCamera).position.set(0, 0, 0);
+        (EngineRegistry.EunoiaEngine_Camera as FreeCamera).rotation.set(0, 0, 0);
+    }
+    targetRotation.x = 0;
+    targetRotation.y = 0;
+    currentRotation.x = 0;
+    currentRotation.y = 0;
+    currentVelocity.x = 0;
+    currentVelocity.y = 0;
+    currentVelocity.z = 0;
+    looking = false;
+    for (const key in moves) {
+        moves[key as keyof typeof moves] = 0;
+    }
+    EngineRegistry.RequestRender?.(15);
+}
+
+EngineRegistry.ResetViewportCamera = ResetViewportCamera;
+EngineRegistry.IsRightClickLooking = () => looking;
+
 // Controls
 
 let events: {
@@ -67,6 +94,7 @@ export function ViewportControlsDisable() {
         (EngineRegistry.EunoiaEngine_Scene as Scene).onPointerObservable.remove(events.endEvent);
     }
     for (const index in moves) moves[index as keyof typeof moves] = 0;
+    looking = false;
     if (EngineRegistry.EunoiaEngine_Renderers) {
         EngineRegistry.EunoiaEngine_Renderers =
             EngineRegistry.EunoiaEngine_Renderers.filter((renderer: any) => renderer !== ViewportControlsUpdate && renderer !== ViewportLooksControlsUpdate);
@@ -103,7 +131,16 @@ function ViewportLooksControlsDown(pi: PointerInfo, e: EventState) {
 function ViewportLooksControlsUp(pi: PointerInfo, e: EventState) {
     if (pi.event.button === 2 && pi.type === PointerEventTypes.POINTERUP) {
         looking = false;
-        document.exitPointerLock();
+        // Reset WASD moves when right mouse button is released
+        moves.w = 0;
+        moves.a = 0;
+        moves.s = 0;
+        moves.d = 0;
+        moves.q = 0;
+        moves.e = 0;
+        if (document.pointerLockElement) {
+            document.exitPointerLock();
+        }
         EngineRegistry.RequestRender?.(15);
     }
 }
@@ -153,14 +190,15 @@ function ViewportControlsUpdate() {
     const camTN = EngineRegistry.EunoiaEngine_Camera_TN as TransformNode;
     if (!camTN) return;
 
-    const targetZ = (moves.w - moves.s) * moveSpeed;
-    const targetX = (moves.d - moves.a) * moveSpeed;
-    const targetY = (moves.e - moves.q) * moveSpeed;
+    // Only set movement targets if right mouse button is currently held
+    const targetZ = looking ? (moves.w - moves.s) * moveSpeed : 0;
+    const targetX = looking ? (moves.d - moves.a) * moveSpeed : 0;
+    const targetY = looking ? (moves.e - moves.q) * moveSpeed : 0;
 
-    const isInputActive = moves.w || moves.a || moves.s || moves.d || moves.q || moves.e;
+    const isInputActive = looking && (moves.w || moves.a || moves.s || moves.d || moves.q || moves.e);
     const isMoving = Math.abs(currentVelocity.x) > 0.0001 || Math.abs(currentVelocity.y) > 0.0001 || Math.abs(currentVelocity.z) > 0.0001;
 
-    // Early exit if completely stationary
+    // Early exit if not right-click holding and movement has reached rest
     if (!isInputActive && !isMoving) return;
 
     const deltaSec = ((EngineRegistry.EunoiaEngine_Engine as Engine)?.getDeltaTime() ?? 16.6) / 1000;
@@ -184,6 +222,7 @@ function ViewportControlsUpdate() {
 }
 
 function KeyDown(e: KeyboardEvent) {
+    if (!looking) return; // Only process movement keys when Right Mouse Button is held down
     if (e.key === 'w' || e.key === 'W') moves.w = 1;
     if (e.key === 'a' || e.key === 'A') moves.a = 1;
     if (e.key === 's' || e.key === 'S') moves.s = 1;
@@ -200,5 +239,4 @@ function KeyUp(e: KeyboardEvent) {
     if (e.key === 'd' || e.key === 'D') moves.d = 0;
     if (e.key === 'q' || e.key === 'Q') moves.q = 0;
     if (e.key === 'e' || e.key === 'E') moves.e = 0;
-    EngineRegistry.RequestRender?.(15);
 }

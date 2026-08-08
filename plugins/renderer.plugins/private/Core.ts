@@ -2,6 +2,7 @@ import { Engine, Scene } from "@babylonjs/core";
 import ViewportResize from "../../engine.plugins/private/ViewportResize";
 import EngineRegistry from "../../../engine/registry.plugins";
 import EngineStates from "../../../engine/states.engine";
+import { processGameStart, processGameUpdate, resetGameScriptsState } from "./Renderer";
 
 EngineRegistry.EunoiaEngine_Renderer = null;
 EngineRegistry.EunoiaEngine_Renderers ??= [];
@@ -10,6 +11,7 @@ let isCursorDown = false;
 let renderRequestedFrames = 15;
 let listenersInitialized = false;
 let isLoopRunning = false;
+let previousMode: string = 'Editor';
 
 export function RequestRender(frames: number = 15) {
     renderRequestedFrames = Math.max(renderRequestedFrames, frames);
@@ -37,7 +39,15 @@ function stopRenderLoop() {
 function onRenderLoopTick() {
     const mode = EngineStates.Mode ?? 'Editor';
 
+    // Handle mode state transitions for scripts
+    if (previousMode === 'Game' && mode === 'Editor') {
+        resetGameScriptsState();
+    }
+    previousMode = mode;
+
     if (mode === 'Game') {
+        processGameStart();
+        processGameUpdate();
         renderFrame();
     } else {
         // Mode === 'Editor': render active interaction or requested countdown frames
