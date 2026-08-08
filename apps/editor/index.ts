@@ -1,13 +1,13 @@
 import { Color3, CreateBox, CreateGround, PointLight, Vector3 } from "@babylonjs/core";
-import EunoiaEngine_Camera from "../../plugins/camera";
-import EunoiaEngine_Engine from "../../plugins/engine";
-import EunoiaEngine_Renderer from "../../plugins/renderer";
-import EunoiaEngine_Scene from "../../plugins/scene";
-import EunoiaEngine_Stats from "../../plugins/stats";
-import EunoiaEngine_Meshes from "../../plugins/meshes";
-import EunoiaEngine_Light from "../../plugins/lights";
-import EunoiaEngine_Shadows from "../../plugins/shadows";
-import EunoiaEngine_Materials from "../../plugins/materials";
+import EunoiaEngine_Camera from "../../plugins/camera.plugins";
+import EunoiaEngine_Engine from "../../plugins/engine.plugins";
+import EunoiaEngine_Renderer from "../../plugins/renderer.plugins";
+import EunoiaEngine_Scene from "../../plugins/scene.plugins";
+import EunoiaEngine_Stats from "../../plugins/stats.plugins";
+import EunoiaEngine_Meshes from "../../plugins/meshes.plugins";
+import EunoiaEngine_Light from "../../plugins/lights.plugins";
+import EunoiaEngine_Shadows from "../../plugins/shadows.plugins";
+import EunoiaEngine_Materials from "../../plugins/materials.plugins";
 
 
 async function start() {

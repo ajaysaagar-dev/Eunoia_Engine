@@ -13,6 +13,6 @@
 		"engine": "electron ."
 	},
 	"dependencies": {
-		"@ajaysaagar-dev/eunioaengine-engine": "link:plugins/engine"
+		"@ajaysaagar-dev/eunioaengine-engine": "link:plugins/engine.plugins"
 	}
 }
