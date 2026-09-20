@@ -673,6 +673,12 @@ struct RenderBatch {
 
             for (const auto& mv : obj.mesh.vertices) {
                 glm::vec4 worldPos = model * glm::vec4(mv.pos, 1.0f);
+                // Task 3 – defense in depth: if the model matrix is corrupted (NaN/Inf),
+                // fall back to local-space position rather than sending NaN to the GPU.
+                if (std::isnan(worldPos.x) || std::isnan(worldPos.y) || std::isnan(worldPos.z) ||
+                    !std::isfinite(worldPos.x) || !std::isfinite(worldPos.y) || !std::isfinite(worldPos.z)) {
+                    worldPos = glm::vec4(mv.pos, 1.0f);
+                }
                 glm::vec3 n = normalMatrix * mv.normal;
                 float nLen = glm::length(n);
                 glm::vec3 worldNormal = (nLen > 1e-6f && !std::isnan(nLen)) ? (n / nLen) : glm::vec3(0.0f, 1.0f, 0.0f);

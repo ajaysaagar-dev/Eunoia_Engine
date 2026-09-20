@@ -810,6 +810,34 @@ private:
                 obj.mesh.indices.clear();
             }
 
+            // --- Task 4: sanitize already-corrupted scenes on load ---
+            // Silently fix any NaN/Inf/zero-scale saved in old .escn files so they
+            // never reach the GPU and never trigger DEVICE_HUNG again on load.
+            {
+                bool corrupted = false;
+                auto sanitizeVec3 = [&](glm::vec3& v, const glm::vec3& fallback, const char* fieldName) {
+                    if (std::isnan(v.x) || std::isnan(v.y) || std::isnan(v.z) ||
+                        !std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
+                        v = fallback;
+                        corrupted = true;
+                        (void)fieldName; // used in AddLog below
+                    }
+                };
+                sanitizeVec3(obj.position, glm::vec3(0.0f), "position");
+                sanitizeVec3(obj.rotation, glm::vec3(0.0f), "rotation");
+                sanitizeVec3(obj.scale,    glm::vec3(1.0f), "scale");
+                // Also clamp scale axes to the same minimum used by RenderGizmo so
+                // zero/negative axes never silently make this object's world matrix singular.
+                const float kMinScale = 1e-4f;
+                obj.scale = glm::max(obj.scale, glm::vec3(kMinScale));
+                if (corrupted) {
+                    // Note: we can't call g_engineUI here (header-only, no global access),
+                    // so write to stderr; the output log will pick it up at next frame.
+                    std::cerr << "[SceneLoad] WARNING: Actor \"" << obj.name
+                              << "\" (id=" << obj.id << ") had NaN/Inf transform on load — sanitized.\n";
+                }
+            }
+
             scene.objects.push_back(obj);
             searchPos = objEnd + 1;
         }

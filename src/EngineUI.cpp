@@ -3326,14 +3326,27 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
     if (ImGuizmo::IsUsing() || manipulated) {
         obj->autoRotate = false; // Pause and disable auto-spinning when user is moving object
 
+        // --- Task 1: Guard parent-inverse against degenerate/singular parent transforms ---
         glm::mat4 localMatrix = modelMatrix;
         if (obj->parentId != -1) {
             glm::mat4 parentWorld = scene.GetWorldMatrix(obj->parentId);
-            localMatrix = glm::inverse(parentWorld) * modelMatrix;
+            float parentDet = glm::determinant(parentWorld);
+            if (std::abs(parentDet) > 1e-6f && !std::isnan(parentDet)) {
+                localMatrix = glm::inverse(parentWorld) * modelMatrix;
+            }
+            // else: parent transform is degenerate — fall back to using modelMatrix
+            // as-is (world space) rather than propagating Inf/NaN into localMatrix.
         }
+
+        // Helper lambda: check a vec3 is safe (no NaN, no Inf)
+        auto isVec3Valid = [](const glm::vec3& v) -> bool {
+            return !std::isnan(v.x) && !std::isnan(v.y) && !std::isnan(v.z) &&
+                    std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
 
         if (currentGizmoOperation == ImGuizmo::TRANSLATE) {
             // Directly extract translation without Euler angle decomposition to prevent jitter
+            glm::vec3 newPos;
             if (gizmoUseCenter && !obj->mesh.vertices.empty()) {
                 glm::vec3 minB(1e9f), maxB(-1e9f);
                 for (const auto& v : obj->mesh.vertices) {
@@ -3341,17 +3354,28 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
                     maxB = glm::max(maxB, v.pos);
                 }
                 glm::vec3 localCenterOffset = (minB + maxB) * 0.5f;
-                obj->position = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]) - localCenterOffset;
+                newPos = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]) - localCenterOffset;
             } else {
-                obj->position = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]);
+                newPos = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]);
+            }
+            // Task 2: only apply if the new position is finite/non-NaN
+            if (isVec3Valid(newPos)) {
+                obj->position = newPos;
             }
         } else if (currentGizmoOperation == ImGuizmo::SCALE) {
-            // Directly compute scale vector lengths to prevent rotation drift
-            obj->scale = glm::vec3(
+            // Task 2: guard scale extraction against NaN / non-finite column lengths
+            glm::vec3 newScale(
                 glm::length(glm::vec3(localMatrix[0])),
                 glm::length(glm::vec3(localMatrix[1])),
                 glm::length(glm::vec3(localMatrix[2]))
             );
+            if (isVec3Valid(newScale)) {
+                // Clamp to a small positive minimum so scale can never hit exactly 0
+                // (which would make THIS object's own world matrix singular for future children/gizmo use)
+                const float kMinScale = 1e-4f;
+                obj->scale = glm::max(newScale, glm::vec3(kMinScale));
+            }
+            // else: ignore this frame's gizmo update rather than corrupting obj->scale.
         } else if (currentGizmoOperation == ImGuizmo::ROTATE) {
             float translation[3], rotation[3], scale[3];
             ImGuizmo::DecomposeMatrixToComponents(
@@ -3360,7 +3384,10 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
                 rotation,
                 scale
             );
-            obj->rotation = glm::vec3(rotation[0], rotation[1], rotation[2]);
+            glm::vec3 newRot(rotation[0], rotation[1], rotation[2]);
+            if (isVec3Valid(newRot)) {
+                obj->rotation = newRot;
+            }
         } else {
             float translation[3], rotation[3], scale[3];
             ImGuizmo::DecomposeMatrixToComponents(
@@ -3369,9 +3396,15 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
                 rotation,
                 scale
             );
-            obj->position = glm::vec3(translation[0], translation[1], translation[2]);
-            obj->rotation = glm::vec3(rotation[0], rotation[1], rotation[2]);
-            obj->scale    = glm::vec3(scale[0], scale[1], scale[2]);
+            glm::vec3 newPos(translation[0], translation[1], translation[2]);
+            glm::vec3 newRot(rotation[0], rotation[1], rotation[2]);
+            glm::vec3 newSca(scale[0], scale[1], scale[2]);
+            if (isVec3Valid(newPos)) obj->position = newPos;
+            if (isVec3Valid(newRot)) obj->rotation = newRot;
+            if (isVec3Valid(newSca)) {
+                const float kMinScale = 1e-4f;
+                obj->scale = glm::max(newSca, glm::vec3(kMinScale));
+            }
         }
 
         if (obj->isLight) {

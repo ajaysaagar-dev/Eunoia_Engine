@@ -17,6 +17,13 @@ if not exist "%COMPILER%" (
 echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui...
 "%COMPILER%" -std=c++17 -O2 ^
     "-I%PROJECT_DIR%\include" ^
+    "-I%PROJECT_DIR%\EngineCore\include" ^
+    "-I%PROJECT_DIR%\EnginePlatform\include" ^
+    "-I%PROJECT_DIR%\EngineRHI\include" ^
+    "-I%PROJECT_DIR%\EngineRenderer\include" ^
+    "-I%PROJECT_DIR%\EngineScene\include" ^
+    "-I%PROJECT_DIR%\EngineAssets\include" ^
+    "-I%PROJECT_DIR%\Editor\include" ^
     "-I%PROJECT_DIR%\deps\tinyobj" ^
     "-I%PROJECT_DIR%\deps\cgltf" ^
     "-I%PROJECT_DIR%\deps\ufbx" ^
