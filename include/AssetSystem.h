@@ -1,0 +1,10 @@
+#pragma once
+#include "AssetID.h"
+#include "AssetType.h"
+#include "AssetPath.h"
+#include "AssetMetadata.h"
+#include "AssetHandle.h"
+#include "SoftAssetReference.h"
+#include "AssetEvents.h"
+#include "AssetRegistry.h"
+#include "AssetManager.h"
