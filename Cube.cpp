@@ -148,8 +148,10 @@ static void* g_pConstantMapped = nullptr;
 static uint32_t g_currentVertexCount = 0;
 static uint32_t g_currentIndexCount = 0;
 
-// ImGui SRV allocation tracking
+// ImGui & Engine SRV allocation tracking
+static const UINT SRV_HEAP_CAPACITY = 8192; // Must match srvHeapDesc.NumDescriptors in initD3D12
 static UINT g_srvDescriptorAllocIndex = 0;
+static bool g_deviceLost = false;
 
 // Game Engine State
 static Scene g_scene;
@@ -245,14 +247,42 @@ inline D3D12_RESOURCE_DESC CreateBufferResourceDesc(UINT64 size)
 	return desc;
 }
 
+// Returns false (and logs once) if the heap is full instead of writing OOB.
+bool TryAllocSrvDescriptors(UINT count, UINT& outBaseIndex)
+{
+	if (g_srvDescriptorAllocIndex + count > SRV_HEAP_CAPACITY)
+	{
+		static bool warned = false;
+		if (!warned)
+		{
+			std::cerr << "[SRV HEAP] Exhausted (" << SRV_HEAP_CAPACITY
+			          << " descriptors). Further textures/materials will use fallbacks.\n";
+			g_engineUI.AddLog("LogRecovery",
+				"SRV descriptor heap is full — new textures/materials will show as fallback until you restart or free assets.", 2);
+			warned = true;
+		}
+		return false;
+	}
+	outBaseIndex = g_srvDescriptorAllocIndex;
+	g_srvDescriptorAllocIndex += count;
+	return true;
+}
+
 // ImGui SRV Descriptor Allocator Callbacks
 static void ImGui_SrvAlloc(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HANDLE* out_cpu, D3D12_GPU_DESCRIPTOR_HANDLE* out_gpu)
 {
+	UINT idx = 0;
+	if (!TryAllocSrvDescriptors(1, idx))
+	{
+		// Safe fallback: return heap slot 0
+		*out_cpu = info->SrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
+		*out_gpu = info->SrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
+		return;
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = info->SrvDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = info->SrvDescriptorHeap->GetGPUDescriptorHandleForHeapStart();
-	cpu.ptr += (SIZE_T)g_srvDescriptorAllocIndex * g_srvDescriptorSize;
-	gpu.ptr += (UINT64)g_srvDescriptorAllocIndex * g_srvDescriptorSize;
-	g_srvDescriptorAllocIndex++;
+	cpu.ptr += (SIZE_T)idx * g_srvDescriptorSize;
+	gpu.ptr += (UINT64)idx * g_srvDescriptorSize;
 	*out_cpu = cpu;
 	*out_gpu = gpu;
 }
@@ -279,8 +309,9 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 		HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
 		if (FAILED(removedReason))
 		{
+			g_deviceLost = true;
 			std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
-			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Attempting pipeline recovery...", 3);
+			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
 		}
 		else
 		{
@@ -381,7 +412,12 @@ DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
 
 	uploadBuf->Release();
 
-	UINT descIdx = g_srvDescriptorAllocIndex++;
+	UINT descIdx = 0;
+	if (!TryAllocSrvDescriptors(1, descIdx))
+	{
+		tex->Release();
+		return result; // Returns empty DX12GpuTexture so caller falls back safely
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE cpu = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
 	D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
 	cpu.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
@@ -487,8 +523,17 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 	DX12GpuTexture texMetal  = GetOrLoadGPUTexture(metal,  g_fallbackMetallic);
 	DX12GpuTexture texAO     = GetOrLoadGPUTexture(ao,     g_fallbackAO);
 
-	UINT baseIdx = g_srvDescriptorAllocIndex;
-	g_srvDescriptorAllocIndex += 5;
+	static D3D12_GPU_DESCRIPTOR_HANDLE s_fallbackTable = {};
+	static bool s_hasFallbackTable = false;
+
+	UINT baseIdx = 0;
+	if (!TryAllocSrvDescriptors(5, baseIdx))
+	{
+		if (s_hasFallbackTable) {
+			return s_fallbackTable;
+		}
+		return g_srvDescHeap ? g_srvDescHeap->GetGPUDescriptorHandleForHeapStart() : D3D12_GPU_DESCRIPTOR_HANDLE{};
+	}
 
 	D3D12_CPU_DESCRIPTOR_HANDLE baseCpu = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
 	D3D12_GPU_DESCRIPTOR_HANDLE baseGpu = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
@@ -500,6 +545,11 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 		D3D12_CPU_DESCRIPTOR_HANDLE dst = baseCpu;
 		dst.ptr += (SIZE_T)i * g_srvDescriptorSize;
 		g_d3dDevice->CopyDescriptorsSimple(1, dst, slots[i].cpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	}
+
+	if (!s_hasFallbackTable) {
+		s_fallbackTable = baseGpu;
+		s_hasFallbackTable = true;
 	}
 
 	g_materialDescriptorTables[key] = baseGpu;
@@ -624,7 +674,11 @@ int createShadowResources()
 	g_d3dDevice->CreateDepthStencilView(g_shadowDepthBuffer, &dsvDesc, g_shadowDsvHandle);
 
 	// Create SRV in g_srvDescHeap for shadow map
-	UINT descIdx = g_srvDescriptorAllocIndex++;
+	UINT descIdx = 0;
+	if (!TryAllocSrvDescriptors(1, descIdx))
+	{
+		descIdx = 0;
+	}
 	g_shadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
 	g_shadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
 	g_shadowSrvCpuHandle.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
@@ -743,7 +797,7 @@ int initD3D12(HWND hwnd)
 	g_dsvDescriptorSize = g_d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
 
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-	srvHeapDesc.NumDescriptors = 2048;
+	srvHeapDesc.NumDescriptors = SRV_HEAP_CAPACITY; // 8192
 	srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	g_d3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&g_srvDescHeap));
@@ -1439,7 +1493,7 @@ void renderFrame()
 	// ----------------------------------------------------
 	// PASS 1: Directional Shadow Depth Map Pass (2048x2048 D32)
 	// ----------------------------------------------------
-	if (g_currentIndexCount > 0 && g_shadowDepthBuffer && g_shadowPipelineState && g_scene.enableShadows)
+	if (!g_deviceLost && g_currentIndexCount > 0 && g_shadowDepthBuffer && g_shadowPipelineState && g_scene.enableShadows)
 	{
 		D3D12_RESOURCE_BARRIER shadowBarrier = CreateTransitionBarrier(
 			g_shadowDepthBuffer,
@@ -1511,7 +1565,7 @@ void renderFrame()
 	g_commandList->SetDescriptorHeaps(1, descriptorHeaps);
 
 	// 1. Draw 3D Scene Primitives with Hardware PBR, Full Texture Resolution & Real-Time Shadows
-	if (g_currentIndexCount > 0)
+	if (!g_deviceLost && g_currentIndexCount > 0)
 	{
 		g_commandList->SetGraphicsRootSignature(g_rootSignature);
 		g_commandList->SetPipelineState(g_pipelineState);
@@ -1575,7 +1629,14 @@ void renderFrame()
 	ID3D12CommandList* commandLists[] = { g_commandList };
 	g_commandQueue->ExecuteCommandLists(1, commandLists);
 
-	g_swapChain->Present(1, 0);
+	HRESULT hrPresent = g_swapChain->Present(1, 0);
+	if (hrPresent == DXGI_ERROR_DEVICE_REMOVED || hrPresent == DXGI_ERROR_DEVICE_RESET)
+	{
+		g_deviceLost = true;
+		HRESULT reason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : hrPresent;
+		std::cerr << "[RECOVERY] Present detected device loss (0x" << std::hex << reason << std::dec << ")\n";
+		g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on Present. Please save work and restart editor.", 3);
+	}
 
 	// Signal fence for current frame
 	const UINT64 currentFenceValue = g_fenceValues[g_frameIndex] + 1;
@@ -2082,25 +2143,65 @@ int main()
 			glfwSetWindowShouldClose(g_window, GLFW_TRUE);
 		}
 
+		// Device Loss Notification Overlay (dev.md Task 3)
+		if (g_deviceLost)
+		{
+			ImGui::OpenPopup("GPU Device Lost");
+			ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+			ImGui::SetNextWindowSize(ImVec2(520, 240), ImGuiCond_Appearing);
+			if (ImGui::BeginPopupModal("GPU Device Lost", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
+			{
+				ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "CRITICAL: GPU Device Was Lost (Driver Reset)");
+				ImGui::Separator();
+				ImGui::Spacing();
+				ImGui::TextWrapped("The graphics driver reset or the GPU device was removed. 3D rendering has been halted to prevent the editor from freezing.");
+				ImGui::Spacing();
+				ImGui::TextWrapped("You can still save your level to avoid losing changes before restarting the editor.");
+				ImGui::Spacing();
+				ImGui::Separator();
+				ImGui::Spacing();
+				if (ImGui::Button("Save Current Level", ImVec2(170, 32)))
+				{
+					g_engineUI.SaveLevel(g_scene);
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Restart / Exit", ImVec2(140, 32)))
+				{
+					glfwSetWindowShouldClose(g_window, GLFW_TRUE);
+				}
+				ImGui::EndPopup();
+			}
+		}
+
 		ImGui::Render();
 
 		// Update 3D Scene GPU Buffers AFTER gizmo has applied any transform changes
-		// Wrap frame work in try/catch so engine can recover from transient errors
-		try {
-			updateSceneGeometry();
-			updateConstantBuffer();
+		// When device is lost, skip 3D scene updates to prevent crashes/stalls
+		if (g_deviceLost)
+		{
+			try {
+				renderFrame();
+			} catch (...) {}
+		}
+		else
+		{
+			try {
+				updateSceneGeometry();
+				updateConstantBuffer();
 
-			// Pre-upload all scene batch textures before the frame command list begins recording
-			PreRenderUploadTextures();
+				// Pre-upload all scene batch textures before the frame command list begins recording
+				PreRenderUploadTextures();
 
-			// Render DirectX 12 Frame
-			renderFrame();
-		} catch (const std::exception& ex) {
-			std::cerr << "[RECOVERY] Frame exception: " << ex.what() << "\n";
-			g_engineUI.AddLog("LogRecovery", std::string("Frame exception caught, skipping frame: ") + ex.what(), 3);
-		} catch (...) {
-			std::cerr << "[RECOVERY] Unknown frame exception\n";
-			g_engineUI.AddLog("LogRecovery", "Unknown frame exception caught, skipping frame", 3);
+				// Render DirectX 12 Frame
+				renderFrame();
+			} catch (const std::exception& ex) {
+				std::cerr << "[RECOVERY] Frame exception: " << ex.what() << "\n";
+				g_engineUI.AddLog("LogRecovery", std::string("Frame exception caught, skipping frame: ") + ex.what(), 3);
+			} catch (...) {
+				std::cerr << "[RECOVERY] Unknown frame exception\n";
+				g_engineUI.AddLog("LogRecovery", "Unknown frame exception caught, skipping frame", 3);
+			}
 		}
 	}
 
