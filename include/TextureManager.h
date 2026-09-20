@@ -52,7 +52,7 @@ private:
     std::filesystem::path m_projectRoot;
 
     TextureManager() {
-        m_projectRoot = "C:\\Projects\\Vulkan-Cube\\projects\\test";
+        m_projectRoot = "C:\\Projects\\Eunoia-Engine\\projects\\test";
     }
 
 public:

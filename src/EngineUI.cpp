@@ -21,8 +21,8 @@ EngineUI::EngineUI() {
     AddLog("LogD3D12", "Hardware Adapter: NVIDIA GeForce RTX 3060 Laptop GPU (Feature Level 12_1)", 0);
     AddLog("LogWorld", "Default Level loaded with 5 initial Actors", 0);
 
-    // Set C:\Projects\Vulkan-Cube\projects\test as root of project for Content Browser
-    std::filesystem::path targetRoot = "C:\\Projects\\Vulkan-Cube\\projects\\test";
+    // Set C:\Projects\Eunoia-Engine\projects\test as root of project for Content Browser
+    std::filesystem::path targetRoot = "C:\\Projects\\Eunoia-Engine\\projects\\test";
     std::error_code ec;
     if (!std::filesystem::exists(targetRoot, ec)) {
         std::filesystem::create_directories(targetRoot, ec);
@@ -165,7 +165,7 @@ std::string EngineUI::ShowSaveFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Vulkan-Cube\\projects\\test";
+    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\projects\\test";
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     if (GetSaveFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -185,7 +185,7 @@ std::string EngineUI::ShowOpenFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Vulkan-Cube\\projects\\test";
+    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\projects\\test";
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -205,7 +205,7 @@ std::string EngineUI::ShowOpenMeshDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Vulkan-Cube\\projects\\test";
+    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\projects\\test";
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
