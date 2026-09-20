@@ -1194,7 +1194,9 @@ bool EngineUI::DrawTransformPill(const char* label, float& value, const glm::vec
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(color.r * 1.15f, color.g * 1.15f, color.b * 1.15f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(color.r * 0.9f, color.g * 0.9f, color.b * 0.9f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
-    if (ImGui::Button(label, ImVec2(20, 0))) {
+    char btnLabel[32];
+    snprintf(btnLabel, sizeof(btnLabel), "%s###btn", label);
+    if (ImGui::Button(btnLabel, ImVec2(20, 0))) {
         value = resetValue;
         modified = true;
     }
@@ -1233,6 +1235,8 @@ void EngineUI::RenderDetails(Scene& scene) {
             ImGui::End();
             return;
         }
+
+        ImGui::PushID(obj->id);
 
         // Actor Header Banner
         if (obj->isLight) {
@@ -1274,19 +1278,24 @@ void EngineUI::RenderDetails(Scene& scene) {
         if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
             bool transformChanged = false;
             // Location
+            ImGui::PushID("Location");
             ImGui::Text("Location");
             transformChanged |= DrawTransformPill("X", obj->position.x, glm::vec4(0.85f, 0.22f, 0.22f, 1.0f), 0.0f);
             transformChanged |= DrawTransformPill("Y", obj->position.y, glm::vec4(0.25f, 0.75f, 0.25f, 1.0f), 0.0f);
             transformChanged |= DrawTransformPill("Z", obj->position.z, glm::vec4(0.22f, 0.50f, 0.90f, 1.0f), 0.0f);
+            ImGui::PopID();
 
             // Rotation
+            ImGui::PushID("Rotation");
             ImGui::Spacing();
             ImGui::Text("Rotation");
             transformChanged |= DrawTransformPill("X", obj->rotation.x, glm::vec4(0.85f, 0.22f, 0.22f, 1.0f), 0.0f, 1.0f);
             transformChanged |= DrawTransformPill("Y", obj->rotation.y, glm::vec4(0.25f, 0.75f, 0.25f, 1.0f), 0.0f, 1.0f);
             transformChanged |= DrawTransformPill("Z", obj->rotation.z, glm::vec4(0.22f, 0.50f, 0.90f, 1.0f), 0.0f, 1.0f);
+            ImGui::PopID();
 
             // Scale
+            ImGui::PushID("Scale");
             ImGui::Spacing();
             ImGui::Text("Scale");
             float prevScaleX = obj->scale.x;
@@ -1299,6 +1308,7 @@ void EngineUI::RenderDetails(Scene& scene) {
             transformChanged |= DrawTransformPill("Y", obj->scale.y, glm::vec4(0.25f, 0.75f, 0.25f, 1.0f), 1.0f, 0.02f);
             transformChanged |= DrawTransformPill("Z", obj->scale.z, glm::vec4(0.22f, 0.50f, 0.90f, 1.0f), 1.0f, 0.02f);
             ImGui::Checkbox("Lock Uniform Scale", &lockAspectScale);
+            ImGui::PopID();
 
             if (transformChanged && obj->isLight && obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
                 scene.pointLights[obj->lightId].position = scene.GetWorldPosition(*obj);
@@ -1896,6 +1906,8 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::DragFloat3("Speed (deg/s)", &obj->autoRotateSpeed.x, 1.0f, -360.0f, 360.0f);
             }
         }
+
+        ImGui::PopID();
     }
     ImGui::End();
 }
