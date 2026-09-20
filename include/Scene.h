@@ -145,12 +145,13 @@ public:
         return FindObject(id);
     }
 
-    glm::mat4 GetWorldMatrix(const GameObject& obj) const {
+    glm::mat4 GetWorldMatrix(const GameObject& obj, int depth = 0) const {
         glm::mat4 local = obj.GetLocalMatrix();
+        if (depth > 64) return local;
         if (obj.parentId != -1) {
             const GameObject* parent = FindObjectConst(obj.parentId);
             if (parent && parent->id != obj.id) {
-                return GetWorldMatrix(*parent) * local;
+                return GetWorldMatrix(*parent, depth + 1) * local;
             }
         }
         return local;
@@ -211,6 +212,16 @@ public:
         rotation.x = RAD2DEG * std::atan2(rotM[2][1], rotM[2][2]);
         rotation.y = RAD2DEG * std::atan2(-rotM[2][0], std::sqrt(rotM[2][1] * rotM[2][1] + rotM[2][2] * rotM[2][2]));
         rotation.z = RAD2DEG * std::atan2(rotM[1][0], rotM[0][0]);
+
+        if (std::isnan(translation.x) || std::isinf(translation.x)) translation.x = 0.0f;
+        if (std::isnan(translation.y) || std::isinf(translation.y)) translation.y = 0.0f;
+        if (std::isnan(translation.z) || std::isinf(translation.z)) translation.z = 0.0f;
+        if (std::isnan(rotation.x) || std::isinf(rotation.x)) rotation.x = 0.0f;
+        if (std::isnan(rotation.y) || std::isinf(rotation.y)) rotation.y = 0.0f;
+        if (std::isnan(rotation.z) || std::isinf(rotation.z)) rotation.z = 0.0f;
+        if (std::isnan(scale.x) || std::isinf(scale.x) || scale.x < 1e-4f) scale.x = 1.0f;
+        if (std::isnan(scale.y) || std::isinf(scale.y) || scale.y < 1e-4f) scale.y = 1.0f;
+        if (std::isnan(scale.z) || std::isinf(scale.z) || scale.z < 1e-4f) scale.z = 1.0f;
     }
 
     GameObject& AddObject(PrimitiveType type, glm::vec3 pos = {0.0f, 0.5f, 0.0f}, glm::vec3 color = {0.55f, 0.55f, 0.55f}, int parentId = -1) {
@@ -513,19 +524,19 @@ public:
 
         glm::mat4 childWorld = GetWorldMatrix(*child);
 
-        // Remove from old parent
-        if (child->parentId != -1) {
-            GameObject* oldParent = FindObject(child->parentId);
-            if (oldParent) {
-                auto& ch = oldParent->childIds;
-                ch.erase(std::remove(ch.begin(), ch.end(), childId), ch.end());
-            }
+        // Remove from all parents' childIds list to prevent any stale references
+        for (auto& o : objects) {
+            auto& ch = o.childIds;
+            ch.erase(std::remove(ch.begin(), ch.end(), childId), ch.end());
         }
+
         child->parentId = newParentId;
         if (newParentId != -1) {
             GameObject* newParent = FindObject(newParentId);
             if (newParent) {
-                newParent->childIds.push_back(childId);
+                if (std::find(newParent->childIds.begin(), newParent->childIds.end(), childId) == newParent->childIds.end()) {
+                    newParent->childIds.push_back(childId);
+                }
                 glm::mat4 parentWorld = GetWorldMatrix(*newParent);
                 float det = glm::determinant(parentWorld);
                 if (std::abs(det) > 1e-6f && !std::isnan(det)) {
@@ -540,11 +551,16 @@ public:
         }
     }
 
+    void SetParent(int childId, int newParentId) {
+        ReparentObject(childId, newParentId);
+    }
+
     bool IsDescendantOf(int candidateId, int ancestorId) const {
         if (candidateId == -1 || ancestorId == -1) return false;
         if (candidateId == ancestorId) return true;
         const GameObject* node = FindObjectConst(candidateId);
-        while (node) {
+        int depth = 0;
+        while (node && depth++ < 256) {
             if (node->parentId == ancestorId) return true;
             if (node->parentId == -1) break;
             node = FindObjectConst(node->parentId);
@@ -722,7 +738,11 @@ struct RenderBatch {
             }
 
             for (uint32_t idx : obj.mesh.indices) {
-                outIndices.push_back(vertexOffset + idx);
+                if (idx < (uint32_t)obj.mesh.vertices.size()) {
+                    outIndices.push_back(vertexOffset + idx);
+                } else {
+                    outIndices.push_back(vertexOffset);
+                }
             }
 
             RenderBatch b;
@@ -940,6 +960,7 @@ struct RenderBatch {
                 const auto& iList = obj.mesh.indices;
                 for (size_t i = 0; i + 2 < iList.size(); i += 3) {
                     uint32_t i0 = iList[i], i1 = iList[i + 1], i2 = iList[i + 2];
+                    if (i0 >= vList.size() || i1 >= vList.size() || i2 >= vList.size()) continue;
                     glm::vec3 v0 = vList[i0].pos, v1 = vList[i1].pos, v2 = vList[i2].pos;
                     glm::vec3 c = glm::cross(v1 - v0, v2 - v0);
                     float cLen = glm::length(c);
@@ -959,7 +980,9 @@ struct RenderBatch {
                 }
                 for (const auto& kv : edgeMap) {
                     if (kv.second.count == 1 || glm::dot(kv.second.n1, kv.second.n2) < 0.96f) {
-                        edges.push_back({ vList[kv.first.a].pos, vList[kv.first.b].pos });
+                        if (kv.first.a < vList.size() && kv.first.b < vList.size()) {
+                            edges.push_back({ vList[kv.first.a].pos, vList[kv.first.b].pos });
+                        }
                     }
                 }
                 break;

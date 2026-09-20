@@ -16,6 +16,7 @@
 #include <map>
 #include "TextureManager.h"
 #include "MeshImporter.h"
+#include "EngineLogger.h"
 
 EngineUI::EngineUI() {
     AddLog("LogInit", "Eunoia-Editor Initialized (DirectX 12)", 2);
@@ -372,12 +373,11 @@ void EngineUI::RenderViewportDropTarget(Scene& level, OrbitCamera& camera) {
     if (!curPayload || !curPayload->IsDataType("ASSET_ID")) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float curBottomH = (showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f);
-    float bottomY = vp->Pos.y + vp->Size.y - curBottomH - uiMargin;
-    float vpX = vp->Pos.x + uiMargin + (showOutliner ? leftSidebarWidth + uiGap : 0.0f);
-    float vpY = vp->Pos.y + uiMargin + topBarHeight + uiGap;
-    float vpW = (vp->Pos.x + vp->Size.x - uiMargin - (showDetails ? rightSidebarWidth + uiGap : 0.0f)) - vpX;
-    float vpH = (curBottomH > 0.0f ? (bottomY - uiGap) : (vp->Pos.y + vp->Size.y - uiMargin)) - vpY;
+    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    float vpX = vp->Pos.x + vpRect.x;
+    float vpY = vp->Pos.y + vpRect.y;
+    float vpW = vpRect.width;
+    float vpH = vpRect.height;
 
     if (vpW <= 10.0f || vpH <= 10.0f) return;
 
@@ -395,7 +395,7 @@ void EngineUI::RenderViewportDropTarget(Scene& level, OrbitCamera& camera) {
         if (ImGui::BeginDragDropTarget()) {
             ImDrawList* dl = ImGui::GetForegroundDrawList();
             dl->AddRect(ImVec2(vpX + 4.0f, vpY + 4.0f), ImVec2(vpX + vpW - 4.0f, vpY + vpH - 4.0f),
-                        IM_COL32(50, 180, 255, 180), 8.0f, 0, 2.5f);
+                        IM_COL32(50, 180, 255, 180), 0.0f, 0, 2.5f);
 
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ASSET_ID")) {
                 std::string idStr = (const char*)payload->Data;
@@ -405,7 +405,7 @@ void EngineUI::RenderViewportDropTarget(Scene& level, OrbitCamera& camera) {
                     if (meta->type == AssetType::Mesh) {
                         std::filesystem::path fullMesh = contentRootPath / meta->sourcePath;
                         ImVec2 mousePos = ImGui::GetMousePos();
-                        glm::vec3 spawnPos = CalculateDropSpawnPosition(camera, mousePos.x, mousePos.y, vp->Size.x, vp->Size.y);
+                        glm::vec3 spawnPos = CalculateDropSpawnPosition(camera, mousePos.x - vpX, mousePos.y - vpY, vpW, vpH);
 
                         GameObject& newObj = level.AddImportedMesh(fullMesh.string(), spawnPos);
                         level.selectedId = newObj.id;
@@ -431,14 +431,14 @@ void EngineUI::SetupTheme() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
-    // Blueprint Styling matching UI_Ref.svg (fill="#2B2B2B", rx=8)
-    style.WindowRounding    = 8.0f;
-    style.ChildRounding     = 6.0f;
-    style.FrameRounding     = 5.0f;
-    style.PopupRounding     = 6.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.GrabRounding      = 4.0f;
-    style.TabRounding       = 6.0f;
+    // Blueprint Styling matching UI_Ref.svg (fill="#2B2B2B", flush docked panels)
+    style.WindowRounding    = 0.0f;
+    style.ChildRounding     = 2.0f;
+    style.FrameRounding     = 3.0f;
+    style.PopupRounding     = 4.0f;
+    style.ScrollbarRounding = 3.0f;
+    style.GrabRounding      = 3.0f;
+    style.TabRounding       = 4.0f;
 
     style.WindowBorderSize  = 1.0f;
     style.FrameBorderSize   = 0.0f;
@@ -601,15 +601,15 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
 
     // 9. Interactive 3D Transform Gizmo
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    RenderGizmo(scene, camera, vp->Size.x, vp->Size.y);
+    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    RenderGizmo(scene, camera, vpRect.width, vpRect.height);
 }
 
 void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float margin = uiMargin;
-    float topBarW = vp->Size.x - 2.0f * margin;
+    float topBarW = vp->Size.x;
 
-    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + margin, vp->Pos.y + margin), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(topBarW, topBarHeight), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -617,7 +617,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar;
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     if (ImGui::Begin("Menu Bar", nullptr, flags)) {
         if (ImGui::BeginMenuBar()) {
             // Eunoia Brand Badge
@@ -811,9 +811,9 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
 
 void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float sidebarsY = vp->Pos.y + uiMargin + topBarHeight + uiGap;
-    float overlayX = vp->Pos.x + uiMargin + (showOutliner ? leftSidebarWidth + uiGap : 0.0f) + 12.0f;
-    float overlayY = sidebarsY + 12.0f;
+    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    float overlayX = vp->Pos.x + vpRect.x + 8.0f;
+    float overlayY = vp->Pos.y + vpRect.y + 8.0f;
 
     // Floating Viewport Toolbar (Top Left of 3D Viewport)
     ImGui::SetNextWindowPos(ImVec2(overlayX, overlayY), ImGuiCond_Always);
@@ -877,10 +877,13 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         ImGui::SameLine();
         ImGui::TextDisabled("| FPS: %.1f (%.1fms)", fps, frameTimeMs);
     }
+    ImGui::End();
+    ImGui::PopStyleVar();
+
     // 3D Viewport Point Light Sprite Billboards (dev.md)
     if (!isGameView) {
         ImDrawList* drawList = ImGui::GetBackgroundDrawList();
-        float aspect = vp->Size.x / vp->Size.y;
+        float aspect = vpRect.width / vpRect.height;
         glm::mat4 proj = camera.GetProjectionMatrix(aspect);
         glm::mat4 view = camera.GetViewMatrix();
         glm::mat4 vpMatrix = proj * view;
@@ -897,8 +900,11 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
             glm::vec3 ndc = glm::vec3(clip) / clip.w;
             if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
 
-            float screenX = vp->Pos.x + (ndc.x * 0.5f + 0.5f) * vp->Size.x;
-            float screenY = vp->Pos.y + ((1.0f - ndc.y) * 0.5f) * vp->Size.y;
+            float screenX = vp->Pos.x + vpRect.x + (ndc.x * 0.5f + 0.5f) * vpRect.width;
+            float screenY = vp->Pos.y + vpRect.y + ((1.0f - ndc.y) * 0.5f) * vpRect.height;
+
+            if (screenX < vp->Pos.x + vpRect.x || screenX > vp->Pos.x + vpRect.x + vpRect.width ||
+                screenY < vp->Pos.y + vpRect.y || screenY > vp->Pos.y + vpRect.y + vpRect.height) continue;
 
             float iconSize = 34.0f;
             ImVec2 pMin(screenX - iconSize * 0.5f, screenY - iconSize * 0.5f);
@@ -935,11 +941,17 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         }
     }
 
-    ImGui::End();
-    ImGui::PopStyleVar();
+    // 1px border framing the center 3D viewport exactly according to UI_Ref.svg blueprint
+    ImDrawList* fgDrawList = ImGui::GetForegroundDrawList();
+    ImVec2 vpMin(vp->Pos.x + vpRect.x, vp->Pos.y + vpRect.y);
+    ImVec2 vpMax(vp->Pos.x + vpRect.x + vpRect.width, vp->Pos.y + vpRect.y + vpRect.height);
+    fgDrawList->AddRect(vpMin, vpMax, IM_COL32(40, 40, 40, 255), 0.0f, 0, 1.0f);
 }
 
-void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene) {
+void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_set<int>& visitedIds, int depth) {
+    if (depth > 64 || visitedIds.count(obj.id)) return;
+    visitedIds.insert(obj.id);
+
     ImGui::PushID(obj.id);
 
     // Visibility eye
@@ -948,9 +960,10 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene) {
     }
     ImGui::SameLine();
 
+    bool hasChildren = !obj.childIds.empty();
     ImGuiTreeNodeFlags nodeFlags = ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
-    if (obj.childIds.empty()) {
-        nodeFlags |= ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen;
+    if (!hasChildren) {
+        nodeFlags |= ImGuiTreeNodeFlags_Leaf;
     } else {
         nodeFlags |= ImGuiTreeNodeFlags_DefaultOpen;
     }
@@ -968,7 +981,7 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene) {
     }
 
     bool nodeOpen = ImGui::TreeNodeEx((void*)(intptr_t)obj.id, nodeFlags, "%s", label);
-    if (ImGui::IsItemClicked()) {
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         scene.selectedId = obj.id;
     }
 
@@ -976,28 +989,30 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene) {
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
         int actorId = obj.id;
         ImGui::SetDragDropPayload("OUTLINER_ACTOR", &actorId, sizeof(int));
-        ImGui::Text("Parent %s", obj.name.c_str());
+        ImGui::Text("Reparent %s", obj.name.c_str());
         ImGui::EndDragDropSource();
     }
 
-    // Drag target: drop onto this actor to make dragged actor a child
+    // Drag target: drop onto this actor to make dragged actor a child (deferred to end of outliner)
     if (ImGui::BeginDragDropTarget()) {
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("OUTLINER_ACTOR")) {
             int draggedId = *(const int*)payload->Data;
-            if (draggedId != obj.id) {
-                scene.ReparentObject(draggedId, obj.id);
-                AddLog("LogActor", "Reparented Actor into: " + obj.name, 0);
+            if (draggedId != obj.id && !scene.IsDescendantOf(obj.id, draggedId)) {
+                m_pendingReparentChild = draggedId;
+                m_pendingReparentParent = obj.id;
             }
         }
         ImGui::EndDragDropTarget();
     }
 
-    if (nodeOpen && !obj.childIds.empty()) {
-        std::vector<int> childList = obj.childIds;
-        for (int cid : childList) {
-            GameObject* childObj = scene.FindObject(cid);
-            if (childObj) {
-                DrawOutlinerNode(*childObj, scene);
+    if (nodeOpen) {
+        if (hasChildren) {
+            std::vector<int> childList = obj.childIds;
+            for (int cid : childList) {
+                GameObject* childObj = scene.FindObject(cid);
+                if (childObj) {
+                    DrawOutlinerNode(*childObj, scene, visitedIds, depth + 1);
+                }
             }
         }
         ImGui::TreePop();
@@ -1061,6 +1076,7 @@ void EngineUI::RenderOutliner(Scene& scene) {
             }
         } else {
             // Hierarchical tree view: render all root actors (parentId == -1)
+            std::unordered_set<int> visitedIds;
             std::vector<int> rootIds;
             for (const auto& obj : scene.objects) {
                 if (obj.parentId == -1) {
@@ -1070,7 +1086,7 @@ void EngineUI::RenderOutliner(Scene& scene) {
             for (int rid : rootIds) {
                 GameObject* rootObj = scene.FindObject(rid);
                 if (rootObj) {
-                    DrawOutlinerNode(*rootObj, scene);
+                    DrawOutlinerNode(*rootObj, scene, visitedIds, 0);
                 }
             }
         }
@@ -1079,8 +1095,8 @@ void EngineUI::RenderOutliner(Scene& scene) {
         if (ImGui::BeginDragDropTarget()) {
             if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("OUTLINER_ACTOR")) {
                 int draggedId = *(const int*)payload->Data;
-                scene.ReparentObject(draggedId, -1);
-                AddLog("LogActor", "Detached Actor to Root Level", 0);
+                m_pendingReparentChild = draggedId;
+                m_pendingReparentParent = -1;
             }
             ImGui::EndDragDropTarget();
         }
@@ -1195,6 +1211,29 @@ void EngineUI::RenderOutliner(Scene& scene) {
         ImGui::SameLine();
         if (ImGui::Button("Delete") && scene.selectedId != -1) {
             scene.RemoveObject(scene.selectedId);
+        }
+
+        // Process any deferred reparent request after all outliner nodes and tree pops have cleanly finished
+        if (m_pendingReparentChild != -1) {
+            int childId = m_pendingReparentChild;
+            int parentId = m_pendingReparentParent;
+            m_pendingReparentChild = -1;
+            m_pendingReparentParent = -1;
+
+            GameObject* child = scene.FindObject(childId);
+            std::string childName = child ? child->name : ("Actor " + std::to_string(childId));
+
+            if (parentId != -1) {
+                GameObject* parent = scene.FindObject(parentId);
+                std::string parentName = parent ? parent->name : ("Actor " + std::to_string(parentId));
+                scene.ReparentObject(childId, parentId);
+                AddLog("LogActor", "Reparented '" + childName + "' into '" + parentName + "'", 0);
+                EngineLogger::Get().LogAction("REPARENT_ACTOR", childName, "Parent: " + parentName);
+            } else {
+                scene.ReparentObject(childId, -1);
+                AddLog("LogActor", "Detached '" + childName + "' to Root Level", 0);
+                EngineLogger::Get().LogAction("UNPARENT_ACTOR", childName, "Moved to Root");
+            }
         }
     }
     ImGui::End();
@@ -3275,10 +3314,9 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
     ImGuizmo::Enable(!mouseOverUI || ImGuizmo::IsUsing());
     ImGuizmo::SetOrthographic(false);
 
-    // The DirectX 12 3D scene renders to the full window viewport (0, 0, g_currentWidth, g_currentHeight)
-    // and light billboards / raycasts are calculated using vp->Size.x / vp->Size.y.
-    // Setting ImGuizmo's rect and projection to the full viewport aligns the gizmo exactly with the 3D scene and light icons.
-    ImGuizmo::SetRect(vp->Pos.x, vp->Pos.y, vp->Size.x, vp->Size.y);
+    // The DirectX 12 3D scene renders to the center viewport (vpRect) matching UI_Ref.svg
+    ViewportRect vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    ImGuizmo::SetRect(vp->Pos.x + vpRect.x, vp->Pos.y + vpRect.y, vpRect.width, vpRect.height);
 
     bool isLight = (obj->isLight || IsLightPrimitive(obj->type));
 
@@ -3314,7 +3352,7 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         }
     }
     glm::mat4 viewMatrix = camera.GetViewMatrix();
-    glm::mat4 projMatrix = camera.GetProjectionMatrix(vp->Size.x / vp->Size.y);
+    glm::mat4 projMatrix = camera.GetProjectionMatrix(vpRect.width / vpRect.height);
 
     float snapValues[3];
     float* pSnap = nullptr;

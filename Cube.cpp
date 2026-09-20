@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 
@@ -34,6 +35,7 @@
 #include "AssetSystem.h"
 #include "MeshImporter.h"
 #include "InputSystem.h"
+#include "EngineLogger.h"
 
 extern "C" {
     unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);
@@ -45,9 +47,9 @@ extern "C" {
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_dx12.h"
 
-// Configuration
-const int WIDTH = 1280;
-const int HEIGHT = 720;
+// Configuration matching UI_Ref.svg blueprint
+const int WIDTH = 1728;
+const int HEIGHT = 1117;
 const UINT FRAME_COUNT = 2;
 
 // Real-Time Shadow Mapping Configuration (2048x2048 D32_FLOAT PCF)
@@ -126,6 +128,7 @@ static UINT g_frameIndex = 0;
 static HANDLE g_fenceEvent = nullptr;
 static ID3D12Fence* g_fence = nullptr;
 static UINT64 g_fenceValues[FRAME_COUNT] = {};
+static UINT64 g_globalFenceValue = 0;
 
 // Pipeline & Shaders
 static ID3D12RootSignature* g_rootSignature = nullptr;
@@ -294,6 +297,214 @@ static void ImGui_SrvFree(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HA
 	// Linear allocator - no-op
 }
 
+static std::vector<std::string> g_recordedFrameOps;
+static std::vector<std::string> g_frameOpHistory[FRAME_COUNT];
+
+void RecordGpuBreadcrumbOp(const char* desc)
+{
+	if (desc)
+	{
+		g_recordedFrameOps.push_back(desc);
+	}
+}
+
+static const char* GetDredOpName(D3D12_AUTO_BREADCRUMB_OP op)
+{
+	switch (op)
+	{
+	case D3D12_AUTO_BREADCRUMB_OP_SETMARKER: return "SetMarker";
+	case D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT: return "BeginEvent";
+	case D3D12_AUTO_BREADCRUMB_OP_ENDEVENT: return "EndEvent";
+	case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "DrawInstanced";
+	case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "DrawIndexedInstanced";
+	case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "ExecuteIndirect";
+	case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "Dispatch";
+	case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "CopyBufferRegion";
+	case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "CopyTextureRegion";
+	case D3D12_AUTO_BREADCRUMB_OP_COPYRESOURCE: return "CopyResource";
+	case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return "CopyTiles";
+	case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCE: return "ResolveSubresource";
+	case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "ClearRenderTargetView";
+	case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "ClearUnorderedAccessView";
+	case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "ClearDepthStencilView";
+	case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "ResourceBarrier";
+	case D3D12_AUTO_BREADCRUMB_OP_EXECUTEBUNDLE: return "ExecuteBundle";
+	case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return "Present";
+	case D3D12_AUTO_BREADCRUMB_OP_RESOLVEQUERYDATA: return "ResolveQueryData";
+	case D3D12_AUTO_BREADCRUMB_OP_BEGINSUBMISSION: return "BeginSubmission";
+	case D3D12_AUTO_BREADCRUMB_OP_ENDSUBMISSION: return "EndSubmission";
+	case D3D12_AUTO_BREADCRUMB_OP_DECODEFRAME: return "DecodeFrame";
+	case D3D12_AUTO_BREADCRUMB_OP_PROCESSFRAMES: return "ProcessFrames";
+	case D3D12_AUTO_BREADCRUMB_OP_ATOMICCOPYBUFFERUINT: return "AtomicCopyBufferUint";
+	case D3D12_AUTO_BREADCRUMB_OP_ATOMICCOPYBUFFERUINT64: return "AtomicCopyBufferUint64";
+	case D3D12_AUTO_BREADCRUMB_OP_RESOLVESUBRESOURCEREGION: return "ResolveSubresourceRegion";
+	case D3D12_AUTO_BREADCRUMB_OP_WRITEBUFFERIMMEDIATE: return "WriteBufferImmediate";
+	default: return "UnknownOp";
+	}
+}
+
+static void DumpDREDInformation()
+{
+	ID3D12DeviceRemovedExtendedData1* dred = nullptr;
+	std::stringstream logStream;
+	if (g_d3dDevice && SUCCEEDED(g_d3dDevice->QueryInterface(IID_PPV_ARGS(&dred))))
+	{
+		D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 breadcrumbs = {};
+		if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&breadcrumbs)))
+		{
+			std::cerr << "[DRED] AutoBreadcrumbs output captured:\n";
+			logStream << "[DRED] AutoBreadcrumbs output captured:\n";
+			const D3D12_AUTO_BREADCRUMB_NODE1* node = breadcrumbs.pHeadAutoBreadcrumbNode;
+			int nodeIdx = 0;
+			while (node)
+			{
+				std::wcerr << L"[DRED] Node " << nodeIdx << L" - Command List: "
+				           << (node->pCommandListDebugNameW ? node->pCommandListDebugNameW : L"(unnamed)")
+				           << L", Command Queue: "
+				           << (node->pCommandQueueDebugNameW ? node->pCommandQueueDebugNameW : L"(unnamed)")
+				           << L"\n";
+				logStream << "[DRED] Node " << nodeIdx << " - Command List: "
+				          << (node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "(unnamed)")
+				          << "\n";
+				if (node->pLastBreadcrumbValue && node->BreadcrumbCount > 0)
+				{
+					UINT completed = *node->pLastBreadcrumbValue;
+					std::cerr << "[DRED]   Completed ops: " << completed
+					          << " / " << node->BreadcrumbCount << " total ops\n";
+					logStream << "[DRED]   Completed ops: " << completed << " / " << node->BreadcrumbCount << " total ops\n";
+					if (node->pCommandHistory)
+					{
+						UINT startOp = completed > 4 ? completed - 4 : 0;
+						for (UINT opIdx = startOp; opIdx < node->BreadcrumbCount && opIdx <= completed + 2; ++opIdx)
+						{
+							const char* status = (opIdx < completed) ? "[COMPLETED]" : ((opIdx == completed) ? "--> [CURRENT/HUNG]" : "[PENDING]");
+							std::string desc = "(untracked)";
+							if (opIdx < g_recordedFrameOps.size())
+							{
+								desc = g_recordedFrameOps[opIdx];
+							}
+							else
+							{
+								for (UINT f = 0; f < FRAME_COUNT; ++f)
+								{
+									if (opIdx < g_frameOpHistory[f].size())
+									{
+										desc = g_frameOpHistory[f][opIdx];
+										break;
+									}
+								}
+							}
+							std::cerr << "[DRED]     Op " << opIdx << " " << status << ": "
+							          << GetDredOpName(node->pCommandHistory[opIdx])
+							          << " -- " << desc << "\n";
+							logStream << "[DRED]     Op " << opIdx << " " << status << ": "
+							          << GetDredOpName(node->pCommandHistory[opIdx])
+							          << " -- " << desc << "\n";
+						}
+					}
+				}
+				node = node->pNext;
+				nodeIdx++;
+			}
+		}
+
+		D3D12_DRED_PAGE_FAULT_OUTPUT1 pageFault = {};
+		if (SUCCEEDED(dred->GetPageFaultAllocationOutput1(&pageFault)) &&
+			pageFault.PageFaultVA != 0)
+		{
+			std::cerr << "[DRED] GPU page fault at VA 0x" << std::hex << pageFault.PageFaultVA << std::dec << "\n";
+			logStream << "[DRED] GPU page fault at VA 0x" << std::hex << pageFault.PageFaultVA << std::dec << "\n";
+
+			std::cerr << "[DRED] Known Engine Resource Memory Map:\n";
+			logStream << "[DRED] Known Engine Resource Memory Map:\n";
+			if (g_vertexBuffer) {
+				UINT64 va = g_vertexBuffer->GetGPUVirtualAddress();
+				std::cerr << "  g_vertexBuffer:         [0x" << std::hex << va << " - 0x" << (va + MAX_SCENE_VERTICES * sizeof(Vertex)) << std::dec << "]\n";
+				logStream << "  g_vertexBuffer:         [0x" << std::hex << va << " - 0x" << (va + MAX_SCENE_VERTICES * sizeof(Vertex)) << std::dec << "]\n";
+			}
+			if (g_indexBuffer) {
+				UINT64 va = g_indexBuffer->GetGPUVirtualAddress();
+				std::cerr << "  g_indexBuffer:          [0x" << std::hex << va << " - 0x" << (va + MAX_SCENE_INDICES * sizeof(uint32_t)) << std::dec << "]\n";
+				logStream << "  g_indexBuffer:          [0x" << std::hex << va << " - 0x" << (va + MAX_SCENE_INDICES * sizeof(uint32_t)) << std::dec << "]\n";
+			}
+			if (g_constantBuffer) {
+				UINT64 va = g_constantBuffer->GetGPUVirtualAddress();
+				std::cerr << "  g_constantBuffer:       [0x" << std::hex << va << " - 0x" << (va + sizeof(SceneConstantBuffer)) << std::dec << "]\n";
+				logStream << "  g_constantBuffer:       [0x" << std::hex << va << " - 0x" << (va + sizeof(SceneConstantBuffer)) << std::dec << "]\n";
+			}
+			if (g_shadowConstantBuffer) {
+				UINT64 va = g_shadowConstantBuffer->GetGPUVirtualAddress();
+				std::cerr << "  g_shadowConstantBuffer: [0x" << std::hex << va << " - 0x" << (va + sizeof(ShadowConstantBuffer)) << std::dec << "]\n";
+				logStream << "  g_shadowConstantBuffer: [0x" << std::hex << va << " - 0x" << (va + sizeof(ShadowConstantBuffer)) << std::dec << "]\n";
+			}
+			if (g_srvDescHeap) {
+				UINT64 va = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart().ptr;
+				std::cerr << "  g_srvDescHeap (GPU):    [0x" << std::hex << va << " - 0x" << (va + (UINT64)SRV_HEAP_CAPACITY * g_srvDescriptorSize) << std::dec << "]\n";
+				logStream << "  g_srvDescHeap (GPU):    [0x" << std::hex << va << " - 0x" << (va + (UINT64)SRV_HEAP_CAPACITY * g_srvDescriptorSize) << std::dec << "]\n";
+			}
+			for (const auto& kv : g_gpuTextureMap) {
+				std::cerr << "  Texture '" << kv.first << "': SRV_GPU=0x" << std::hex << kv.second.gpuHandle.ptr << std::dec << "\n";
+				logStream << "  Texture '" << kv.first << "': SRV_GPU=0x" << std::hex << kv.second.gpuHandle.ptr << std::dec << "\n";
+			}
+
+			const D3D12_DRED_ALLOCATION_NODE1* allocNode = pageFault.pHeadExistingAllocationNode;
+			int allocCount = 0;
+			while (allocNode)
+			{
+				allocCount++;
+				std::cerr << "[DRED] Existing Allocation #" << allocCount << " (type: 0x" << std::hex << (UINT)allocNode->AllocationType << std::dec << "): ";
+				logStream << "[DRED] Existing Allocation #" << allocCount << " (type: 0x" << std::hex << (UINT)allocNode->AllocationType << std::dec << "): ";
+				if (allocNode->ObjectNameA) {
+					std::cerr << allocNode->ObjectNameA;
+					logStream << allocNode->ObjectNameA;
+				} else if (allocNode->ObjectNameW) {
+					std::wcerr << allocNode->ObjectNameW;
+					logStream << "(wide name)";
+				} else {
+					std::cerr << "(unnamed)";
+					logStream << "(unnamed)";
+				}
+				std::cerr << " (pObject=" << allocNode->pObject << ")\n";
+				logStream << " (pObject=" << allocNode->pObject << ")\n";
+				allocNode = allocNode->pNext;
+			}
+			if (allocCount == 0) {
+				std::cerr << "[DRED]   (No matching existing allocation found by driver)\n";
+				logStream << "[DRED]   (No matching existing allocation found by driver)\n";
+			}
+
+			const D3D12_DRED_ALLOCATION_NODE1* freedNode = pageFault.pHeadRecentFreedAllocationNode;
+			int freedCount = 0;
+			while (freedNode)
+			{
+				freedCount++;
+				std::cerr << "[DRED] Recent Freed Allocation #" << freedCount << " (type: 0x" << std::hex << (UINT)freedNode->AllocationType << std::dec << "): ";
+				logStream << "[DRED] Recent Freed Allocation #" << freedCount << " (type: 0x" << std::hex << (UINT)freedNode->AllocationType << std::dec << "): ";
+				if (freedNode->ObjectNameA) {
+					std::cerr << freedNode->ObjectNameA;
+					logStream << freedNode->ObjectNameA;
+				} else if (freedNode->ObjectNameW) {
+					std::wcerr << freedNode->ObjectNameW;
+					logStream << "(wide name)";
+				} else {
+					std::cerr << "(unnamed)";
+					logStream << "(unnamed)";
+				}
+				std::cerr << " (pObject=" << freedNode->pObject << ")\n";
+				logStream << " (pObject=" << freedNode->pObject << ")\n";
+				freedNode = freedNode->pNext;
+			}
+			if (freedCount == 0) {
+				std::cerr << "[DRED]   (No matching recently freed allocation found by driver)\n";
+				logStream << "[DRED]   (No matching recently freed allocation found by driver)\n";
+			}
+		}
+		dred->Release();
+	}
+
+	EngineLogger::Get().LogError("DirectX12", 0x887A0006, "DXGI_ERROR_DEVICE_HUNG / GPU Page Fault", logStream.str());
+}
+
 bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle, DWORD timeoutMs = 5000, const char* context = "GPU Fence")
 {
 	if (!fence || !eventHandle || g_deviceLost) return false;
@@ -313,6 +524,7 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 		{
 			g_deviceLost = true;
 			std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
+			DumpDREDInformation();
 			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
 			return false;
 		}
@@ -329,6 +541,7 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 		{
 			g_deviceLost = true;
 			std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
+			DumpDREDInformation();
 			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
 		}
 		else
@@ -345,16 +558,16 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 void WaitForGpuIdle()
 {
 	if (!g_commandQueue || !g_fence || !g_fenceEvent || g_deviceLost) return;
-	const UINT64 fence = g_fenceValues[g_frameIndex] + 1;
-	g_commandQueue->Signal(g_fence, fence);
-	SafeWaitForFence(g_fence, fence, g_fenceEvent, 5000, "WaitForGpuIdle");
+	g_globalFenceValue++;
+	g_commandQueue->Signal(g_fence, g_globalFenceValue);
+	SafeWaitForFence(g_fence, g_globalFenceValue, g_fenceEvent, 5000, "WaitForGpuIdle");
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
-		g_fenceValues[i] = fence;
+		g_fenceValues[i] = g_globalFenceValue;
 	}
 }
 
-DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
+DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height, const std::string& debugName = "")
 {
 	DX12GpuTexture result = {};
 	if (!pixels || width <= 0 || height <= 0 || !g_d3dDevice || !g_uploadCmdAlloc || !g_uploadCmdList || !g_uploadFence) return result;
@@ -378,6 +591,16 @@ DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
 		D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&tex));
 	if (FAILED(hr)) return result;
 
+	if (!debugName.empty())
+	{
+		std::wstring wname(debugName.begin(), debugName.end());
+		tex->SetName(wname.c_str());
+	}
+	else
+	{
+		tex->SetName(L"Texture_Unnamed");
+	}
+
 	D3D12_RESOURCE_DESC upDesc = CreateBufferResourceDesc(uploadSize);
 	D3D12_HEAP_PROPERTIES upHeap = CreateHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
 	ID3D12Resource* uploadBuf = nullptr;
@@ -387,6 +610,7 @@ DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
 		tex->Release();
 		return result;
 	}
+	if (uploadBuf) uploadBuf->SetName(L"Texture_Upload_Staging");
 
 	void* pData = nullptr;
 	uploadBuf->Map(0, nullptr, &pData);
@@ -467,24 +691,24 @@ DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
 void InitFallbackTextures()
 {
 	uint32_t whitePix = 0xFFFFFFFF;
-	g_fallbackWhite = UploadTextureToD3D12(&whitePix, 1, 1);
+	g_fallbackWhite = UploadTextureToD3D12(&whitePix, 1, 1, "Fallback_White");
 
 	uint8_t normalPix[4] = { 128, 128, 255, 255 };
-	g_fallbackNormal = UploadTextureToD3D12(normalPix, 1, 1);
+	g_fallbackNormal = UploadTextureToD3D12(normalPix, 1, 1, "Fallback_Normal");
 
 	uint32_t roughPix = 0xFFFFFFFF;
-	g_fallbackRoughness = UploadTextureToD3D12(&roughPix, 1, 1);
+	g_fallbackRoughness = UploadTextureToD3D12(&roughPix, 1, 1, "Fallback_Roughness");
 
 	uint32_t metalPix = 0xFF000000;
-	g_fallbackMetallic = UploadTextureToD3D12(&metalPix, 1, 1);
+	g_fallbackMetallic = UploadTextureToD3D12(&metalPix, 1, 1, "Fallback_Metallic");
 
 	uint32_t aoPix = 0xFFFFFFFF;
-	g_fallbackAO = UploadTextureToD3D12(&aoPix, 1, 1);
+	g_fallbackAO = UploadTextureToD3D12(&aoPix, 1, 1, "Fallback_AO");
 
 	// Missing texture checkerboard fallback from dev.md Section 20
 	CachedTexture* checker = AssetManager::Get().GetMissingTextureFallback();
 	if (checker && !checker->data.empty() && checker->width > 0 && checker->height > 0) {
-		g_fallbackMissing = UploadTextureToD3D12(checker->data.data(), checker->width, checker->height);
+		g_fallbackMissing = UploadTextureToD3D12(checker->data.data(), checker->width, checker->height, "Fallback_MissingChecker");
 	} else {
 		g_fallbackMissing = g_fallbackWhite;
 	}
@@ -518,7 +742,7 @@ DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture
 		return fallback;
 	}
 
-	DX12GpuTexture tex = UploadTextureToD3D12(cached->data.data(), cached->width, cached->height);
+	DX12GpuTexture tex = UploadTextureToD3D12(cached->data.data(), cached->width, cached->height, resolved);
 	if (tex.resource) {
 		g_gpuTextureMap[resolved] = tex;
 		return tex;
@@ -566,9 +790,10 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 
 	DX12GpuTexture slots[5] = { texAlbedo, texNormal, texRough, texMetal, texAO };
 	for (int i = 0; i < 5; ++i) {
+		D3D12_CPU_DESCRIPTOR_HANDLE srcCpu = (slots[i].resource && slots[i].cpuHandle.ptr != 0) ? slots[i].cpuHandle : g_fallbackWhite.cpuHandle;
 		D3D12_CPU_DESCRIPTOR_HANDLE dst = baseCpu;
 		dst.ptr += (SIZE_T)i * g_srvDescriptorSize;
-		g_d3dDevice->CopyDescriptorsSimple(1, dst, slots[i].cpuHandle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		g_d3dDevice->CopyDescriptorsSimple(1, dst, srcCpu, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 	}
 
 	if (!s_hasFallbackTable) {
@@ -633,6 +858,7 @@ int createDepthStencilView(int width, int height)
 		std::cerr << "Failed to create D3D12 depth stencil buffer: " << hr << std::endl;
 		return EXIT_FAILURE;
 	}
+	g_depthStencilBuffer->SetName(L"g_depthStencilBuffer");
 
 	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
 	dsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
@@ -686,6 +912,7 @@ int createShadowResources()
 		std::cerr << "Failed to create D3D12 shadow depth buffer: " << hr << std::endl;
 		return EXIT_FAILURE;
 	}
+	g_shadowDepthBuffer->SetName(L"g_shadowDepthBuffer");
 
 	// Create DSV at index 1 of g_dsvDescHeap
 	D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc = {};
@@ -723,6 +950,7 @@ int createShadowResources()
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer)
 	);
+	if (g_shadowConstantBuffer) g_shadowConstantBuffer->SetName(L"g_shadowConstantBuffer");
 	D3D12_RANGE readRange = { 0, 0 };
 	g_shadowConstantBuffer->Map(0, &readRange, &g_pShadowConstantMapped);
 
@@ -731,8 +959,41 @@ int createShadowResources()
 
 int initD3D12(HWND hwnd)
 {
-	// 1. Create DXGI Factory
 	UINT dxgiFactoryFlags = 0;
+
+#if defined(_DEBUG) || defined(EUNOIA_D3D12_DEBUG)
+	{
+		ID3D12Debug* debugController = nullptr;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
+		{
+			debugController->EnableDebugLayer();
+
+			ID3D12Debug1* debugController1 = nullptr;
+			if (SUCCEEDED(debugController->QueryInterface(IID_PPV_ARGS(&debugController1))))
+			{
+				debugController1->SetEnableGPUBasedValidation(TRUE);
+				debugController1->Release();
+			}
+			debugController->Release();
+			std::cout << "[DEBUG] D3D12 debug layer + GPU-based validation enabled.\n";
+		}
+		dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
+	}
+#endif
+
+	// Enable DRED (Device Removed Extended Data) for auto-breadcrumbs and page fault diagnostics
+	{
+		ID3D12DeviceRemovedExtendedDataSettings* dredSettings = nullptr;
+		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dredSettings))))
+		{
+			dredSettings->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			dredSettings->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+			dredSettings->Release();
+			std::cout << "[DEBUG] DRED (auto-breadcrumbs + page fault) enabled.\n";
+		}
+	}
+
+	// 1. Create DXGI Factory
 	HRESULT hr = CreateDXGIFactory2(dxgiFactoryFlags, IID_PPV_ARGS(&g_dxgiFactory));
 	if (FAILED(hr))
 	{
@@ -773,6 +1034,18 @@ int initD3D12(HWND hwnd)
 		return EXIT_FAILURE;
 	}
 
+#if defined(_DEBUG) || defined(EUNOIA_D3D12_DEBUG)
+	{
+		ID3D12InfoQueue* infoQueue = nullptr;
+		if (SUCCEEDED(g_d3dDevice->QueryInterface(IID_PPV_ARGS(&infoQueue))))
+		{
+			infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE);
+			infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE);
+			infoQueue->Release();
+		}
+	}
+#endif
+
 	// 4. Create Command Queue
 	D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 	queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -783,6 +1056,7 @@ int initD3D12(HWND hwnd)
 		std::cerr << "Failed to create D3D12CommandQueue: " << hr << std::endl;
 		return EXIT_FAILURE;
 	}
+	g_commandQueue->SetName(L"g_commandQueue");
 
 	// 5. Create SwapChain
 	DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
@@ -812,6 +1086,7 @@ int initD3D12(HWND hwnd)
 	rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	g_d3dDevice->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&g_rtvDescHeap));
 	g_rtvDescriptorSize = g_d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+	g_rtvDescHeap->SetName(L"g_rtvDescHeap");
 
 	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
 	dsvHeapDesc.NumDescriptors = 2; // Index 0: SwapChain Depth, Index 1: Directional Shadow Depth
@@ -819,6 +1094,7 @@ int initD3D12(HWND hwnd)
 	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	g_d3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&g_dsvDescHeap));
 	g_dsvDescriptorSize = g_d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+	g_dsvDescHeap->SetName(L"g_dsvDescHeap");
 
 	D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
 	srvHeapDesc.NumDescriptors = SRV_HEAP_CAPACITY; // 8192
@@ -826,12 +1102,18 @@ int initD3D12(HWND hwnd)
 	srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 	g_d3dDevice->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&g_srvDescHeap));
 	g_srvDescriptorSize = g_d3dDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	g_srvDescHeap->SetName(L"g_srvDescHeap");
 
 	// 7. Create RTVs for backbuffers
 	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_rtvDescHeap->GetCPUDescriptorHandleForHeapStart();
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
 		g_swapChain->GetBuffer(i, IID_PPV_ARGS(&g_renderTargets[i]));
+		if (g_renderTargets[i])
+		{
+			std::wstring rtName = L"g_renderTarget_" + std::to_wstring(i);
+			g_renderTargets[i]->SetName(rtName.c_str());
+		}
 		g_d3dDevice->CreateRenderTargetView(g_renderTargets[i], nullptr, rtvHandle);
 		rtvHandle.ptr += g_rtvDescriptorSize;
 	}
@@ -844,20 +1126,30 @@ int initD3D12(HWND hwnd)
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
 		g_d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocators[i]));
+		if (g_commandAllocators[i])
+		{
+			std::wstring caName = L"g_commandAllocator_" + std::to_wstring(i);
+			g_commandAllocators[i]->SetName(caName.c_str());
+		}
 	}
 	g_d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0], nullptr, IID_PPV_ARGS(&g_commandList));
+	g_commandList->SetName(L"g_commandList");
 	g_commandList->Close();
 
 	// 10. Create Fence & Event
 	g_d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence));
+	g_fence->SetName(L"g_fence");
 	for (UINT i = 0; i < FRAME_COUNT; i++) g_fenceValues[i] = 0;
 	g_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
 	// 11. Dedicated Upload Command Allocator, Command List, and Upload Fence
 	g_d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_uploadCmdAlloc));
+	g_uploadCmdAlloc->SetName(L"g_uploadCmdAlloc");
 	g_d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_uploadCmdAlloc, nullptr, IID_PPV_ARGS(&g_uploadCmdList));
+	g_uploadCmdList->SetName(L"g_uploadCmdList");
 	g_uploadCmdList->Close();
 	g_d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_uploadFence));
+	g_uploadFence->SetName(L"g_uploadFence");
 	g_uploadFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	g_uploadFenceValue = 0;
 
@@ -1371,6 +1663,7 @@ int createDynamicBuffers()
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &vBufferDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_vertexBuffer)
 	);
+	if (g_vertexBuffer) g_vertexBuffer->SetName(L"g_vertexBuffer");
 
 	D3D12_RANGE readRange = { 0, 0 };
 	g_vertexBuffer->Map(0, &readRange, &g_pVertexMapped);
@@ -1387,6 +1680,7 @@ int createDynamicBuffers()
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &iBufferDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_indexBuffer)
 	);
+	if (g_indexBuffer) g_indexBuffer->SetName(L"g_indexBuffer");
 
 	g_indexBuffer->Map(0, &readRange, &g_pIndexMapped);
 
@@ -1402,6 +1696,7 @@ int createDynamicBuffers()
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
 		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_constantBuffer)
 	);
+	if (g_constantBuffer) g_constantBuffer->SetName(L"g_constantBuffer");
 
 	g_constantBuffer->Map(0, &readRange, &g_pConstantMapped);
 
@@ -1417,6 +1712,15 @@ void updateSceneGeometry()
 
 	g_currentVertexCount = (uint32_t)std::min(sceneVertices.size(), MAX_SCENE_VERTICES);
 	g_currentIndexCount  = (uint32_t)std::min(sceneIndices.size(), MAX_SCENE_INDICES);
+
+	// Clamp out-of-bounds indices to 0 to prevent GPU vertex fetch page faults
+	for (size_t i = 0; i < g_currentIndexCount; ++i)
+	{
+		if (sceneIndices[i] >= g_currentVertexCount)
+		{
+			sceneIndices[i] = 0;
+		}
+	}
 
 	if (g_pVertexMapped && g_currentVertexCount > 0)
 	{
@@ -1434,7 +1738,8 @@ void updateConstantBuffer()
 
 	g_scene.SyncLightPositionsFromActors();
 
-	float aspect = (g_currentWidth > 0 && g_currentHeight > 0) ? ((float)g_currentWidth / (float)g_currentHeight) : 1.777f;
+	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+	float aspect = (vpRect.width > 0 && vpRect.height > 0) ? (vpRect.width / vpRect.height) : 1.777f;
 	if (aspect <= 0.01f || std::isnan(aspect)) aspect = 1.777f;
 
 	glm::mat4 model = glm::mat4(1.0f);
@@ -1537,6 +1842,8 @@ void renderFrame()
 	g_commandAllocators[g_frameIndex]->Reset();
 	g_commandList->Reset(g_commandAllocators[g_frameIndex], nullptr);
 
+	g_recordedFrameOps.clear();
+
 	// ----------------------------------------------------
 	// PASS 1: Directional Shadow Depth Map Pass (2048x2048 D32)
 	// ----------------------------------------------------
@@ -1547,6 +1854,7 @@ void renderFrame()
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
 			D3D12_RESOURCE_STATE_DEPTH_WRITE
 		);
+		RecordGpuBreadcrumbOp("[Barrier] ShadowDepthBuffer -> DEPTH_WRITE");
 		g_commandList->ResourceBarrier(1, &shadowBarrier);
 
 		D3D12_VIEWPORT shadowViewport = { 0.0f, 0.0f, (float)SHADOW_MAP_WIDTH, (float)SHADOW_MAP_HEIGHT, 0.0f, 1.0f };
@@ -1554,6 +1862,7 @@ void renderFrame()
 		g_commandList->RSSetViewports(1, &shadowViewport);
 		g_commandList->RSSetScissorRects(1, &shadowScissor);
 
+		RecordGpuBreadcrumbOp("[ClearDSV] ShadowDepthBuffer");
 		g_commandList->ClearDepthStencilView(g_shadowDsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 		g_commandList->OMSetRenderTargets(0, nullptr, FALSE, &g_shadowDsvHandle);
 
@@ -1565,10 +1874,17 @@ void renderFrame()
 		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
 		g_commandList->IASetIndexBuffer(&g_indexBufferView);
 
-		for (const auto& batch : g_sceneBatches)
+		for (size_t bIdx = 0; bIdx < g_sceneBatches.size(); ++bIdx)
 		{
+			const auto& batch = g_sceneBatches[bIdx];
 			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0 || !batch.castShadows || batch.isUnlit) continue;
 			UINT drawCount = std::min(batch.indexCount, g_currentIndexCount - batch.startIndex);
+			if (drawCount == 0) continue;
+
+			char opDesc[128];
+			snprintf(opDesc, sizeof(opDesc), "[ShadowDraw] Batch %zu count=%u start=%u", bIdx, drawCount, batch.startIndex);
+			RecordGpuBreadcrumbOp(opDesc);
+
 			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
 		}
 
@@ -1577,6 +1893,7 @@ void renderFrame()
 			D3D12_RESOURCE_STATE_DEPTH_WRITE,
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
 		);
+		RecordGpuBreadcrumbOp("[Barrier] ShadowDepthBuffer -> PIXEL_SHADER_RESOURCE");
 		g_commandList->ResourceBarrier(1, &shadowReadBarrier);
 	}
 
@@ -1588,11 +1905,15 @@ void renderFrame()
 		D3D12_RESOURCE_STATE_PRESENT,
 		D3D12_RESOURCE_STATE_RENDER_TARGET
 	);
+	char bufRtvBarrier[96];
+	snprintf(bufRtvBarrier, sizeof(bufRtvBarrier), "[Barrier] BackBuffer[%u] -> RENDER_TARGET", g_frameIndex);
+	RecordGpuBreadcrumbOp(bufRtvBarrier);
 	g_commandList->ResourceBarrier(1, &barrier);
 
-	// Set Viewport & Scissor
-	D3D12_VIEWPORT viewport = { 0.0f, 0.0f, (float)g_currentWidth, (float)g_currentHeight, 0.0f, 1.0f };
-	D3D12_RECT scissor = { 0, 0, (LONG)g_currentWidth, (LONG)g_currentHeight };
+	// Restrict 3D Viewport & Scissor to the Center Viewport (matching UI_Ref.svg blueprint)
+	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+	D3D12_VIEWPORT viewport = { vpRect.x, vpRect.y, vpRect.width, vpRect.height, 0.0f, 1.0f };
+	D3D12_RECT scissor = { (LONG)vpRect.x, (LONG)vpRect.y, (LONG)(vpRect.x + vpRect.width), (LONG)(vpRect.y + vpRect.height) };
 	g_commandList->RSSetViewports(1, &viewport);
 	g_commandList->RSSetScissorRects(1, &scissor);
 
@@ -1602,8 +1923,18 @@ void renderFrame()
 
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_dsvDescHeap->GetCPUDescriptorHandleForHeapStart();
 
+	// First clear entire backbuffer to editor background #2B2B2B (RGB 0.169f, 0.169f, 0.169f)
+	const float editorBgColor[4] = { 0.169f, 0.169f, 0.169f, 1.0f };
+	g_commandList->ClearRenderTargetView(rtvHandle, editorBgColor, 0, nullptr);
+
+	// Clear the 3D viewport area to scene clear color
 	const float clearColor[4] = { g_scene.clearColor.r, g_scene.clearColor.g, g_scene.clearColor.b, 1.0f };
-	g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+	char bufClearRtv[64];
+	snprintf(bufClearRtv, sizeof(bufClearRtv), "[ClearRTV] BackBuffer[%u]", g_frameIndex);
+	RecordGpuBreadcrumbOp(bufClearRtv);
+	g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &scissor);
+
+	RecordGpuBreadcrumbOp("[ClearDSV] DepthStencilBuffer");
 	g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 	g_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, &dsvHandle);
@@ -1624,10 +1955,12 @@ void renderFrame()
 		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
 		g_commandList->IASetIndexBuffer(&g_indexBufferView);
 
-		for (const auto& batch : g_sceneBatches)
+		for (size_t bIdx = 0; bIdx < g_sceneBatches.size(); ++bIdx)
 		{
+			const auto& batch = g_sceneBatches[bIdx];
 			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0) continue;
 			UINT drawCount = std::min(batch.indexCount, g_currentIndexCount - batch.startIndex);
+			if (drawCount == 0) continue;
 
 			MaterialShaderConstants matConsts = {};
 			matConsts.baseColor[0] = batch.baseColor.r;
@@ -1652,8 +1985,15 @@ void renderFrame()
 
 			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
 				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex);
-			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
+			if (tableHandle.ptr == 0) continue;
 
+			char bufSceneDraw[160];
+			snprintf(bufSceneDraw, sizeof(bufSceneDraw), "[SceneDraw] Batch %zu (%s) count=%u start=%u table=0x%llx",
+				bIdx, batch.albedoTex.empty() ? "untextured" : batch.albedoTex.c_str(),
+				drawCount, batch.startIndex, (unsigned long long)tableHandle.ptr);
+			RecordGpuBreadcrumbOp(bufSceneDraw);
+
+			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
 			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
 		}
 	}
@@ -1671,12 +2011,16 @@ void renderFrame()
 		D3D12_RESOURCE_STATE_RENDER_TARGET,
 		D3D12_RESOURCE_STATE_PRESENT
 	);
+	char bufPresentBarrier[96];
+	snprintf(bufPresentBarrier, sizeof(bufPresentBarrier), "[Barrier] BackBuffer[%u] -> PRESENT", g_frameIndex);
+	RecordGpuBreadcrumbOp(bufPresentBarrier);
 	g_commandList->ResourceBarrier(1, &barrier);
 
 	g_commandList->Close();
 
 	ID3D12CommandList* commandLists[] = { g_commandList };
 	g_commandQueue->ExecuteCommandLists(1, commandLists);
+	g_frameOpHistory[g_frameIndex] = g_recordedFrameOps;
 
 	HRESULT hrPresent = g_swapChain->Present(1, 0);
 	if (hrPresent == DXGI_ERROR_DEVICE_REMOVED || hrPresent == DXGI_ERROR_DEVICE_RESET)
@@ -1684,12 +2028,13 @@ void renderFrame()
 		g_deviceLost = true;
 		HRESULT reason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : hrPresent;
 		std::cerr << "[RECOVERY] Present detected device loss (0x" << std::hex << reason << std::dec << ")\n";
+		DumpDREDInformation();
 		g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on Present. Please save work and restart editor.", 3);
 		return;
 	}
 
 	// Signal fence for current frame
-	const UINT64 currentFenceValue = g_fenceValues[g_frameIndex] + 1;
+	const UINT64 currentFenceValue = ++g_globalFenceValue;
 	g_commandQueue->Signal(g_fence, currentFenceValue);
 	g_fenceValues[g_frameIndex] = currentFenceValue;
 
@@ -1799,10 +2144,20 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 {
 	if (g_currentWidth <= 0 || g_currentHeight <= 0) return;
 
-	float ndcX = (2.0f * mouseX) / (float)g_currentWidth - 1.0f;
-	float ndcY = 1.0f - (2.0f * mouseY) / (float)g_currentHeight;
+	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+	if (mouseX < vpRect.x || mouseX > vpRect.x + vpRect.width ||
+	    mouseY < vpRect.y || mouseY > vpRect.y + vpRect.height)
+	{
+		return;
+	}
 
-	float aspect = (float)g_currentWidth / (float)g_currentHeight;
+	float localMouseX = mouseX - vpRect.x;
+	float localMouseY = mouseY - vpRect.y;
+
+	float ndcX = (2.0f * localMouseX) / vpRect.width - 1.0f;
+	float ndcY = 1.0f - (2.0f * localMouseY) / vpRect.height;
+
+	float aspect = (vpRect.width > 0 && vpRect.height > 0) ? (vpRect.width / vpRect.height) : 1.777f;
 	glm::mat4 proj = g_camera.GetProjectionMatrix(aspect);
 	glm::mat4 view = g_camera.GetViewMatrix();
 	glm::mat4 vp = proj * view;
@@ -1906,12 +2261,14 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 		if (hitObj)
 		{
 			g_engineUI.AddLog("LogActor", "Selected Actor: " + hitObj->name, 0);
+			EngineLogger::Get().LogAction("OBJECT_SELECTED", hitObj->name, "ID: " + std::to_string(closestId));
 		}
 	}
 	else
 	{
 		// Clicked empty background: deselect
 		g_scene.selectedId = -1;
+		EngineLogger::Get().LogAction("DESELECT_ALL", "None", "Clicked background");
 	}
 }
 
@@ -1922,6 +2279,7 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 	if (button == GLFW_MOUSE_BUTTON_LEFT)
 	{
 		s_isLeftMouseDown = (action == GLFW_PRESS);
+		EngineLogger::Get().LogAction(action == GLFW_PRESS ? "MOUSE_PRESS_LEFT" : "MOUSE_RELEASE_LEFT");
 		if (action == GLFW_PRESS)
 		{
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
@@ -1946,9 +2304,16 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
 			if (!isAlt && !io.WantCaptureMouse)
 			{
-				g_camera.isFlying = true;
-				s_firstMouseAfterCapture = true;
-				glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+				double mx, my;
+				glfwGetCursorPos(window, &mx, &my);
+				EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+				if (mx >= vpRect.x && mx <= vpRect.x + vpRect.width &&
+				    my >= vpRect.y && my <= vpRect.y + vpRect.height)
+				{
+					g_camera.isFlying = true;
+					s_firstMouseAfterCapture = true;
+					glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+				}
 			}
 		}
 		else if (action == GLFW_RELEASE)
@@ -2040,11 +2405,17 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 
 static void dropCallback(GLFWwindow* window, int count, const char** paths)
 {
+	if (count > 0 && paths && paths[0]) {
+		EngineLogger::Get().LogAction("FILE_DROP", paths[0], "Count: " + std::to_string(count));
+	}
 	g_engineUI.HandleFileDrop(paths, count);
 }
 
 int main()
 {
+	EngineLogger::Get().Init("logs.elogs");
+	EngineLogger::Get().LogAction("ENGINE_START", "Eunoia-Editor", "DirectX 12 Initializing");
+
 	// 1. Initialize GLFW
 	if (!glfwInit())
 	{

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <unordered_set>
 
 struct EngineLogEntry {
     std::string category;
@@ -102,13 +103,37 @@ public:
     float snapRotation = 15.0f; // degrees
     float snapScale = 0.25f;
 
-    // Blueprint UI layout dimensions (from UI_Ref.svg)
-    float uiMargin = 14.0f;
-    float uiGap = 11.0f;
-    float topBarHeight = 54.0f;
-    float leftSidebarWidth = 300.0f;
-    float rightSidebarWidth = 300.0f;
-    float bottomDockHeight = 270.0f;
+    // Blueprint UI layout dimensions (from UI_Ref.svg: 1728x1117 canvas)
+    float uiMargin = 0.0f;
+    float uiGap = 0.0f;
+    float topBarHeight = 58.0f;
+    float leftSidebarWidth = 246.0f;
+    float rightSidebarWidth = 267.0f;
+    float bottomDockHeight = 240.0f;
+
+    struct ViewportRect {
+        float x, y, width, height;
+    };
+
+    ViewportRect GetViewportRect(float windowWidth, float windowHeight) const {
+        if (isImmersiveMode) {
+            return { 0.0f, 0.0f, windowWidth, windowHeight };
+        }
+        float topH = topBarHeight;
+        float bottomH = showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f;
+        float leftW = showOutliner ? leftSidebarWidth : 0.0f;
+        float rightW = showDetails ? rightSidebarWidth : 0.0f;
+
+        float vpX = leftW;
+        float vpY = topH;
+        float vpW = windowWidth - leftW - rightW;
+        float vpH = windowHeight - topH - bottomH;
+
+        if (vpW < 10.0f) vpW = 10.0f;
+        if (vpH < 10.0f) vpH = 10.0f;
+
+        return { vpX, vpY, vpW, vpH };
+    }
 
     // Viewport display mode
     int viewMode = 0; // 0=Lit, 1=Wireframe, 2=Unlit
@@ -196,7 +221,7 @@ private:
     void RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
     void RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs);
     void RenderOutliner(Scene& scene);
-    void DrawOutlinerNode(GameObject& obj, Scene& scene);
+    void DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_set<int>& visitedIds, int depth = 0);
     void RenderDetails(Scene& scene);
     void RenderContentBrowser(Scene& scene);
     void RenderMaterialEditor(Scene& scene);
@@ -206,4 +231,7 @@ private:
 
     // Custom UE5-style UI widgets
     bool DrawTransformPill(const char* label, float& value, const glm::vec4& color, float resetValue = 0.0f, float speed = 0.05f);
+
+    int m_pendingReparentChild = -1;
+    int m_pendingReparentParent = -1;
 };
