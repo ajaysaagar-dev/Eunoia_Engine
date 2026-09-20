@@ -131,8 +131,8 @@ static ID3D12RootSignature* g_rootSignature = nullptr;
 static ID3D12PipelineState* g_pipelineState = nullptr;
 
 // Dynamic Scene Buffers
-const size_t MAX_SCENE_VERTICES = 200000;
-const size_t MAX_SCENE_INDICES  = 600000;
+const size_t MAX_SCENE_VERTICES = 1000000;
+const size_t MAX_SCENE_INDICES  = 3000000;
 
 static ID3D12Resource* g_vertexBuffer = nullptr;
 static ID3D12Resource* g_indexBuffer = nullptr;
@@ -292,9 +292,9 @@ static void ImGui_SrvFree(ImGui_ImplDX12_InitInfo* info, D3D12_CPU_DESCRIPTOR_HA
 	// Linear allocator - no-op
 }
 
-bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle, DWORD timeoutMs = 2000, const char* context = "GPU Fence")
+bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle, DWORD timeoutMs = 5000, const char* context = "GPU Fence")
 {
-	if (!fence || !eventHandle) return true;
+	if (!fence || !eventHandle || g_deviceLost) return false;
 
 	if (fence->GetCompletedValue() >= targetValue) return true;
 
@@ -312,14 +312,28 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 			g_deviceLost = true;
 			std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
 			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
+			return false;
+		}
+
+		// Try a secondary wait of 3000ms before giving up
+		DWORD waitRetry = WaitForSingleObject(eventHandle, 3000);
+		if (waitRetry == WAIT_OBJECT_0 || fence->GetCompletedValue() >= targetValue)
+		{
+			return true;
+		}
+
+		removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+		if (FAILED(removedReason))
+		{
+			g_deviceLost = true;
+			std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
+			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
 		}
 		else
 		{
-			g_engineUI.AddLog("LogRecovery", std::string("Engine stall recovered at ") + context + " (GPU took >" + std::to_string(timeoutMs) + "ms). Resumed.", 1);
+			g_engineUI.AddLog("LogRecovery", std::string("Engine wait timeout at ") + context + ". GPU is taking longer than expected.", 1);
 		}
 
-		// Advance fence to break out of stuck state
-		fence->Signal(targetValue);
 		return false;
 	}
 
@@ -328,10 +342,10 @@ bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle
 
 void WaitForGpuIdle()
 {
-	if (!g_commandQueue || !g_fence || !g_fenceEvent) return;
+	if (!g_commandQueue || !g_fence || !g_fenceEvent || g_deviceLost) return;
 	const UINT64 fence = g_fenceValues[g_frameIndex] + 1;
 	g_commandQueue->Signal(g_fence, fence);
-	SafeWaitForFence(g_fence, fence, g_fenceEvent, 2000, "WaitForGpuIdle");
+	SafeWaitForFence(g_fence, fence, g_fenceEvent, 5000, "WaitForGpuIdle");
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
 		g_fenceValues[i] = fence;
@@ -408,7 +422,15 @@ DX12GpuTexture UploadTextureToD3D12(const void* pixels, int width, int height)
 	// Dedicated upload fence synchronization (does not interfere with frame fence)
 	g_uploadFenceValue++;
 	g_commandQueue->Signal(g_uploadFence, g_uploadFenceValue);
-	SafeWaitForFence(g_uploadFence, g_uploadFenceValue, g_uploadFenceEvent, 3000, "UploadTexture");
+	bool uploadOk = SafeWaitForFence(g_uploadFence, g_uploadFenceValue, g_uploadFenceEvent, 10000, "UploadTexture");
+
+	if (!uploadOk)
+	{
+		std::cerr << "[TEXTURE UPLOAD] Fence wait failed for texture (" << width << "x" << height << ")\n";
+		if (uploadBuf) uploadBuf->Release();
+		if (tex) tex->Release();
+		return result;
+	}
 
 	uploadBuf->Release();
 
@@ -1406,13 +1428,21 @@ void updateConstantBuffer()
 
 	g_scene.SyncLightPositionsFromActors();
 
-	float aspect = (g_currentHeight > 0) ? ((float)g_currentWidth / (float)g_currentHeight) : 1.777f;
+	float aspect = (g_currentWidth > 0 && g_currentHeight > 0) ? ((float)g_currentWidth / (float)g_currentHeight) : 1.777f;
+	if (aspect <= 0.01f || std::isnan(aspect)) aspect = 1.777f;
+
 	glm::mat4 model = glm::mat4(1.0f);
 	glm::mat4 view  = g_camera.GetViewMatrix();
 	glm::mat4 proj  = g_camera.GetProjectionMatrix(aspect);
 
 	// Light View-Projection for Directional Sun Light
-	glm::vec3 lightDir = glm::normalize(g_scene.lightDirection);
+	glm::vec3 lightDir = g_scene.lightDirection;
+	float lLen = glm::length(lightDir);
+	if (lLen > 0.0001f && !std::isnan(lLen)) {
+		lightDir /= lLen;
+	} else {
+		lightDir = glm::vec3(0.6f, 1.0f, 0.8f);
+	}
 	glm::vec3 sceneCenter(0.0f, 0.0f, 0.0f);
 	glm::vec3 lightPos = sceneCenter + lightDir * 18.0f;
 	glm::vec3 up = (std::abs(lightDir.y) > 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
@@ -1487,6 +1517,8 @@ void resizeBuffers(int width, int height)
 
 void renderFrame()
 {
+	if (g_deviceLost) return;
+
 	g_commandAllocators[g_frameIndex]->Reset();
 	g_commandList->Reset(g_commandAllocators[g_frameIndex], nullptr);
 
@@ -1520,8 +1552,9 @@ void renderFrame()
 
 		for (const auto& batch : g_sceneBatches)
 		{
-			if (batch.indexCount == 0 || !batch.castShadows || batch.isUnlit) continue;
-			g_commandList->DrawIndexedInstanced(batch.indexCount, 1, batch.startIndex, 0, 0);
+			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0 || !batch.castShadows || batch.isUnlit) continue;
+			UINT drawCount = std::min(batch.indexCount, g_currentIndexCount - batch.startIndex);
+			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
 		}
 
 		D3D12_RESOURCE_BARRIER shadowReadBarrier = CreateTransitionBarrier(
@@ -1578,7 +1611,8 @@ void renderFrame()
 
 		for (const auto& batch : g_sceneBatches)
 		{
-			if (batch.indexCount == 0) continue;
+			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0) continue;
+			UINT drawCount = std::min(batch.indexCount, g_currentIndexCount - batch.startIndex);
 
 			MaterialShaderConstants matConsts = {};
 			matConsts.baseColor[0] = batch.baseColor.r;
@@ -1605,7 +1639,7 @@ void renderFrame()
 				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex);
 			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
 
-			g_commandList->DrawIndexedInstanced(batch.indexCount, 1, batch.startIndex, 0, 0);
+			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
 		}
 	}
 
@@ -1636,6 +1670,7 @@ void renderFrame()
 		HRESULT reason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : hrPresent;
 		std::cerr << "[RECOVERY] Present detected device loss (0x" << std::hex << reason << std::dec << ")\n";
 		g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on Present. Please save work and restart editor.", 3);
+		return;
 	}
 
 	// Signal fence for current frame
@@ -1650,7 +1685,7 @@ void renderFrame()
 	if (g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
 	{
 		g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
-		SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 2000, "renderFrame frame fence");
+		SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "renderFrame frame fence");
 	}
 }
 
@@ -1756,6 +1791,8 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 	glm::mat4 proj = g_camera.GetProjectionMatrix(aspect);
 	glm::mat4 view = g_camera.GetViewMatrix();
 	glm::mat4 vp = proj * view;
+	float vpDet = glm::determinant(vp);
+	if (std::abs(vpDet) < 1e-6f || std::isnan(vpDet)) return;
 	glm::mat4 invVP = glm::inverse(vp);
 
 	glm::vec4 nearPointWorld = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
@@ -1765,7 +1802,10 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 	if (farPointWorld.w != 0.0f)  farPointWorld  /= farPointWorld.w;
 
 	glm::vec3 rayOrigin = glm::vec3(nearPointWorld);
-	glm::vec3 rayDir = glm::normalize(glm::vec3(farPointWorld - nearPointWorld));
+	glm::vec3 rayDiff = glm::vec3(farPointWorld - nearPointWorld);
+	float rayDiffLen = glm::length(rayDiff);
+	if (rayDiffLen < 1e-6f || std::isnan(rayDiffLen)) return;
+	glm::vec3 rayDir = rayDiff / rayDiffLen;
 
 	// 1. Check if user clicked on a Light Sprite Billboard in screen space
 	int closestLightId = -1;
@@ -1809,10 +1849,15 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 		if (!obj.visible || obj.mesh.vertices.empty()) continue;
 
 		glm::mat4 model = g_scene.GetWorldMatrix(obj);
+		float modelDet = glm::determinant(model);
+		if (std::abs(modelDet) < 1e-6f || std::isnan(modelDet)) continue;
 		glm::mat4 invModel = glm::inverse(model);
 
 		glm::vec3 localRayOrig = glm::vec3(invModel * glm::vec4(rayOrigin, 1.0f));
-		glm::vec3 localRayDir  = glm::normalize(glm::vec3(invModel * glm::vec4(rayDir, 0.0f)));
+		glm::vec3 unnormLocalRayDir = glm::vec3(invModel * glm::vec4(rayDir, 0.0f));
+		float lrdLen = glm::length(unnormLocalRayDir);
+		if (lrdLen < 1e-6f || std::isnan(lrdLen)) continue;
+		glm::vec3 localRayDir = unnormLocalRayDir / lrdLen;
 
 		const auto& verts = obj.mesh.vertices;
 		const auto& inds  = obj.mesh.indices;
@@ -2181,9 +2226,7 @@ int main()
 		// When device is lost, skip 3D scene updates to prevent crashes/stalls
 		if (g_deviceLost)
 		{
-			try {
-				renderFrame();
-			} catch (...) {}
+			Sleep(50);
 		}
 		else
 		{

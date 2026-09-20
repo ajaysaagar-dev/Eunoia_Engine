@@ -309,8 +309,11 @@ public:
                 glm::mat4 worldMat = GetWorldMatrix(obj);
                 glm::vec3 worldPos = GetWorldPosition(obj);
 
-                glm::vec3 dir = glm::normalize(glm::vec3(worldMat * glm::vec4(0.0f, -1.0f, 0.0f, 0.0f)));
-                if (glm::length(dir) > 0.001f) obj.light.direction = dir;
+                glm::vec3 unnormDir = glm::vec3(worldMat * glm::vec4(0.0f, -1.0f, 0.0f, 0.0f));
+                float dirLen = glm::length(unnormDir);
+                if (dirLen > 0.0001f && !std::isnan(dirLen)) {
+                    obj.light.direction = unnormDir / dirLen;
+                }
 
                 if (obj.light.type == LightType::Directional && obj.light.enabled) {
                     lightDirection = -obj.light.direction;
@@ -488,8 +491,13 @@ public:
             if (newParent) {
                 newParent->childIds.push_back(childId);
                 glm::mat4 parentWorld = GetWorldMatrix(*newParent);
-                glm::mat4 newLocal = glm::inverse(parentWorld) * childWorld;
-                DecomposeMatrix(newLocal, child->position, child->rotation, child->scale);
+                float det = glm::determinant(parentWorld);
+                if (std::abs(det) > 1e-6f && !std::isnan(det)) {
+                    glm::mat4 newLocal = glm::inverse(parentWorld) * childWorld;
+                    DecomposeMatrix(newLocal, child->position, child->rotation, child->scale);
+                } else {
+                    DecomposeMatrix(childWorld, child->position, child->rotation, child->scale);
+                }
             }
         } else {
             DecomposeMatrix(childWorld, child->position, child->rotation, child->scale);
@@ -653,14 +661,21 @@ struct RenderBatch {
             if (obj.mesh.vertices.empty() || obj.mesh.indices.empty()) continue;
 
             glm::mat4 model = GetWorldMatrix(obj);
-            glm::mat3 normalMatrix = glm::transpose(glm::inverse(glm::mat3(model)));
+            glm::mat3 m3(model);
+            glm::mat3 normalMatrix(1.0f);
+            float det = glm::determinant(m3);
+            if (std::abs(det) > 1e-6f && !std::isnan(det)) {
+                normalMatrix = glm::transpose(glm::inverse(m3));
+            }
 
             uint32_t vertexOffset = (uint32_t)outVertices.size();
             uint32_t indexStart = (uint32_t)outIndices.size();
 
             for (const auto& mv : obj.mesh.vertices) {
                 glm::vec4 worldPos = model * glm::vec4(mv.pos, 1.0f);
-                glm::vec3 worldNormal = glm::normalize(normalMatrix * mv.normal);
+                glm::vec3 n = normalMatrix * mv.normal;
+                float nLen = glm::length(n);
+                glm::vec3 worldNormal = (nLen > 1e-6f && !std::isnan(nLen)) ? (n / nLen) : glm::vec3(0.0f, 1.0f, 0.0f);
                 outVertices.push_back({ glm::vec3(worldPos), worldNormal, mv.uv, glm::vec3(1.0f, 1.0f, 1.0f) });
             }
 
@@ -884,7 +899,10 @@ struct RenderBatch {
                 for (size_t i = 0; i + 2 < iList.size(); i += 3) {
                     uint32_t i0 = iList[i], i1 = iList[i + 1], i2 = iList[i + 2];
                     glm::vec3 v0 = vList[i0].pos, v1 = vList[i1].pos, v2 = vList[i2].pos;
-                    glm::vec3 fn = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+                    glm::vec3 c = glm::cross(v1 - v0, v2 - v0);
+                    float cLen = glm::length(c);
+                    if (cLen < 1e-6f || std::isnan(cLen)) continue;
+                    glm::vec3 fn = c / cLen;
                     uint32_t tri[3] = { i0, i1, i2 };
                     for (int e = 0; e < 3; ++e) {
                         uint32_t ea = tri[e];

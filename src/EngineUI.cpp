@@ -424,6 +424,9 @@ void EngineUI::RenderViewportDropTarget(Scene& level, OrbitCamera& camera) {
 }
 
 void EngineUI::SetupTheme() {
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigDebugHighlightIdConflicts = false;
+
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
@@ -1205,7 +1208,7 @@ bool EngineUI::DrawTransformPill(const char* label, float& value, const glm::vec
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(color.r * 0.9f, color.g * 0.9f, color.b * 0.9f, 1.0f));
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
     char btnLabel[32];
-    snprintf(btnLabel, sizeof(btnLabel), "%s###btn", label);
+    snprintf(btnLabel, sizeof(btnLabel), "%s##btn_%s", label, label);
     if (ImGui::Button(btnLabel, ImVec2(20, 0))) {
         value = resetValue;
         modified = true;
@@ -1214,7 +1217,9 @@ bool EngineUI::DrawTransformPill(const char* label, float& value, const glm::vec
 
     ImGui::SameLine();
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 6.0f);
-    if (ImGui::DragFloat("##val", &value, speed, 0.0f, 0.0f, "%.2f")) {
+    char valLabel[32];
+    snprintf(valLabel, sizeof(valLabel), "##val_%s", label);
+    if (ImGui::DragFloat(valLabel, &value, speed, 0.0f, 0.0f, "%.2f")) {
         modified = true;
     }
 
@@ -1338,7 +1343,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::TextDisabled("Light Settings");
 
                 if (ImGui::ColorEdit3("Color##LightComponentColor", &obj->light.color.r,
-                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB)) {
+                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB)) {
                     obj->color = obj->light.color;
                     if (obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
                         scene.pointLights[obj->lightId].color = obj->light.color;
@@ -1412,9 +1417,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Hemisphere Colors");
                     ImGui::ColorEdit3("Sky Color##HemiSkyCol", &obj->light.skyColor.r,
-                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
+                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
                     ImGui::ColorEdit3("Ground Color##HemiGndCol", &obj->light.groundColor.r,
-                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
+                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
                 }
 
                 if (obj->light.type == LightType::Sky) {
@@ -1431,7 +1436,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                     ImGui::SliderFloat("Ambient Contribution##SkyAmb", &obj->light.ambientContribution, 0.0f, 2.0f);
                     ImGui::SliderFloat("Mip Level##SkyMip", &obj->light.mipLevel, 0.0f, 8.0f);
                     ImGui::ColorEdit3("Lower Hemisphere Color##SkyLowerHemiCol", &obj->light.lowerHemisphereColor.r,
-                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
+                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
                 }
 
                 ImGui::Separator();
@@ -2531,7 +2536,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         // ═══════════════════════════════════════════
         if (ImGui::CollapsingHeader("VALUES", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Spacing();
-            if (ImGui::ColorEdit3("Base Color", &activeMaterial.baseColor.r, ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB)) {
+            if (ImGui::ColorEdit3("Base Color", &activeMaterial.baseColor.r, ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB)) {
                 materialDirty = true;
             }
             if (ImGui::SliderFloat("Metallic", &activeMaterial.metallic, 0.0f, 1.0f, "%.2f")) {
@@ -3235,7 +3240,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                         }
                         ImGui::DragFloat3("Position", &pl.position.x, 0.1f);
                         ImGui::ColorEdit3("Color##PointLightColor", &pl.color.r,
-                                          ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
+                                          ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
                         ImGui::SliderFloat("Intensity", &pl.intensity, 0.0f, 10.0f);
                         ImGui::SliderFloat("Radius / Range", &pl.range, 0.5f, 30.0f);
                     }
