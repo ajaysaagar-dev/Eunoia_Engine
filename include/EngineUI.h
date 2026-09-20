@@ -96,6 +96,7 @@ public:
     bool showGizmo = true;
     int currentGizmoOperation = 7; // ImGuizmo::TRANSLATE
     int currentGizmoMode = 1;      // ImGuizmo::WORLD
+    bool gizmoUseCenter = false;   // false = Pivot (at object's pivot point, default), true = Center (mesh bounding-box center)
     bool useSnap = false;
     glm::vec3 snapTranslation{0.5f, 0.5f, 0.5f};
     float snapRotation = 15.0f; // degrees

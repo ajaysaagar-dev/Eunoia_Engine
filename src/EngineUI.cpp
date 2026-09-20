@@ -522,6 +522,10 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             currentGizmoMode = (currentGizmoMode == ImGuizmo::WORLD) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
             AddLog("LogEditor", (currentGizmoMode == ImGuizmo::WORLD) ? "Coordinate Space: World" : "Coordinate Space: Local", 0);
         }
+        if (ImGui::IsKeyPressed(ImGuiKey_Z) && !ImGui::GetIO().KeyCtrl) {
+            gizmoUseCenter = !gizmoUseCenter;
+            AddLog("LogEditor", gizmoUseCenter ? "Gizmo Position: Center (Z)" : "Gizmo Position: Pivot (Z)", 0);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_Delete) && scene.selectedId != -1) {
             GameObject* o = scene.GetSelected();
             if (o) AddLog("LogActor", "Deleted Actor: " + o->name, 1);
@@ -748,6 +752,12 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 currentGizmoMode = (currentGizmoMode == ImGuizmo::WORLD) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
             }
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle World / Local Coordinate Space (Q)");
+
+            const char* pivotStr = gizmoUseCenter ? "Center (Z)" : "Pivot (Z)";
+            if (ImGui::Button(pivotStr)) {
+                gizmoUseCenter = !gizmoUseCenter;
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle Gizmo Position: Pivot Point / Geometric Center (Z)");
 
             ImGui::Checkbox("Snap", &useSnap);
 
@@ -3269,6 +3279,10 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
     ImGuizmo::SetRect(vpX, vpY, vpW, vpH);
 
     glm::mat4 modelMatrix = scene.GetWorldMatrix(*obj);
+    if (gizmoUseCenter && !obj->mesh.vertices.empty()) {
+        glm::vec3 worldCenter = scene.GetWorldCenter(*obj);
+        modelMatrix[3] = glm::vec4(worldCenter, 1.0f);
+    }
     glm::mat4 viewMatrix = camera.GetViewMatrix();
     glm::mat4 projMatrix = camera.GetProjectionMatrix(vpW / vpH);
 
@@ -3289,11 +3303,16 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         }
     }
 
+    // Scale operation in ImGuizmo requires LOCAL mode
+    ImGuizmo::MODE actualMode = (currentGizmoOperation == ImGuizmo::SCALE) 
+        ? ImGuizmo::LOCAL 
+        : (ImGuizmo::MODE)currentGizmoMode;
+
     bool manipulated = ImGuizmo::Manipulate(
         glm::value_ptr(viewMatrix),
         glm::value_ptr(projMatrix),
         (ImGuizmo::OPERATION)currentGizmoOperation,
-        (ImGuizmo::MODE)currentGizmoMode,
+        actualMode,
         glm::value_ptr(modelMatrix),
         nullptr,
         pSnap
@@ -3310,7 +3329,17 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
 
         if (currentGizmoOperation == ImGuizmo::TRANSLATE) {
             // Directly extract translation without Euler angle decomposition to prevent jitter
-            obj->position = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]);
+            if (gizmoUseCenter && !obj->mesh.vertices.empty()) {
+                glm::vec3 minB(1e9f), maxB(-1e9f);
+                for (const auto& v : obj->mesh.vertices) {
+                    minB = glm::min(minB, v.pos);
+                    maxB = glm::max(maxB, v.pos);
+                }
+                glm::vec3 localCenterOffset = (minB + maxB) * 0.5f;
+                obj->position = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]) - localCenterOffset;
+            } else {
+                obj->position = glm::vec3(localMatrix[3][0], localMatrix[3][1], localMatrix[3][2]);
+            }
         } else if (currentGizmoOperation == ImGuizmo::SCALE) {
             // Directly compute scale vector lengths to prevent rotation drift
             obj->scale = glm::vec3(

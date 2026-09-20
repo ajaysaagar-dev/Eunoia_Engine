@@ -171,6 +171,18 @@ public:
         return GetWorldPosition(*obj);
     }
 
+    glm::vec3 GetWorldCenter(const GameObject& obj) const {
+        if (obj.mesh.vertices.empty()) return GetWorldPosition(obj);
+        glm::vec3 minB(1e9f), maxB(-1e9f);
+        for (const auto& v : obj.mesh.vertices) {
+            minB = glm::min(minB, v.pos);
+            maxB = glm::max(maxB, v.pos);
+        }
+        glm::vec3 localCenter = (minB + maxB) * 0.5f;
+        glm::mat4 worldMat = GetWorldMatrix(obj);
+        return glm::vec3(worldMat * glm::vec4(localCenter, 1.0f));
+    }
+
     static void DecomposeMatrix(const glm::mat4& m, glm::vec3& translation, glm::vec3& rotation, glm::vec3& scale) {
         translation = glm::vec3(m[3]);
         scale.x = glm::length(glm::vec3(m[0]));
@@ -183,9 +195,9 @@ public:
         if (scale.z > 1e-6f) rotM[2] = glm::vec3(m[2]) / scale.z;
 
         const float RAD2DEG = 180.0f / 3.14159265358979323846f;
-        rotation.x = RAD2DEG * std::atan2(rotM[1][2], rotM[2][2]);
-        rotation.y = RAD2DEG * std::atan2(-rotM[0][2], std::sqrt(rotM[1][2] * rotM[1][2] + rotM[2][2] * rotM[2][2]));
-        rotation.z = RAD2DEG * std::atan2(rotM[0][1], rotM[0][0]);
+        rotation.x = RAD2DEG * std::atan2(rotM[2][1], rotM[2][2]);
+        rotation.y = RAD2DEG * std::atan2(-rotM[2][0], std::sqrt(rotM[2][1] * rotM[2][1] + rotM[2][2] * rotM[2][2]));
+        rotation.z = RAD2DEG * std::atan2(rotM[1][0], rotM[0][0]);
     }
 
     GameObject& AddObject(PrimitiveType type, glm::vec3 pos = {0.0f, 0.5f, 0.0f}, glm::vec3 color = {0.55f, 0.55f, 0.55f}, int parentId = -1) {
@@ -354,10 +366,23 @@ public:
             // Child actors for each sub-mesh
             int subIdx = 0;
             for (auto& im : model.meshes) {
-                if (!im.valid) { subIdx++; continue; }
+                if (!im.valid || im.vertices.empty()) { subIdx++; continue; }
                 int childId = nextId++;
                 std::string childName = im.name.empty() ? (rootName + "_" + std::to_string(subIdx)) : im.name;
-                objects.emplace_back(childId, childName, PrimitiveType::ImportedMesh, glm::vec3(0.0f), glm::vec3{0.55f});
+
+                // Compute bounding-box center / pivot point of the sub-mesh
+                glm::vec3 minBound(1e9f);
+                glm::vec3 maxBound(-1e9f);
+                for (const auto& v : im.vertices) {
+                    if (!std::isnan(v.pos.x) && !std::isnan(v.pos.y) && !std::isnan(v.pos.z) &&
+                        !std::isinf(v.pos.x) && !std::isinf(v.pos.y) && !std::isinf(v.pos.z)) {
+                        minBound = glm::min(minBound, v.pos);
+                        maxBound = glm::max(maxBound, v.pos);
+                    }
+                }
+                glm::vec3 pivot = (minBound + maxBound) * 0.5f;
+
+                objects.emplace_back(childId, childName, PrimitiveType::ImportedMesh, pivot, glm::vec3{0.55f});
                 GameObject& child = objects.back();
                 child.meshFilePath = filePath;
                 child.isImportedMesh = true;
@@ -367,14 +392,19 @@ public:
                 child.roughness = 0.5f;
                 child.specular = 0.5f;
                 child.parentId = rootId;
-                // Sanitize mesh
+
+                // Center mesh vertices relative to its pivot point
                 child.mesh.vertices = im.vertices;
                 child.mesh.indices  = im.indices;
                 uint32_t vCount = (uint32_t)child.mesh.vertices.size();
                 for (uint32_t& idx : child.mesh.indices) { if (idx >= vCount) idx = 0; }
                 for (auto& v : child.mesh.vertices) {
                     if (std::isnan(v.pos.x)||std::isnan(v.pos.y)||std::isnan(v.pos.z)||
-                        std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) v.pos = {};
+                        std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) {
+                        v.pos = glm::vec3(0.0f);
+                    } else {
+                        v.pos -= pivot;
+                    }
                 }
                 // Register child with root
                 if (GameObject* rootPtr = FindObject(rootId)) rootPtr->childIds.push_back(childId);
@@ -406,9 +436,23 @@ public:
             } else {
                 uint32_t vCount = (uint32_t)obj.mesh.vertices.size();
                 for (uint32_t& idx : obj.mesh.indices) { if (idx >= vCount) idx = 0; }
+                glm::vec3 minBound(1e9f);
+                glm::vec3 maxBound(-1e9f);
                 for (auto& v : obj.mesh.vertices) {
                     if (std::isnan(v.pos.x)||std::isnan(v.pos.y)||std::isnan(v.pos.z)||
-                        std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) v.pos = {};
+                        std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) {
+                        v.pos = glm::vec3(0.0f);
+                    } else {
+                        minBound = glm::min(minBound, v.pos);
+                        maxBound = glm::max(maxBound, v.pos);
+                    }
+                }
+                glm::vec3 pivot = (minBound + maxBound) * 0.5f;
+                if (glm::length(pivot) > 0.0001f) {
+                    obj.position += pivot;
+                    for (auto& v : obj.mesh.vertices) {
+                        v.pos -= pivot;
+                    }
                 }
             }
         } else {

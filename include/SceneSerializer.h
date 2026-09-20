@@ -744,12 +744,59 @@ private:
                     if (obj.submeshIndex >= 0 && obj.submeshIndex < (int)model.meshes.size()) {
                         obj.mesh.vertices = model.meshes[obj.submeshIndex].vertices;
                         obj.mesh.indices  = model.meshes[obj.submeshIndex].indices;
+
+                        glm::vec3 minBound(1e9f);
+                        glm::vec3 maxBound(-1e9f);
+                        for (const auto& v : obj.mesh.vertices) {
+                            if (!std::isnan(v.pos.x) && !std::isnan(v.pos.y) && !std::isnan(v.pos.z) &&
+                                !std::isinf(v.pos.x) && !std::isinf(v.pos.y) && !std::isinf(v.pos.z)) {
+                                minBound = glm::min(minBound, v.pos);
+                                maxBound = glm::max(maxBound, v.pos);
+                            }
+                        }
+                        glm::vec3 pivot = (minBound + maxBound) * 0.5f;
+                        uint32_t vCount = (uint32_t)obj.mesh.vertices.size();
+                        for (uint32_t& idx : obj.mesh.indices) { if (idx >= vCount) idx = 0; }
+                        for (auto& v : obj.mesh.vertices) {
+                            if (std::isnan(v.pos.x)||std::isnan(v.pos.y)||std::isnan(v.pos.z)||
+                                std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) {
+                                v.pos = glm::vec3(0.0f);
+                            } else {
+                                v.pos -= pivot;
+                            }
+                        }
+                        if (obj.parentId != -1 && glm::length(obj.position) < 0.0001f && glm::length(pivot) > 0.0001f) {
+                            obj.position = pivot;
+                        }
                     } else if (model.meshes.size() == 1) {
                         if (!model.meshes[0].vertices.empty()) {
                             obj.mesh.vertices = model.meshes[0].vertices;
                             obj.mesh.indices  = model.meshes[0].indices;
                         } else {
                             obj.mesh = model.GetMergedMesh();
+                        }
+                        glm::vec3 minBound(1e9f);
+                        glm::vec3 maxBound(-1e9f);
+                        for (const auto& v : obj.mesh.vertices) {
+                            if (!std::isnan(v.pos.x) && !std::isnan(v.pos.y) && !std::isnan(v.pos.z) &&
+                                !std::isinf(v.pos.x) && !std::isinf(v.pos.y) && !std::isinf(v.pos.z)) {
+                                minBound = glm::min(minBound, v.pos);
+                                maxBound = glm::max(maxBound, v.pos);
+                            }
+                        }
+                        glm::vec3 pivot = (minBound + maxBound) * 0.5f;
+                        uint32_t vCount = (uint32_t)obj.mesh.vertices.size();
+                        for (uint32_t& idx : obj.mesh.indices) { if (idx >= vCount) idx = 0; }
+                        for (auto& v : obj.mesh.vertices) {
+                            if (std::isnan(v.pos.x)||std::isnan(v.pos.y)||std::isnan(v.pos.z)||
+                                std::isinf(v.pos.x)||std::isinf(v.pos.y)||std::isinf(v.pos.z)) {
+                                v.pos = glm::vec3(0.0f);
+                            } else {
+                                v.pos -= pivot;
+                            }
+                        }
+                        if (obj.parentId != -1 && glm::length(obj.position) < 0.0001f && glm::length(pivot) > 0.0001f) {
+                            obj.position = pivot;
                         }
                     } else {
                         // submeshIndex == -1 with multiple meshes: parent/root node, keeps empty geometry
