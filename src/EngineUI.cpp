@@ -2,6 +2,7 @@
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
+#include <cmath>
 #include <cstdio>
 #include <ctime>
 #include <vector>
@@ -1325,8 +1326,8 @@ void EngineUI::RenderDetails(Scene& scene) {
             ImGui::Checkbox("Lock Uniform Scale", &lockAspectScale);
             ImGui::PopID();
 
-            if (transformChanged && obj->isLight && obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
-                scene.pointLights[obj->lightId].position = scene.GetWorldPosition(*obj);
+            if (transformChanged && (obj->isLight || IsLightPrimitive(obj->type))) {
+                scene.SyncLightPositionsFromActors();
             }
         }
 
@@ -1475,6 +1476,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                 scene.pointLights[obj->lightId].intensity = obj->light.intensity;
                 scene.pointLights[obj->lightId].range = obj->light.range;
                 scene.pointLights[obj->lightId].enabled = obj->light.enabled;
+                scene.pointLights[obj->lightId].castShadows = obj->light.castShadows;
             }
         }
 
@@ -3265,31 +3267,54 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
     if (!obj || !obj->visible) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    float margin = uiMargin;
-    float gap = uiGap;
-    float curBottomH = (showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f);
-    float bottomY = vp->Pos.y + vp->Size.y - curBottomH - margin;
-    float vpX = vp->Pos.x + margin + (showOutliner ? leftSidebarWidth + gap : 0.0f);
-    float vpY = vp->Pos.y + margin + topBarHeight + gap;
-    float vpW = (vp->Pos.x + vp->Size.x - margin - (showDetails ? rightSidebarWidth + gap : 0.0f)) - vpX;
-    float vpH = (curBottomH > 0.0f ? (bottomY - gap) : (vp->Pos.y + vp->Size.y - margin)) - vpY;
-
-    if (vpW <= 10.0f || vpH <= 10.0f) return;
+    if (!vp || vp->Size.x <= 10.0f || vp->Size.y <= 10.0f) return;
 
     // Only allow ImGuizmo to handle mouse if not interacting with UI windows, menus, or popups (e.g. Color Picker)
     bool mouseOverUI = ImGui::GetIO().WantCaptureMouse;
     ImGuizmo::PushID(obj->id);
     ImGuizmo::Enable(!mouseOverUI || ImGuizmo::IsUsing());
     ImGuizmo::SetOrthographic(false);
-    ImGuizmo::SetRect(vpX, vpY, vpW, vpH);
 
+    // The DirectX 12 3D scene renders to the full window viewport (0, 0, g_currentWidth, g_currentHeight)
+    // and light billboards / raycasts are calculated using vp->Size.x / vp->Size.y.
+    // Setting ImGuizmo's rect and projection to the full viewport aligns the gizmo exactly with the 3D scene and light icons.
+    ImGuizmo::SetRect(vp->Pos.x, vp->Pos.y, vp->Size.x, vp->Size.y);
+
+    bool isLight = (obj->isLight || IsLightPrimitive(obj->type));
+
+    // When a light is selected, obtain the light's actual world-space position from its transform/component.
+    // If the light has a parent, GetWorldMatrix computes: WorldTransform = ParentWorldTransform * LocalTransform.
+    // Never use mesh bounds center, actor bounds center, or bounding-box center for lights.
     glm::mat4 modelMatrix = scene.GetWorldMatrix(*obj);
-    if (gizmoUseCenter && !obj->mesh.vertices.empty()) {
+    if (!isLight && gizmoUseCenter && !obj->mesh.vertices.empty()) {
         glm::vec3 worldCenter = scene.GetWorldCenter(*obj);
         modelMatrix[3] = glm::vec4(worldCenter, 1.0f);
     }
+
+    // Task 2: bail out before ImGuizmo::Manipulate if modelMatrix is corrupted.
+    // Selecting a broken object should never hang rendering — it should just
+    // not show a gizmo for it until its data is fixed.
+    {
+        const float* mp = glm::value_ptr(modelMatrix);
+        bool matrixValid = true;
+        for (int i = 0; i < 16; ++i) {
+            if (std::isnan(mp[i]) || !std::isfinite(mp[i])) { matrixValid = false; break; }
+        }
+        if (!matrixValid) {
+            static int lastWarnedId = -1;
+            if (lastWarnedId != obj->id) {
+                std::cerr << "[RECOVERY] Object \"" << obj->name << "\" (id=" << obj->id
+                          << ") has a corrupted transform/mesh — gizmo suppressed to avoid GPU hang.\n";
+                AddLog("LogRecovery",
+                    "Object \"" + obj->name + "\" has a corrupted transform or mesh and its gizmo was suppressed. Fix or delete it.", 2);
+                lastWarnedId = obj->id;
+            }
+            ImGuizmo::PopID();
+            return;
+        }
+    }
     glm::mat4 viewMatrix = camera.GetViewMatrix();
-    glm::mat4 projMatrix = camera.GetProjectionMatrix(vpW / vpH);
+    glm::mat4 projMatrix = camera.GetProjectionMatrix(vp->Size.x / vp->Size.y);
 
     float snapValues[3];
     float* pSnap = nullptr;
@@ -3327,6 +3352,7 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         obj->autoRotate = false; // Pause and disable auto-spinning when user is moving object
 
         // --- Task 1: Guard parent-inverse against degenerate/singular parent transforms ---
+        // Converts World Space -> Local Space for child components/lights
         glm::mat4 localMatrix = modelMatrix;
         if (obj->parentId != -1) {
             glm::mat4 parentWorld = scene.GetWorldMatrix(obj->parentId);
@@ -3347,7 +3373,7 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         if (currentGizmoOperation == ImGuizmo::TRANSLATE) {
             // Directly extract translation without Euler angle decomposition to prevent jitter
             glm::vec3 newPos;
-            if (gizmoUseCenter && !obj->mesh.vertices.empty()) {
+            if (!isLight && gizmoUseCenter && !obj->mesh.vertices.empty()) {
                 glm::vec3 minB(1e9f), maxB(-1e9f);
                 for (const auto& v : obj->mesh.vertices) {
                     minB = glm::min(minB, v.pos);
@@ -3407,7 +3433,7 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
             }
         }
 
-        if (obj->isLight) {
+        if (isLight) {
             scene.SyncLightPositionsFromActors();
         }
     }

@@ -21,6 +21,7 @@ struct PointLight {
     float intensity = 2.0f;
     float range = 10.0f;
     bool enabled = true;
+    bool castShadows = true;
 };
 
 class Scene {
@@ -174,13 +175,25 @@ public:
     glm::vec3 GetWorldCenter(const GameObject& obj) const {
         if (obj.mesh.vertices.empty()) return GetWorldPosition(obj);
         glm::vec3 minB(1e9f), maxB(-1e9f);
+        bool anyValid = false;
         for (const auto& v : obj.mesh.vertices) {
+            if (std::isnan(v.pos.x) || std::isnan(v.pos.y) || std::isnan(v.pos.z) ||
+                !std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z)) {
+                continue; // skip corrupted vertex rather than let it poison the bounds
+            }
             minB = glm::min(minB, v.pos);
             maxB = glm::max(maxB, v.pos);
+            anyValid = true;
         }
+        if (!anyValid) return GetWorldPosition(obj); // every vertex was bad — fall back to origin/position
         glm::vec3 localCenter = (minB + maxB) * 0.5f;
         glm::mat4 worldMat = GetWorldMatrix(obj);
-        return glm::vec3(worldMat * glm::vec4(localCenter, 1.0f));
+        glm::vec3 worldCenter = glm::vec3(worldMat * glm::vec4(localCenter, 1.0f));
+        if (std::isnan(worldCenter.x) || std::isnan(worldCenter.y) || std::isnan(worldCenter.z) ||
+            !std::isfinite(worldCenter.x) || !std::isfinite(worldCenter.y) || !std::isfinite(worldCenter.z)) {
+            return GetWorldPosition(obj); // worldMat itself was bad — fall back
+        }
+        return worldCenter;
     }
 
     static void DecomposeMatrix(const glm::mat4& m, glm::vec3& translation, glm::vec3& rotation, glm::vec3& scale) {
@@ -242,6 +255,7 @@ public:
         GameObject& obj = objects.back();
         obj.isLight = true;
         obj.lightId = lightIndex;
+        obj.light.castShadows = pl.castShadows;
         obj.parentId = parentId;
         obj.mesh.vertices.clear();
         obj.mesh.indices.clear();
@@ -264,6 +278,7 @@ public:
 
         objects.emplace_back(id, name, lightType, pos, col);
         GameObject& obj = objects.back();
+        obj.light.castShadows = true;
         obj.parentId = parentId;
         if (parentId != -1) {
             GameObject* parent = FindObject(parentId);
@@ -281,6 +296,7 @@ public:
             pl.intensity = 2.0f;
             pl.range = 10.0f;
             pl.enabled = true;
+            pl.castShadows = true;
             pointLights.push_back(pl);
             obj.lightId = (int)pointLights.size() - 1;
         }
@@ -305,7 +321,8 @@ public:
     // Keep all lights synced from their GameObjects (called each frame)
     void SyncLightPositionsFromActors() {
         for (auto& obj : objects) {
-            if (obj.isLight) {
+            if (obj.isLight || IsLightPrimitive(obj.type)) {
+                obj.isLight = true;
                 glm::mat4 worldMat = GetWorldMatrix(obj);
                 glm::vec3 worldPos = GetWorldPosition(obj);
 
@@ -333,13 +350,32 @@ public:
                     ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
                 }
 
-                if (obj.lightId >= 0 && obj.lightId < (int)pointLights.size()) {
-                    pointLights[obj.lightId].position = worldPos;
-                    pointLights[obj.lightId].name = obj.name;
-                    pointLights[obj.lightId].color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
-                    pointLights[obj.lightId].intensity = obj.light.intensity;
-                    pointLights[obj.lightId].range = obj.light.range;
-                    pointLights[obj.lightId].enabled = obj.light.enabled;
+                if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
+                    obj.light.type == LightType::Spot || obj.type == PrimitiveType::SpotLight ||
+                    obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight ||
+                    obj.light.type == LightType::Tube || obj.type == PrimitiveType::TubeLight ||
+                    obj.light.type == LightType::Disc || obj.type == PrimitiveType::DiscLight) {
+                    if (obj.lightId < 0 || obj.lightId >= (int)pointLights.size()) {
+                        PointLight pl;
+                        pl.id = obj.id;
+                        pl.name = obj.name;
+                        pl.position = worldPos;
+                        pl.color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
+                        pl.intensity = obj.light.intensity;
+                        pl.range = obj.light.range;
+                        pl.enabled = obj.light.enabled;
+                        pl.castShadows = obj.light.castShadows;
+                        pointLights.push_back(pl);
+                        obj.lightId = (int)pointLights.size() - 1;
+                    } else {
+                        pointLights[obj.lightId].position = worldPos;
+                        pointLights[obj.lightId].name = obj.name;
+                        pointLights[obj.lightId].color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
+                        pointLights[obj.lightId].intensity = obj.light.intensity;
+                        pointLights[obj.lightId].range = obj.light.range;
+                        pointLights[obj.lightId].enabled = obj.light.enabled;
+                        pointLights[obj.lightId].castShadows = obj.light.castShadows;
+                    }
                 }
             }
         }

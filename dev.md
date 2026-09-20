@@ -1,253 +1,195 @@
-Eunoia-Engine/
-├── CMakeLists.txt                 # top-level, adds subdirectories below
-├── deps/                          # third-party (imgui, glfw, glm, ufbx, stb, ...) — unchanged
-│
-├── EngineCore/                    # STATIC LIB — no D3D12, no windowing
-│   ├── include/EngineCore/
-│   │   ├── Log.h                  # replaces std::cerr/std::cout calls
-│   │   ├── Assert.h
-│   │   ├── Time.h
-│   │   ├── JobSystem.h            # thread pool for async loads
-│   │   ├── Result.h               # error type instead of bare bool/HRESULT
-│   │   └── UUID.h / AssetID.h
-│   └── src/...
-│
-├── EnginePlatform/                 # STATIC LIB — windowing/input only
-│   ├── include/EnginePlatform/
-│   │   ├── Window.h                # wraps GLFW window creation/callbacks
-│   │   └── InputSystem.h           # moved from include/InputSystem.h
-│   └── src/...
-│
-├── EngineRHI/                      # STATIC LIB — the ONLY place that
-│   │                                # #includes <d3d12.h>/<dxgi1_4.h>
-│   ├── include/EngineRHI/
-│   │   ├── Device.h                 # device + adapter selection (was
-│   │   │                            #   the top of initD3D12)
-│   │   ├── SwapChain.h              # ResizeBuffers, Present, RTVs
-│   │   ├── CommandContext.h         # command list/allocator + Reset/Close
-│   │   ├── Fence.h                  # SafeWaitForFence lives here, and on
-│   │   │                            #   real device-removal it raises an
-│   │   │                            #   OnDeviceLost event (see EditorApp)
-│   │   ├── DescriptorAllocator.h    # bounds-checked ring/free-list
-│   │   │                            #   allocator — the fix for the SRV
-│   │   │                            #   heap overflow lives here, in ONE
-│   │   │                            #   place, instead of 3 call sites
-│   │   ├── UploadHeap.h             # UploadTextureToD3D12 + upload fence
-│   │   └── PipelineState.h          # shader compile + PSO creation
-│   └── src/...
-│
-├── EngineRenderer/                  # STATIC LIB — depends on RHI, knows
-│   │                                 # about Scene but not about ImGui
-│   ├── include/EngineRenderer/
-│   │   ├── SceneRenderer.h          # shadow pass + main pass, was inline
-│   │   │                            #   in renderFrame()
-│   │   ├── MaterialSystem.h         # GetOrCreateMaterialTable logic
-│   │   ├── TextureManager.h         # moved as-is, now uses JobSystem for
-│   │   │                            #   decode (stb_image) off the render
-│   │   │                            #   thread — this is the fix for
-│   │   │                            #   "import freezes the UI"
-│   │   └── ConstantBuffers.h
-│   └── src/...
-│
-├── EngineScene/                     # STATIC LIB — no rendering/platform
-│   ├── include/EngineScene/
-│   │   ├── GameObject.h             # moved as-is
-│   │   ├── Scene.h                  # moved as-is
-│   │   ├── Camera.h
-│   │   ├── Level.h
-│   │   └── SceneSerializer.h        # see "Serialization" note below
-│   └── src/...
-│
-├── EngineAssets/                    # STATIC LIB — depends on Core+Scene
-│   ├── include/EngineAssets/
-│   │   ├── AssetID.h / AssetPath.h / AssetType.h / AssetMetadata.h
-│   │   ├── AssetRegistry.h
-│   │   ├── AssetManager.h
-│   │   ├── SoftAssetReference.h
-│   │   └── Importers/
-│   │       ├── MeshImporter.h       # dispatches to below
-│   │       ├── ObjImporter.h
-│   │       ├── GltfImporter.h
-│   │       └── FbxImporter.h        # the ufbx-based one, split out
-│   └── src/...
-│
-├── Editor/                          # EXECUTABLE (links all Engine* libs
-│   │                                 # + ImGui/ImGuizmo) — this is where
-│   │                                 # EngineUI.cpp gets split up
-│   ├── include/Editor/
-│   │   ├── EditorApp.h              # owns the main loop (was in main());
-│   │   │                            #   listens for RHI "device lost" and
-│   │   │                            #   shows the restart-required overlay
-│   │   ├── Panels/
-│   │   │   ├── OutlinerPanel.h
-│   │   │   ├── DetailsPanel.h
-│   │   │   ├── ContentBrowserPanel.h
-│   │   │   ├── ViewportPanel.h      # gizmos + fly camera input live here
-│   │   │   ├── ConsolePanel.h       # AddLog / Output Log, was g_engineUI.AddLog
-│   │   │   └── WorldSettingsPanel.h
-│   │   └── Theme.h                  # SetupTheme()
-│   └── src/... (one .cpp per panel above, each a few hundred lines
-│                instead of one 184KB file)
-│
-├── Game/                            # EXECUTABLE (optional, future) — a
-│   │                                 # thin runtime that links EngineCore/
-│   │                                 # RHI/Renderer/Scene/Assets but NOT
-│   │                                 # Editor/ImGui, for shipping games
-│   └── src/main.cpp
-│
-├── resources/                       # unchanged
-├── shaders/                         # unchanged
-└── tests/                           # NEW — unit tests for the pieces that
-    ├── EngineCore.tests/            #   don't need a GPU: JobSystem,
-    ├── EngineScene.tests/           #   AssetRegistry, SceneSerializer
-    └── EngineAssets.tests/          #   parsing, DescriptorAllocator bounds
+````md
+# Engine Debug Logging + DX12 Device Loss Investigation
 
+Create a `logs.elogs` file in the project root directory.
 
-# Fix: Gizmo manipulation causes GPU hang (0x887a0006 DEVICE_HUNG)
+The purpose of this file is to provide enough context for the CLI/debugging system to determine what happened immediately before an engine error or crash.
 
-## Root cause
+## Logging Requirements
 
-The previous fix (commit `c639f64`, "Fix GPU device loss 0x887a0006...")
-added `determinant`/`normalize`-zero guards to several matrix-inverse call
-sites (`Scene.h` reparenting, normal-matrix calc, `PickObjectAtCursor`), but
-**missed the actual leak**: `EngineUI::RenderGizmo()` in `src/EngineUI.cpp`.
+Maintain a rolling history of the **last 50 engine actions/interactions**.
 
-```cpp
-// src/EngineUI.cpp, inside RenderGizmo(), ~line 3330
-glm::mat4 localMatrix = modelMatrix;
-if (obj->parentId != -1) {
-    glm::mat4 parentWorld = scene.GetWorldMatrix(obj->parentId);
-    localMatrix = glm::inverse(parentWorld) * modelMatrix;   // no singularity check
-}
+Log every important user and engine action, including:
+
+- Mouse clicks
+- Mouse button releases
+- Keyboard input
+- UI button clicks
+- UI element interactions
+- Object selection
+- Object creation/deletion
+- Transform changes
+- Gizmo interactions
+- Scene changes
+- Asset loading/unloading
+- Entity/component creation or deletion
+- Rendering-related actions
+- Play/Stop/Restart
+- Project/scene operations
+- Important engine state changes
+- Command execution
+- Any other significant engine action
+
+Each log entry should contain:
+
+- Timestamp
+- Action/event type
+- Relevant object/entity/UI element
+- Important parameters/state
+- Current scene/context if available
+
+Example:
+
+```text
+[18:32:41.125] CLICK
+Target: Light_01
+Position: (824, 412)
+
+[18:32:41.140] OBJECT_SELECTED
+Object: Light_01
+Type: PointLight
+
+[18:32:42.021] GIZMO_MOVE
+Object: Light_01
+Position: (10.2, 4.5, -2.1)
+
+[18:32:42.512] RENDER_COMMAND
+Pass: ShadowPass
+Object: Light_01
+
+[18:32:43.003] ERROR
+System: DirectX12
+Code: 0x887A0006
+Message: DXGI_ERROR_DEVICE_HUNG
+````
+
+## Rolling 50-Action History
+
+Only keep the most recent 50 actions/events during normal operation.
+
+When a new action is added:
+
+```text
+51st action → remove oldest entry
+52nd action → remove next oldest entry
 ...
-} else if (currentGizmoOperation == ImGuizmo::SCALE) {
-    obj->scale = glm::vec3(
-        glm::length(glm::vec3(localMatrix[0])),               // can become NaN
-        glm::length(glm::vec3(localMatrix[1])),
-        glm::length(glm::vec3(localMatrix[2]))
-    );
-}
 ```
 
-If the selected object's parent has (or ever had, and saved to disk) a
-degenerate/near-zero-scale transform, `glm::inverse(parentWorld)` silently
-produces `Inf`/`NaN` instead of erroring. That NaN flows into
-`obj->scale`/`position`/`rotation` on the `GameObject`, gets saved back to
-the scene, and every frame afterward `RenderBatch::BuildFromScene` in
-`include/Scene.h` computes:
+Do not allow the file to grow indefinitely.
 
-```cpp
-glm::vec4 worldPos = model * glm::vec4(mv.pos, 1.0f); // NOT guarded
+## Error Logging
+
+When ANY error, warning, exception, assertion failure, GPU error, DirectX error, or device-loss event occurs:
+
+1. Record the error in `logs.elogs`.
+2. Preserve the preceding 50 actions/events.
+3. Record the error immediately after the relevant action history.
+4. Include:
+
+   * Error code
+   * Error message
+   * Subsystem
+   * Timestamp
+   * Current scene
+   * Relevant object/resource if available
+   * GPU/renderer information
+   * Call site/source information if available
+
+For the DX12 error:
+
+```text
+DXGI_ERROR_DEVICE_HUNG
+0x887A0006
 ```
 
-NaN clip-space positions in the vertex buffer are a known trigger for
-`DXGI_ERROR_DEVICE_HUNG` — the GPU rasterizer chokes on them, Windows' TDR
-kills the context after ~2s, and the app hits the "device lost" path added
-in the last fix (which now correctly stops rendering — but the underlying
-corruption is never cleaned up, so it keeps happening on that object).
+make sure the log contains the actions that happened immediately before the device loss.
 
-## Task 1 (critical): guard the parent-inverse in `RenderGizmo`
+## Important Debugging Behavior
 
-In `src/EngineUI.cpp`, `EngineUI::RenderGizmo()`, replace:
-```cpp
-glm::mat4 localMatrix = modelMatrix;
-if (obj->parentId != -1) {
-    glm::mat4 parentWorld = scene.GetWorldMatrix(obj->parentId);
-    localMatrix = glm::inverse(parentWorld) * modelMatrix;
-}
+The logging system must be implemented centrally so that engine systems do not need to manually create separate log files.
+
+Use a thread-safe logger if the engine is multithreaded.
+
+Do not significantly impact engine performance.
+
+Do not log sensitive data or unnecessarily dump huge buffers/resources.
+
+## CLI Error Investigation
+
+When an engine error occurs, the CLI debugging workflow should inspect:
+
+1. The error information.
+2. The last 50 actions in `logs.elogs`.
+3. The actions immediately preceding the error.
+4. Related engine/renderer state.
+5. Relevant source code.
+6. Relevant DirectX 12 resources/commands.
+
+Then determine the most likely cause and fix the underlying code rather than simply suppressing the error.
+
+For example, if the log shows:
+
+```text
+SELECT Light_01
+GIZMO_MOVE Light_01
+UPDATE_LIGHT_BUFFER
+UPDATE_DESCRIPTOR
+RENDER_SHADOW
+EXECUTE_COMMAND_LIST
+DX12 DEVICE HUNG
 ```
-with:
-```cpp
-glm::mat4 localMatrix = modelMatrix;
-if (obj->parentId != -1) {
-    glm::mat4 parentWorld = scene.GetWorldMatrix(obj->parentId);
-    float parentDet = glm::determinant(parentWorld);
-    if (std::abs(parentDet) > 1e-6f && !std::isnan(parentDet)) {
-        localMatrix = glm::inverse(parentWorld) * modelMatrix;
-    }
-    // else: parent transform is degenerate — fall back to using modelMatrix
-    // as-is (world space) rather than propagating Inf/NaN into localMatrix.
-}
+
+the CLI should investigate the rendering/resource/command operations associated with those actions.
+
+## DX12 Device Loss
+
+Specifically investigate:
+
+```text
+[RECOVERY] Present detected device loss (0x887A0006)
 ```
 
-## Task 2: clamp/guard the scale extraction right after it
+Do not simply ignore or suppress this error.
 
-Still in `RenderGizmo()`, after computing `localMatrix`, guard the SCALE
-branch so a NaN or non-finite length never reaches `obj->scale`:
-```cpp
-} else if (currentGizmoOperation == ImGuizmo::SCALE) {
-    glm::vec3 newScale(
-        glm::length(glm::vec3(localMatrix[0])),
-        glm::length(glm::vec3(localMatrix[1])),
-        glm::length(glm::vec3(localMatrix[2]))
-    );
-    bool valid = !std::isnan(newScale.x) && !std::isnan(newScale.y) && !std::isnan(newScale.z)
-              && std::isfinite(newScale.x) && std::isfinite(newScale.y) && std::isfinite(newScale.z);
-    if (valid) {
-        // Also clamp to a small positive minimum so scale can never hit exactly
-        // 0 (which would make THIS object's own world matrix singular for any
-        // future children/gizmo use).
-        const float kMinScale = 1e-4f;
-        obj->scale = glm::max(newScale, glm::vec3(kMinScale));
-    }
-    // else: ignore this frame's gizmo update rather than corrupting obj->scale.
-}
+Check for:
+
+* Invalid DX12 resource states
+* Incorrect resource barriers
+* Descriptor heap errors
+* Invalid descriptors
+* Command allocator reuse
+* Command list reuse
+* Missing/wrong fence synchronization
+* GPU work submitted after resource destruction
+* Invalid resource lifetime
+* Shader problems
+* GPU timeout/TDR
+* Invalid UAV/SRV/RTV/DSV usage
+* Excessive GPU workloads
+
+Enable the DirectX 12 Debug Layer and GPU-Based Validation in development builds where possible.
+
+## Goal
+
+The final system should make `logs.elogs` a compact **reproduction history**.
+
+Whenever an error occurs, the CLI should be able to read:
+
+```text
+LAST 50 ACTIONS
+        ↓
+ERROR
+        ↓
+ENGINE STATE
+        ↓
+SOURCE CODE
+        ↓
+ROOT CAUSE
+        ↓
+FIX
 ```
-Apply the same `isnan`/`isfinite` check before assigning `obj->position` and
-`obj->rotation` in the TRANSLATE/ROTATE/default branches of the same
-function, for the same reason — a bad `localMatrix` from
-`ImGuizmo::DecomposeMatrixToComponents` should be dropped, not applied.
 
-## Task 3: guard the actual vertex-transform line (defense in depth)
+Do not remove the logging system after fixing the current DX12 issue. It should remain as a permanent engine debugging facility.
 
-In `include/Scene.h`, `RenderBatch::BuildFromScene` (the loop that fills
-`outVertices`), the line:
-```cpp
-glm::vec4 worldPos = model * glm::vec4(mv.pos, 1.0f);
 ```
-currently has no check even though the `model` determinant is already being
-checked a few lines earlier (for `normalMatrix`). Reuse that same guard:
-```cpp
-glm::vec4 worldPos = model * glm::vec4(mv.pos, 1.0f);
-if (std::isnan(worldPos.x) || std::isnan(worldPos.y) || std::isnan(worldPos.z) ||
-    !std::isfinite(worldPos.x) || !std::isfinite(worldPos.y) || !std::isfinite(worldPos.z)) {
-    worldPos = glm::vec4(mv.pos, 1.0f); // fall back to local-space position rather than skip the vertex (keeps index buffer valid)
-}
 ```
-This is a last line of defense so that even if some *other*, not-yet-found
-code path produces a bad `model` matrix in the future, it can never again
-reach the GPU as a NaN vertex.
-
-## Task 4: sanitize already-corrupted scenes on load
-
-Because bad `scale`/`position`/`rotation` values may already be saved in
-`.escn` files from before these guards existed, add a one-time sanitize
-pass. In `include/SceneSerializer.h` (or wherever objects are finalized
-after `Scene::Load`/deserialize), after populating each `GameObject`:
-```cpp
-auto sanitizeVec3 = [](glm::vec3& v, const glm::vec3& fallback) {
-    if (std::isnan(v.x) || std::isnan(v.y) || std::isnan(v.z) ||
-        !std::isfinite(v.x) || !std::isfinite(v.y) || !std::isfinite(v.z)) {
-        v = fallback;
-    }
-};
-sanitizeVec3(obj.position, glm::vec3(0.0f));
-sanitizeVec3(obj.rotation, glm::vec3(0.0f));
-sanitizeVec3(obj.scale, glm::vec3(1.0f));
-obj.scale = glm::max(obj.scale, glm::vec3(1e-4f)); // no zero/negative axis on load either
-```
-Log a warning (`g_engineUI.AddLog("LogRecovery", ...)`) whenever a
-sanitize actually changes a value, so it's visible which object in the
-scene was corrupted and the user can re-check it.
-
-## Acceptance criteria
-
-- Selecting any object and dragging any gizmo (translate/rotate/scale),
-  including objects parented under another object, never triggers
-  `[RECOVERY] Present detected device loss (0x887a0006)`.
-- Deliberately scaling an object to (or through) zero on an axis via the
-  gizmo no longer corrupts `obj->scale` with NaN/zero — it clamps to a
-  small positive minimum instead.
-- Loading an old `.escn` file that has a corrupted (NaN/zero-scale) object
-  from before this fix loads cleanly, logs a recovery warning naming the
-  sanitized field, and does not hang on selection.

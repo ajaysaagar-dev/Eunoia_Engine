@@ -71,6 +71,7 @@ struct alignas(256) SceneConstantBuffer
 	float numPointLights;
 	glm::vec4 pointLightPosRange[4];
 	glm::vec4 pointLightColorIntensity[4];
+	glm::vec4 pointLightCastShadows; // x,y,z,w corresponding to point lights 0..3 (1.0 = cast shadows, 0.0 = no shadows)
 };
 
 struct alignas(256) ShadowConstantBuffer
@@ -205,6 +206,7 @@ static bool s_isRightMouseDown = false;
 static bool s_isMiddleMouseDown = false;
 static bool s_firstMouseAfterCapture = true;
 static double s_lastMouseX = 0.0, s_lastMouseY = 0.0;
+static bool s_pendingPickClick = false;
 
 // D3D12 Helper Functions
 inline D3D12_RESOURCE_BARRIER CreateTransitionBarrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
@@ -976,6 +978,7 @@ int createShadersAndPipeline()
 			float numPointLights;
 			float4 pointLightPosRange[4];
 			float4 pointLightColorIntensity[4];
+			float4 pointLightCastShadows;
 		};
 
 		cbuffer MaterialConstants : register(b1)
@@ -1199,7 +1202,10 @@ int createShadersAndPipeline()
 					float3 pkD = (1.0f - pF) * (1.0f - metal);
 					float3 pDiff = pkD * albedo;
 
-					pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * atten;
+					float pCastShadow = (i == 0) ? pointLightCastShadows.x : ((i == 1) ? pointLightCastShadows.y : ((i == 2) ? pointLightCastShadows.z : pointLightCastShadows.w));
+					float pShadowFactor = (pCastShadow > 0.5f) ? shadowFactor : 1.0f;
+
+					pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * atten * pShadowFactor;
 				}
 			}
 
@@ -1473,15 +1479,24 @@ void updateConstantBuffer()
 
 	// Fill Point Lights (up to 4)
 	int activePointLights = 0;
+	glm::vec4 castShadowsVec(0.0f);
 	for (size_t i = 0; i < g_scene.pointLights.size() && activePointLights < 4; ++i)
 	{
 		const auto& pl = g_scene.pointLights[i];
 		if (!pl.enabled) continue;
 		cb.pointLightPosRange[activePointLights] = glm::vec4(pl.position, pl.range);
 		cb.pointLightColorIntensity[activePointLights] = glm::vec4(pl.color, pl.intensity);
+		if (pl.castShadows)
+		{
+			if (activePointLights == 0) castShadowsVec.x = 1.0f;
+			else if (activePointLights == 1) castShadowsVec.y = 1.0f;
+			else if (activePointLights == 2) castShadowsVec.z = 1.0f;
+			else if (activePointLights == 3) castShadowsVec.w = 1.0f;
+		}
 		activePointLights++;
 	}
 	cb.numPointLights = (float)activePointLights;
+	cb.pointLightCastShadows = castShadowsVec;
 
 	memcpy(g_pConstantMapped, &cb, sizeof(cb));
 }
@@ -1914,9 +1929,7 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			bool isPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
 			if (!isAlt && !g_camera.isFlying && !io.WantCaptureMouse && !isPopupOpen && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
 			{
-				double mouseX, mouseY;
-				glfwGetCursorPos(window, &mouseX, &mouseY);
-				PickObjectAtCursor((float)mouseX, (float)mouseY);
+				s_pendingPickClick = true;
 			}
 		}
 	}
@@ -2187,6 +2200,20 @@ int main()
 		if (shouldExit)
 		{
 			glfwSetWindowShouldClose(g_window, GLFW_TRUE);
+		}
+
+		// Process deferred 3D object picking only if the click was NOT on an active/hovered gizmo or UI element
+		if (s_pendingPickClick)
+		{
+			s_pendingPickClick = false;
+			ImGuiIO& io = ImGui::GetIO();
+			bool isPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+			if (!g_camera.isFlying && !io.WantCaptureMouse && !isPopupOpen && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
+			{
+				double mouseX, mouseY;
+				glfwGetCursorPos(g_window, &mouseX, &mouseY);
+				PickObjectAtCursor((float)mouseX, (float)mouseY);
+			}
 		}
 
 		// Device Loss Notification Overlay (dev.md Task 3)

@@ -3,6 +3,8 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <iostream>
+#include <cmath>
 #include <filesystem>
 
 // ============================================================================
@@ -836,6 +838,20 @@ private:
                     std::cerr << "[SceneLoad] WARNING: Actor \"" << obj.name
                               << "\" (id=" << obj.id << ") had NaN/Inf transform on load — sanitized.\n";
                 }
+            }
+
+            // Task 3: extend the on-load sanitize pass to mesh vertices, not just transform
+            int badVertexCount = 0;
+            for (auto& v : obj.mesh.vertices) {
+                if (std::isnan(v.pos.x) || std::isnan(v.pos.y) || std::isnan(v.pos.z) ||
+                    !std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z)) {
+                    v.pos = glm::vec3(0.0f);
+                    ++badVertexCount;
+                }
+            }
+            if (badVertexCount > 0) {
+                std::cerr << "[SceneLoad] WARNING: Actor \"" << obj.name << "\" (id=" << obj.id
+                          << ") had " << badVertexCount << " corrupted mesh vertex position(s) — sanitized.\n";
             }
 
             scene.objects.push_back(obj);
