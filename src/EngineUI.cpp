@@ -910,7 +910,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
             }
 
             // Click detection on sprite
-            if (mouseClicked && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
+            if (mouseClicked && !ImGui::GetIO().WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
                 float dx = mousePos.x - screenX;
                 float dy = mousePos.y - screenY;
                 if (dx * dx + dy * dy <= 20.0f * 20.0f) {
@@ -1317,21 +1317,30 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::Separator();
                 ImGui::TextDisabled("Light Settings");
 
-                float lCol[3] = { obj->light.color.r, obj->light.color.g, obj->light.color.b };
-                if (ImGui::ColorEdit3("Color", lCol)) {
-                    obj->light.color = glm::vec3(lCol[0], lCol[1], lCol[2]);
+                if (ImGui::ColorEdit3("Color##LightComponentColor", &obj->light.color.r,
+                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB)) {
                     obj->color = obj->light.color;
+                    if (obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
+                        scene.pointLights[obj->lightId].color = obj->light.color;
+                    }
+                    if (obj->light.type == LightType::Directional) {
+                        scene.lightColor = obj->light.color;
+                    }
                 }
 
-                ImGui::DragFloat("Intensity", &obj->light.intensity, 0.05f, 0.0f, 200.0f, "%.2f");
+                ImGui::DragFloat("Intensity##LightIntensity", &obj->light.intensity, 0.05f, 0.0f, 200.0f, "%.2f");
 
-                ImGui::Checkbox("Use Temperature (Kelvin)", &obj->light.useTemperature);
+                ImGui::Checkbox("Use Temperature (Kelvin)##UseTemp", &obj->light.useTemperature);
                 if (obj->light.useTemperature) {
-                    ImGui::SliderFloat("Temperature", &obj->light.temperature, 1000.0f, 12000.0f, "%.0f K");
+                    ImGui::SliderFloat("Temperature##LightTemp", &obj->light.temperature, 1000.0f, 12000.0f, "%.0f K");
                     glm::vec3 kelvinCol = ColorTemperatureToRGB(obj->light.temperature);
                     ImGui::SameLine();
-                    ImGui::ColorButton("##KelvinPreview", ImVec4(kelvinCol.r, kelvinCol.g, kelvinCol.b, 1.0f), ImGuiColorEditFlags_NoTooltip, ImVec2(20, 20));
-                    ImGui::TextDisabled("Combined Tint: R:%.2f G:%.2f B:%.2f", kelvinCol.r * obj->light.color.r, kelvinCol.g * obj->light.color.g, kelvinCol.b * obj->light.color.b);
+                    ImGui::ColorButton("##KelvinPreview", ImVec4(kelvinCol.r, kelvinCol.g, kelvinCol.b, 1.0f),
+                                       ImGuiColorEditFlags_NoTooltip | ImGuiColorEditFlags_NoPicker, ImVec2(20, 20));
+                    ImGui::TextDisabled("Combined Tint: R:%.2f G:%.2f B:%.2f",
+                                        kelvinCol.r * obj->light.color.r,
+                                        kelvinCol.g * obj->light.color.g,
+                                        kelvinCol.b * obj->light.color.b);
                 }
 
                 if (obj->light.type != LightType::Directional && obj->light.type != LightType::Ambient && obj->light.type != LightType::Sky) {
@@ -1382,10 +1391,10 @@ void EngineUI::RenderDetails(Scene& scene) {
                 if (obj->light.type == LightType::Hemisphere) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Hemisphere Colors");
-                    float sCol[3] = { obj->light.skyColor.r, obj->light.skyColor.g, obj->light.skyColor.b };
-                    if (ImGui::ColorEdit3("Sky Color", sCol)) obj->light.skyColor = glm::vec3(sCol[0], sCol[1], sCol[2]);
-                    float gCol[3] = { obj->light.groundColor.r, obj->light.groundColor.g, obj->light.groundColor.b };
-                    if (ImGui::ColorEdit3("Ground Color", gCol)) obj->light.groundColor = glm::vec3(gCol[0], gCol[1], gCol[2]);
+                    ImGui::ColorEdit3("Sky Color##HemiSkyCol", &obj->light.skyColor.r,
+                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
+                    ImGui::ColorEdit3("Ground Color##HemiGndCol", &obj->light.groundColor.r,
+                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
                 }
 
                 if (obj->light.type == LightType::Sky) {
@@ -1393,16 +1402,16 @@ void EngineUI::RenderDetails(Scene& scene) {
                     ImGui::TextDisabled("Environment & Sky");
                     char envBuf[260];
                     strncpy(envBuf, obj->light.envMapTexture.c_str(), sizeof(envBuf));
-                    if (ImGui::InputText("Environment HDRI", envBuf, sizeof(envBuf))) {
+                    if (ImGui::InputText("Environment HDRI##SkyHDRI", envBuf, sizeof(envBuf))) {
                         obj->light.envMapTexture = envBuf;
                     }
-                    ImGui::SliderFloat("HDRI Rotation", &obj->light.envRotation, 0.0f, 360.0f, "%.1f deg");
-                    ImGui::SliderFloat("Diffuse Contribution", &obj->light.diffuseContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Specular Contribution", &obj->light.specularContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Ambient Contribution", &obj->light.ambientContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Mip Level", &obj->light.mipLevel, 0.0f, 8.0f);
-                    float lhCol[3] = { obj->light.lowerHemisphereColor.r, obj->light.lowerHemisphereColor.g, obj->light.lowerHemisphereColor.b };
-                    if (ImGui::ColorEdit3("Lower Hemisphere Color", lhCol)) obj->light.lowerHemisphereColor = glm::vec3(lhCol[0], lhCol[1], lhCol[2]);
+                    ImGui::SliderFloat("HDRI Rotation##SkyRot", &obj->light.envRotation, 0.0f, 360.0f, "%.1f deg");
+                    ImGui::SliderFloat("Diffuse Contribution##SkyDiff", &obj->light.diffuseContribution, 0.0f, 2.0f);
+                    ImGui::SliderFloat("Specular Contribution##SkySpec", &obj->light.specularContribution, 0.0f, 2.0f);
+                    ImGui::SliderFloat("Ambient Contribution##SkyAmb", &obj->light.ambientContribution, 0.0f, 2.0f);
+                    ImGui::SliderFloat("Mip Level##SkyMip", &obj->light.mipLevel, 0.0f, 8.0f);
+                    ImGui::ColorEdit3("Lower Hemisphere Color##SkyLowerHemiCol", &obj->light.lowerHemisphereColor.r,
+                                      ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
                 }
 
                 ImGui::Separator();
@@ -3203,7 +3212,8 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                             removeIdx = (int)i;
                         }
                         ImGui::DragFloat3("Position", &pl.position.x, 0.1f);
-                        ImGui::ColorEdit3("Color", &pl.color.r);
+                        ImGui::ColorEdit3("Color##PointLightColor", &pl.color.r,
+                                          ImGuiColorEditFlags_PickerHueWheel | ImGuiColorEditFlags_DisplayRGB);
                         ImGui::SliderFloat("Intensity", &pl.intensity, 0.0f, 10.0f);
                         ImGui::SliderFloat("Radius / Range", &pl.range, 0.5f, 30.0f);
                     }
@@ -3228,14 +3238,27 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
     if (!obj || !obj->visible) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    float margin = uiMargin;
+    float gap = uiGap;
+    float curBottomH = (showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f);
+    float bottomY = vp->Pos.y + vp->Size.y - curBottomH - margin;
+    float vpX = vp->Pos.x + margin + (showOutliner ? leftSidebarWidth + gap : 0.0f);
+    float vpY = vp->Pos.y + margin + topBarHeight + gap;
+    float vpW = (vp->Pos.x + vp->Size.x - margin - (showDetails ? rightSidebarWidth + gap : 0.0f)) - vpX;
+    float vpH = (curBottomH > 0.0f ? (bottomY - gap) : (vp->Pos.y + vp->Size.y - margin)) - vpY;
+
+    if (vpW <= 10.0f || vpH <= 10.0f) return;
+
+    // Only allow ImGuizmo to handle mouse if not interacting with UI windows, menus, or popups (e.g. Color Picker)
+    bool mouseOverUI = ImGui::GetIO().WantCaptureMouse;
     ImGuizmo::PushID(obj->id);
-    ImGuizmo::Enable(true);
+    ImGuizmo::Enable(!mouseOverUI || ImGuizmo::IsUsing());
     ImGuizmo::SetOrthographic(false);
-    ImGuizmo::SetRect(vp->Pos.x, vp->Pos.y, vp->Size.x, vp->Size.y);
+    ImGuizmo::SetRect(vpX, vpY, vpW, vpH);
 
     glm::mat4 modelMatrix = scene.GetWorldMatrix(*obj);
     glm::mat4 viewMatrix = camera.GetViewMatrix();
-    glm::mat4 projMatrix = camera.GetProjectionMatrix(vp->Size.x / vp->Size.y);
+    glm::mat4 projMatrix = camera.GetProjectionMatrix(vpW / vpH);
 
     float snapValues[3];
     float* pSnap = nullptr;

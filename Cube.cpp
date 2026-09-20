@@ -1866,7 +1866,8 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 		{
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-			if (!isAlt && !g_camera.isFlying && !io.WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
+			bool isPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+			if (!isAlt && !g_camera.isFlying && !io.WantCaptureMouse && !isPopupOpen && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
 			{
 				double mouseX, mouseY;
 				glfwGetCursorPos(window, &mouseX, &mouseY);
