@@ -1,0 +1,11 @@
+{
+    "name": "editor-world-settings",
+    "version": "1.0.0",
+    "description": "Editor World Settings and environment configuration panel",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "editor",
+    "core": false,
+    "dependencies": ["scene", "lights"],
+    "provides": ["IWorldSettingsPanel"]
+}

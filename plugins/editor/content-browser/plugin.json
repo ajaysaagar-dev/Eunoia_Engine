@@ -1,0 +1,11 @@
+{
+    "name": "editor-content-browser",
+    "version": "1.0.0",
+    "description": "Editor Content Browser asset management panel",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "editor",
+    "core": false,
+    "dependencies": ["assets"],
+    "provides": ["IContentBrowserPanel"]
+}

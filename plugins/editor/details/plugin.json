@@ -1,0 +1,11 @@
+{
+    "name": "editor-details",
+    "version": "1.0.0",
+    "description": "Editor Details inspector panel for actor components and properties",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "editor",
+    "core": false,
+    "dependencies": ["scene", "materials"],
+    "provides": ["IDetailsPanel"]
+}

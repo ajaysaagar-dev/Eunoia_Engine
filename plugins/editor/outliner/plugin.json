@@ -1,0 +1,11 @@
+{
+    "name": "editor-outliner",
+    "version": "1.0.0",
+    "description": "Editor Outliner hierarchy tree panel",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "editor",
+    "core": false,
+    "dependencies": ["scene"],
+    "provides": ["IOutlinerPanel"]
+}
