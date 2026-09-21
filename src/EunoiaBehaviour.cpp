@@ -442,6 +442,7 @@ void DynamicScriptBehaviour::Update(float deltaTime) {
     if (glm::length(moveDir) > 0.001f) {
         moveDir = glm::normalize(moveDir);
         m_owner->position += moveDir * (currentSpeed * deltaTime);
+        Transform.Location.LocalSpace(m_owner->position);
     }
 }
 
