@@ -464,6 +464,7 @@ public:
                     child.metallicTexture    = im.material.metallicTexture;
                     child.aoTexture          = im.material.aoTexture;
                     child.emissionTexture    = im.material.emissionTexture;
+                    child.opacityTexture     = im.material.opacityTexture;
                     child.metallic           = im.material.metallic;
                     child.roughness          = im.material.roughness;
                     child.emissiveColor      = im.material.emissiveColor;
@@ -519,6 +520,7 @@ public:
             obj.metallicTexture    = mat.metallicTexture;
             obj.aoTexture          = mat.aoTexture;
             obj.emissionTexture    = mat.emissionTexture;
+            obj.opacityTexture     = mat.opacityTexture;
             obj.metallic           = mat.metallic;
             obj.roughness          = mat.roughness;
             obj.emissiveColor      = mat.emissiveColor;
@@ -911,6 +913,7 @@ struct RenderBatch {
     std::string roughTex;
     std::string metalTex;
     std::string aoTex;
+    std::string opacityTex;
     glm::vec3 baseColor{1.0f, 1.0f, 1.0f};
     float metallic = 0.0f;
     float roughness = 0.5f;
@@ -918,6 +921,9 @@ struct RenderBatch {
     float specular = 0.5f;
     glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
     float emissiveIntensity = 0.0f;
+    float opacity = 1.0f;
+    float opacityMaskClipValue = 0.333f;
+    int blendMode = 0;
     int shadingModel = 0;
     bool isUnlit = false;
     bool castShadows = true;
@@ -998,6 +1004,7 @@ struct RenderBatch {
             b.roughTex = obj.roughnessTexture;
             b.metalTex = obj.metallicTexture;
             b.aoTex = obj.aoTexture;
+            b.opacityTex = obj.opacityTexture;
             b.baseColor = obj.color;
             b.metallic = obj.metallic;
             b.roughness = obj.roughness;
@@ -1005,6 +1012,9 @@ struct RenderBatch {
             b.specular = obj.specular;
             b.emissiveColor = obj.emissiveColor;
             b.emissiveIntensity = obj.emissiveIntensity;
+            b.opacity = obj.opacity;
+            b.opacityMaskClipValue = obj.opacityMaskClipValue;
+            b.blendMode = obj.blendMode;
             b.shadingModel = obj.shadingModel;
             b.isUnlit = (obj.shadingModel == 1);
             b.castShadows = obj.castShadows;

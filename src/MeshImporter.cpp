@@ -66,6 +66,7 @@ ImportedModel MeshImporter::LoadOBJ(const std::string& filePath) {
                 m.metallicTexture  = resolveObjTex(tm.metallic_texname);
                 m.aoTexture        = resolveObjTex(tm.ambient_texname);
                 m.emissionTexture  = resolveObjTex(tm.emissive_texname);
+                m.opacityTexture   = resolveObjTex(tm.alpha_texname);
                 if (m.roughnessTexture.empty() && tm.roughness > 0.0f && std::isfinite(tm.roughness)) m.roughness = tm.roughness;
                 if (m.metallicTexture.empty() && tm.metallic > 0.0f && std::isfinite(tm.metallic)) m.metallic = tm.metallic;
             }

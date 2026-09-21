@@ -104,6 +104,10 @@ struct MaterialShaderConstants
 	float receiveShadows;
 	float uvScale[2];
 	float pad0;
+	float blendMode;
+	float opacity;
+	float opacityMaskClipValue;
+	float hasOpacityTex;
 };
 
 // Window & GLFW
@@ -767,27 +771,31 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 	const std::string& normal,
 	const std::string& rough,
 	const std::string& metal,
-	const std::string& ao)
+	const std::string& ao,
+	const std::string& opacity)
 {
-	std::string key = albedo + "|" + normal + "|" + rough + "|" + metal + "|" + ao;
+	std::string key = albedo + "|" + normal + "|" + rough + "|" + metal + "|" + ao + "|" + opacity;
 	auto it = g_materialDescriptorTables.find(key);
 	if (it != g_materialDescriptorTables.end()) {
 		return it->second;
 	}
 
-	DX12GpuTexture texAlbedo = (!albedo.empty() && albedo != "none")
+	DX12GpuTexture texAlbedo  = (!albedo.empty() && albedo != "none")
 		? GetOrLoadGPUTexture(albedo, g_fallbackMissing)
 		: g_fallbackWhite;
-	DX12GpuTexture texNormal = GetOrLoadGPUTexture(normal, g_fallbackNormal);
-	DX12GpuTexture texRough  = GetOrLoadGPUTexture(rough,  g_fallbackRoughness);
-	DX12GpuTexture texMetal  = GetOrLoadGPUTexture(metal,  g_fallbackMetallic);
-	DX12GpuTexture texAO     = GetOrLoadGPUTexture(ao,     g_fallbackAO);
+	DX12GpuTexture texNormal  = GetOrLoadGPUTexture(normal,  g_fallbackNormal);
+	DX12GpuTexture texRough   = GetOrLoadGPUTexture(rough,   g_fallbackRoughness);
+	DX12GpuTexture texMetal   = GetOrLoadGPUTexture(metal,   g_fallbackMetallic);
+	DX12GpuTexture texAO      = GetOrLoadGPUTexture(ao,      g_fallbackAO);
+	DX12GpuTexture texOpacity = (!opacity.empty() && opacity != "none")
+		? GetOrLoadGPUTexture(opacity, g_fallbackWhite)
+		: g_fallbackWhite;
 
 	static D3D12_GPU_DESCRIPTOR_HANDLE s_fallbackTable = {};
 	static bool s_hasFallbackTable = false;
 
 	UINT baseIdx = 0;
-	if (!TryAllocSrvDescriptors(5, baseIdx))
+	if (!TryAllocSrvDescriptors(6, baseIdx))
 	{
 		if (s_hasFallbackTable) {
 			return s_fallbackTable;
@@ -800,8 +808,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 	baseCpu.ptr += (SIZE_T)baseIdx * g_srvDescriptorSize;
 	baseGpu.ptr += (UINT64)baseIdx * g_srvDescriptorSize;
 
-	DX12GpuTexture slots[5] = { texAlbedo, texNormal, texRough, texMetal, texAO };
-	for (int i = 0; i < 5; ++i) {
+	DX12GpuTexture slots[6] = { texAlbedo, texNormal, texRough, texMetal, texAO, texOpacity };
+	for (int i = 0; i < 6; ++i) {
 		D3D12_CPU_DESCRIPTOR_HANDLE srcCpu = (slots[i].resource && slots[i].cpuHandle.ptr != 0) ? slots[i].cpuHandle : g_fallbackWhite.cpuHandle;
 		D3D12_CPU_DESCRIPTOR_HANDLE dst = baseCpu;
 		dst.ptr += (SIZE_T)i * g_srvDescriptorSize;
@@ -825,7 +833,7 @@ void PreRenderUploadTextures()
 	{
 		if (batch.indexCount == 0) continue;
 		GetOrCreateMaterialTable(
-			batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex);
+			batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
 	}
 }
 
@@ -1247,10 +1255,10 @@ int initD3D12(HWND hwnd)
 
 int createShadersAndPipeline()
 {
-	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t4 for materials, Descriptor Table t5 for shadow map, Samplers s0 and s1)
+	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t5 for materials, Descriptor Table t6 for shadow map, Descriptor Table t7 for point shadows, Samplers s0 and s1)
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-	srvRange.NumDescriptors = 5;
+	srvRange.NumDescriptors = 6;
 	srvRange.BaseShaderRegister = 0;
 	srvRange.RegisterSpace = 0;
 	srvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
@@ -1258,14 +1266,14 @@ int createShadersAndPipeline()
 	D3D12_DESCRIPTOR_RANGE shadowSrvRange = {};
 	shadowSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	shadowSrvRange.NumDescriptors = 1;
-	shadowSrvRange.BaseShaderRegister = 5;
+	shadowSrvRange.BaseShaderRegister = 6;
 	shadowSrvRange.RegisterSpace = 0;
 	shadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
 	D3D12_DESCRIPTOR_RANGE ptShadowSrvRange = {};
 	ptShadowSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	ptShadowSrvRange.NumDescriptors = 1;
-	ptShadowSrvRange.BaseShaderRegister = 6;
+	ptShadowSrvRange.BaseShaderRegister = 7;
 	ptShadowSrvRange.RegisterSpace = 0;
 	ptShadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
@@ -1276,11 +1284,11 @@ int createShadersAndPipeline()
 	rootParams[0].Descriptor.RegisterSpace = 0;
 	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-	// 1: 32-bit Constants b1 (20 floats Material Constants)
+	// 1: 32-bit Constants b1 (24 floats Material Constants)
 	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 	rootParams[1].Constants.ShaderRegister = 1;
 	rootParams[1].Constants.RegisterSpace = 0;
-	rootParams[1].Constants.Num32BitValues = 20;
+	rootParams[1].Constants.Num32BitValues = 24;
 	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 	// 2: Descriptor Table t0-t4 (5 SRVs for Material Textures)
@@ -1392,6 +1400,10 @@ int createShadersAndPipeline()
 			float receiveShadows;
 			float2 uvScale;
 			float pad0;
+			float blendMode;
+			float opacity;
+			float opacityMaskClipValue;
+			float hasOpacityTex;
 		};
 
 		Texture2D g_albedoTex : register(t0);
@@ -1399,8 +1411,9 @@ int createShadersAndPipeline()
 		Texture2D g_roughTex  : register(t2);
 		Texture2D g_metalTex  : register(t3);
 		Texture2D g_aoTex     : register(t4);
-		Texture2D g_shadowMap : register(t5);
-		TextureCubeArray g_pointShadowMap : register(t6);
+		Texture2D g_opacityTex : register(t5);
+		Texture2D g_shadowMap : register(t6);
+		TextureCubeArray g_pointShadowMap : register(t7);
 
 		SamplerState g_sampler : register(s0);
 		SamplerComparisonState g_shadowSampler : register(s1);
@@ -1512,6 +1525,18 @@ int createShadersAndPipeline()
 		{
 			float2 uv = input.uv * uvScale;
 
+			float currentOpacity = opacity;
+			if (hasOpacityTex > 0.5f)
+			{
+				currentOpacity *= g_opacityTex.Sample(g_sampler, uv).r;
+			}
+
+			// Masked blend mode: clip / discard pixels below threshold
+			if (blendMode > 0.5f && blendMode < 1.5f)
+			{
+				clip(currentOpacity - opacityMaskClipValue);
+			}
+
 			if (isUnlit > 0.5f)
 			{
 				float3 col = input.color * baseColor;
@@ -1519,7 +1544,7 @@ int createShadersAndPipeline()
 				{
 					col = g_albedoTex.Sample(g_sampler, uv).rgb;
 				}
-				return float4(col + emissiveColor * emissiveIntensity, 1.0f);
+				return float4(col + emissiveColor * emissiveIntensity, currentOpacity);
 			}
 
 			float3 N = normalize(input.normal);
@@ -1639,7 +1664,7 @@ int createShadersAndPipeline()
 
 			float3 emissive = emissiveColor * emissiveIntensity;
 			float3 litColor = ambientDiff + ambientSpec + directLit + pointLightsContribution + emissive;
-			return float4(saturate(litColor), 1.0f);
+			return float4(saturate(litColor), currentOpacity);
 		}
 	)";
 
@@ -1680,6 +1705,13 @@ int createShadersAndPipeline()
 	psoDesc.RasterizerState.FrontCounterClockwise = FALSE;
 	psoDesc.RasterizerState.DepthClipEnable = TRUE;
 
+	psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+	psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+	psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+	psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+	psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
 	psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
 	psoDesc.DepthStencilState.DepthEnable = TRUE;
@@ -2207,11 +2239,15 @@ void renderFrame()
 			matConsts.receiveShadows = batch.receiveShadows ? 1.0f : 0.0f;
 			matConsts.uvScale[0] = batch.uvScale.x != 0.0f ? batch.uvScale.x : 1.0f;
 			matConsts.uvScale[1] = batch.uvScale.y != 0.0f ? batch.uvScale.y : 1.0f;
+			matConsts.blendMode = (float)batch.blendMode;
+			matConsts.opacity = batch.opacity;
+			matConsts.opacityMaskClipValue = batch.opacityMaskClipValue > 0.0f ? batch.opacityMaskClipValue : 0.333f;
+			matConsts.hasOpacityTex = (!batch.opacityTex.empty() && batch.opacityTex != "none") ? 1.0f : 0.0f;
 
-			g_commandList->SetGraphicsRoot32BitConstants(1, 20, &matConsts, 0);
+			g_commandList->SetGraphicsRoot32BitConstants(1, 24, &matConsts, 0);
 
 			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
-				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex);
+				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
 			if (tableHandle.ptr == 0) continue;
 
 			char bufSceneDraw[160];

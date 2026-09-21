@@ -42,6 +42,8 @@ struct MaterialAsset {
     AssetID aoAssetId;
     std::string emissionTexture = "";
     AssetID emissionAssetId;
+    std::string opacityTexture = "";
+    AssetID opacityAssetId;
 
     // Values (from dev.md)
     glm::vec3 baseColor{0.8f, 0.8f, 0.8f};
@@ -51,6 +53,8 @@ struct MaterialAsset {
     float specular = 0.5f;
     glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
     float emissiveIntensity = 0.0f; // Emission Power
+    float opacity = 1.0f;
+    float opacityMaskClipValue = 0.333f;
 
     // UV Tiling / Scale (default 1.0, 1.0)
     glm::vec2 uvScale{1.0f, 1.0f};
@@ -216,6 +220,7 @@ public:
     bool LoadMaterialFile(const std::string& path, MaterialAsset& outMat);
     bool SaveMaterialFile(const std::string& path, const MaterialAsset& mat);
     void OpenMaterialEditor(const std::string& path);
+    void ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj, const MaterialAsset& ma);
     std::vector<TextureAssetEntry> ScanProjectTextures();
     bool DrawTextureSlot(const char* label, std::string& textureSlotValue, AssetID& textureSlotAssetId, const std::vector<TextureAssetEntry>& availableTextures);
 

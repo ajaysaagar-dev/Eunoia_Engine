@@ -106,6 +106,8 @@ public:
             file << "        \"twoSided\": " << BoolStr(obj.twoSided) << ",\n";
             file << "        \"castShadows\": " << BoolStr(obj.castShadows) << ",\n";
             file << "        \"receiveShadows\": " << BoolStr(obj.receiveShadows) << ",\n";
+            file << "        \"opacity\": " << obj.opacity << ",\n";
+            file << "        \"opacityMaskClipValue\": " << obj.opacityMaskClipValue << ",\n";
             file << "        \"uvScale\": [" << obj.uvScale.x << ", " << obj.uvScale.y << "],\n";
             file << "        \"textures\": {\n";
             file << "          \"baseColor\": " << QuoteStr(obj.baseColorTexture) << ",\n";
@@ -113,7 +115,8 @@ public:
             file << "          \"roughness\": " << QuoteStr(obj.roughnessTexture) << ",\n";
             file << "          \"metallic\": " << QuoteStr(obj.metallicTexture) << ",\n";
             file << "          \"ao\": " << QuoteStr(obj.aoTexture) << ",\n";
-            file << "          \"emission\": " << QuoteStr(obj.emissionTexture) << "\n";
+            file << "          \"emission\": " << QuoteStr(obj.emissionTexture) << ",\n";
+            file << "          \"opacity\": " << QuoteStr(obj.opacityTexture) << "\n";
             file << "        }\n";
             file << "      },\n";
 
@@ -710,6 +713,8 @@ private:
                 p = matBlock.find("\"twoSided\""); if (p != std::string::npos) obj.twoSided = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"castShadows\""); if (p != std::string::npos) obj.castShadows = ParseBoolAt(matBlock, p, true);
                 p = matBlock.find("\"receiveShadows\""); if (p != std::string::npos) obj.receiveShadows = ParseBoolAt(matBlock, p, true);
+                p = matBlock.find("\"opacity\""); if (p != std::string::npos) obj.opacity = ParseFloatAt(matBlock, p, 1.0f);
+                p = matBlock.find("\"opacityMaskClipValue\""); if (p != std::string::npos) obj.opacityMaskClipValue = ParseFloatAt(matBlock, p, 0.333f);
                 p = matBlock.find("\"uvScale\"");
                 if (p != std::string::npos) {
                     size_t lb = matBlock.find('[', p);
@@ -735,6 +740,7 @@ private:
                     p = texBlock.find("\"metallic\""); if (p != std::string::npos) obj.metallicTexture = ParseStringAt(texBlock, p);
                     p = texBlock.find("\"ao\""); if (p != std::string::npos) obj.aoTexture = ParseStringAt(texBlock, p);
                     p = texBlock.find("\"emission\""); if (p != std::string::npos) obj.emissionTexture = ParseStringAt(texBlock, p);
+                    p = texBlock.find("\"opacity\""); if (p != std::string::npos) obj.opacityTexture = ParseStringAt(texBlock, p);
                 }
             }
 

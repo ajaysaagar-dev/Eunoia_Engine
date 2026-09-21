@@ -13,6 +13,7 @@ struct ImportedMaterial {
     std::string metallicTexture;
     std::string aoTexture;
     std::string emissionTexture;
+    std::string opacityTexture;
     float metallic = 0.0f;
     float roughness = 0.5f;
     glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};

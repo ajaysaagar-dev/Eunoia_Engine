@@ -1955,9 +1955,13 @@ void EngineUI::RenderDetails(Scene& scene) {
             ImGui::TextDisabled("Vertices: %d | Triangles: %d", (int)obj->mesh.vertices.size(), (int)obj->mesh.indices.size() / 3);
         }
 
-        // 3. Materials Category (Element 0) (only for mesh actors)
-        if (!obj->isLight && obj->type != PrimitiveType::Empty && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // 3. Materials Category (Element 0) (mesh actors or parent actors with children)
+        if (!obj->isLight && (obj->type != PrimitiveType::Empty || !obj->childIds.empty()) && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("Element 0: Material Slot");
+            if (!obj->childIds.empty()) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.35f, 0.85f, 1.0f, 0.9f), "(↳ Cascades to all %zu children)", obj->childIds.size());
+            }
 
             // Scan for all materials in contentRootPath (recursively across the entire project root)
             struct FoundMat {
@@ -2086,29 +2090,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                             }
 
                             if (ImGui::Selectable(itemLabel.c_str(), isSelected)) {
-                                obj->materialName = m.name;
                                 MaterialAsset ma;
                                 if (LoadMaterialFile(m.fullPath, ma)) {
-                                    obj->color = ma.baseColor;
-                                    obj->metallic = ma.metallic;
-                                    obj->roughness = ma.roughness;
-                                    obj->normalStrength = ma.normalStrength;
-                                    obj->specular = ma.specular;
-                                    obj->emissiveColor = ma.emissiveColor;
-                                    obj->emissiveIntensity = ma.emissiveIntensity;
-                                    obj->shadingModel = ma.shadingModel;
-                                    obj->blendMode = ma.blendMode;
-                                    obj->twoSided = ma.twoSided;
-                                    obj->castShadows = ma.castShadows;
-                                    obj->receiveShadows = ma.receiveShadows;
-                                    obj->baseColorTexture = ma.baseColorTexture;
-                                    obj->normalTexture = ma.normalTexture;
-                                    obj->roughnessTexture = ma.roughnessTexture;
-                                    obj->metallicTexture = ma.metallicTexture;
-                                    obj->aoTexture = ma.aoTexture;
-                                    obj->emissionTexture = ma.emissionTexture;
-                                    obj->uvScale = ma.uvScale;
-                                    AddLog("LogMaterial", "Assigned material '" + m.name + "' (" + m.relPath + ") to Actor '" + obj->name + "'", 2);
+                                    ApplyMaterialToActorAndChildren(scene, obj, ma);
                                 }
                             }
                             if (isSelected) ImGui::SetItemDefaultFocus();
@@ -2145,29 +2129,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                                 ImGui::SameLine();
 
                                 if (ImGui::Selectable(m.name.c_str(), isSelected)) {
-                                    obj->materialName = m.name;
                                     MaterialAsset ma;
                                     if (LoadMaterialFile(m.fullPath, ma)) {
-                                        obj->color = ma.baseColor;
-                                        obj->metallic = ma.metallic;
-                                        obj->roughness = ma.roughness;
-                                        obj->normalStrength = ma.normalStrength;
-                                        obj->specular = ma.specular;
-                                        obj->emissiveColor = ma.emissiveColor;
-                                        obj->emissiveIntensity = ma.emissiveIntensity;
-                                        obj->shadingModel = ma.shadingModel;
-                                        obj->blendMode = ma.blendMode;
-                                        obj->twoSided = ma.twoSided;
-                                        obj->castShadows = ma.castShadows;
-                                        obj->receiveShadows = ma.receiveShadows;
-                                        obj->baseColorTexture = ma.baseColorTexture;
-                                        obj->normalTexture = ma.normalTexture;
-                                        obj->roughnessTexture = ma.roughnessTexture;
-                                        obj->metallicTexture = ma.metallicTexture;
-                                        obj->aoTexture = ma.aoTexture;
-                                        obj->emissionTexture = ma.emissionTexture;
-                                        obj->uvScale = ma.uvScale;
-                                        AddLog("LogMaterial", "Assigned material '" + m.name + "' (" + m.relPath + ") to Actor '" + obj->name + "'", 2);
+                                        ApplyMaterialToActorAndChildren(scene, obj, ma);
                                     }
                                 }
                                 if (isSelected) ImGui::SetItemDefaultFocus();
@@ -2196,27 +2160,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                         std::filesystem::path fullPath = contentRootPath / meta->sourcePath;
                         MaterialAsset ma;
                         if (LoadMaterialFile(fullPath.string(), ma)) {
-                            obj->materialName = ma.name;
-                            obj->color = ma.baseColor;
-                            obj->metallic = ma.metallic;
-                            obj->roughness = ma.roughness;
-                            obj->normalStrength = ma.normalStrength;
-                            obj->specular = ma.specular;
-                            obj->emissiveColor = ma.emissiveColor;
-                            obj->emissiveIntensity = ma.emissiveIntensity;
-                            obj->shadingModel = ma.shadingModel;
-                            obj->blendMode = ma.blendMode;
-                            obj->twoSided = ma.twoSided;
-                            obj->castShadows = ma.castShadows;
-                            obj->receiveShadows = ma.receiveShadows;
-                            obj->baseColorTexture = ma.baseColorTexture;
-                            obj->normalTexture = ma.normalTexture;
-                            obj->roughnessTexture = ma.roughnessTexture;
-                            obj->metallicTexture = ma.metallicTexture;
-                            obj->aoTexture = ma.aoTexture;
-                            obj->emissionTexture = ma.emissionTexture;
-                            obj->uvScale = ma.uvScale;
-                            AddLog("LogMaterial", "Assigned Material '" + ma.name + "' via Drag & Drop", 2);
+                            ApplyMaterialToActorAndChildren(scene, obj, ma);
                         }
                     }
                 }
@@ -2471,6 +2415,60 @@ bool EngineUI::DrawTextureSlot(const char* label, std::string& textureSlotValue,
     return changed;
 }
 
+void EngineUI::ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj, const MaterialAsset& ma) {
+    if (!rootObj) return;
+
+    int childCount = 0;
+    std::function<void(GameObject*)> applyRec = [&](GameObject* cur) {
+        if (!cur) return;
+        if (!cur->isLight && cur->type != PrimitiveType::Empty) {
+            cur->materialName = ma.name;
+            cur->color = ma.baseColor;
+            cur->metallic = ma.metallic;
+            cur->roughness = ma.roughness;
+            cur->normalStrength = ma.normalStrength;
+            cur->specular = ma.specular;
+            cur->emissiveColor = ma.emissiveColor;
+            cur->emissiveIntensity = ma.emissiveIntensity;
+            cur->shadingModel = ma.shadingModel;
+            cur->blendMode = ma.blendMode;
+            cur->twoSided = ma.twoSided;
+            cur->castShadows = ma.castShadows;
+            cur->receiveShadows = ma.receiveShadows;
+            cur->opacity = ma.opacity;
+            cur->opacityMaskClipValue = ma.opacityMaskClipValue;
+            cur->baseColorTexture = ma.baseColorTexture;
+            cur->normalTexture = ma.normalTexture;
+            cur->roughnessTexture = ma.roughnessTexture;
+            cur->metallicTexture = ma.metallicTexture;
+            cur->aoTexture = ma.aoTexture;
+            cur->emissionTexture = ma.emissionTexture;
+            cur->opacityTexture = ma.opacityTexture;
+            cur->uvScale = ma.uvScale;
+            if (cur != rootObj) {
+                childCount++;
+            }
+        } else if (cur->type == PrimitiveType::Empty) {
+            cur->materialName = ma.name;
+        }
+
+        for (int cId : cur->childIds) {
+            GameObject* child = scene.FindObject(cId);
+            if (child) {
+                applyRec(child);
+            }
+        }
+    };
+
+    applyRec(rootObj);
+
+    if (childCount > 0) {
+        AddLog("LogMaterial", "Assigned material '" + ma.name + "' to Actor '" + rootObj->name + "' and " + std::to_string(childCount) + " child actor(s)", 2);
+    } else {
+        AddLog("LogMaterial", "Assigned material '" + ma.name + "' to Actor '" + rootObj->name + "'", 2);
+    }
+}
+
 bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) {
     std::ifstream file(path);
     if (!file.is_open()) return false;
@@ -2534,18 +2532,26 @@ bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) 
             std::stringstream ss(val);
             ss >> outMat.uvScale.x >> outMat.uvScale.y;
         }
+        else if (key == "opacity") {
+            try { outMat.opacity = std::stof(val); } catch (...) {}
+        }
+        else if (key == "opacityMaskClipValue") {
+            try { outMat.opacityMaskClipValue = std::stof(val); } catch (...) {}
+        }
         else if (key == "baseColorAssetId") outMat.baseColorAssetId = AssetID::FromString(val);
         else if (key == "normalAssetId") outMat.normalAssetId = AssetID::FromString(val);
         else if (key == "roughnessAssetId") outMat.roughnessAssetId = AssetID::FromString(val);
         else if (key == "metallicAssetId") outMat.metallicAssetId = AssetID::FromString(val);
         else if (key == "aoAssetId") outMat.aoAssetId = AssetID::FromString(val);
         else if (key == "emissionAssetId") outMat.emissionAssetId = AssetID::FromString(val);
+        else if (key == "opacityAssetId") outMat.opacityAssetId = AssetID::FromString(val);
         else if (key == "baseColorTexture") outMat.baseColorTexture = val;
         else if (key == "normalTexture") outMat.normalTexture = val;
         else if (key == "roughnessTexture") outMat.roughnessTexture = val;
         else if (key == "metallicTexture") outMat.metallicTexture = val;
         else if (key == "aoTexture") outMat.aoTexture = val;
         else if (key == "emissionTexture") outMat.emissionTexture = val;
+        else if (key == "opacityTexture") outMat.opacityTexture = val;
     }
 
     // Resolve AssetID if not present
@@ -2570,6 +2576,7 @@ bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) 
     resolveTexId(outMat.metallicTexture, outMat.metallicAssetId);
     resolveTexId(outMat.aoTexture, outMat.aoAssetId);
     resolveTexId(outMat.emissionTexture, outMat.emissionAssetId);
+    resolveTexId(outMat.opacityTexture, outMat.opacityAssetId);
 
     return true;
 }
@@ -2597,6 +2604,8 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
     file << "twoSided: " << (mat.twoSided ? 1 : 0) << "\n";
     file << "castShadows: " << (mat.castShadows ? 1 : 0) << "\n";
     file << "receiveShadows: " << (mat.receiveShadows ? 1 : 0) << "\n";
+    file << "opacity: " << mat.opacity << "\n";
+    file << "opacityMaskClipValue: " << mat.opacityMaskClipValue << "\n";
     file << "uvScale: " << mat.uvScale.x << " " << mat.uvScale.y << "\n";
     if (mat.baseColorAssetId.IsValid()) file << "baseColorAssetId: " << mat.baseColorAssetId.ToString() << "\n";
     file << "baseColorTexture: " << mat.baseColorTexture << "\n";
@@ -2610,6 +2619,8 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
     file << "aoTexture: " << mat.aoTexture << "\n";
     if (mat.emissionAssetId.IsValid()) file << "emissionAssetId: " << mat.emissionAssetId.ToString() << "\n";
     file << "emissionTexture: " << mat.emissionTexture << "\n";
+    if (mat.opacityAssetId.IsValid()) file << "opacityAssetId: " << mat.opacityAssetId.ToString() << "\n";
+    file << "opacityTexture: " << mat.opacityTexture << "\n";
 
     // Update Asset Registry (dev.md Section 7, 13)
     if (mat.assetId.IsValid()) {
@@ -2622,6 +2633,7 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
             if (mat.metallicAssetId.IsValid()) AssetRegistry::Get().AddDependency(mat.assetId, mat.metallicAssetId);
             if (mat.aoAssetId.IsValid()) AssetRegistry::Get().AddDependency(mat.assetId, mat.aoAssetId);
             if (mat.emissionAssetId.IsValid()) AssetRegistry::Get().AddDependency(mat.assetId, mat.emissionAssetId);
+            if (mat.opacityAssetId.IsValid()) AssetRegistry::Get().AddDependency(mat.assetId, mat.opacityAssetId);
         }
     }
     return true;
@@ -2701,27 +2713,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         if (ImGui::Button("🎯 Apply to Selected Actor")) {
             GameObject* sel = scene.GetSelected();
             if (sel) {
-                sel->materialName = activeMaterial.name;
-                sel->color = activeMaterial.baseColor;
-                sel->metallic = activeMaterial.metallic;
-                sel->roughness = activeMaterial.roughness;
-                sel->normalStrength = activeMaterial.normalStrength;
-                sel->specular = activeMaterial.specular;
-                sel->emissiveColor = activeMaterial.emissiveColor;
-                sel->emissiveIntensity = activeMaterial.emissiveIntensity;
-                sel->shadingModel = activeMaterial.shadingModel;
-                sel->blendMode = activeMaterial.blendMode;
-                sel->twoSided = activeMaterial.twoSided;
-                sel->castShadows = activeMaterial.castShadows;
-                sel->receiveShadows = activeMaterial.receiveShadows;
-                sel->baseColorTexture = activeMaterial.baseColorTexture;
-                sel->normalTexture = activeMaterial.normalTexture;
-                sel->roughnessTexture = activeMaterial.roughnessTexture;
-                sel->metallicTexture = activeMaterial.metallicTexture;
-                sel->aoTexture = activeMaterial.aoTexture;
-                sel->emissionTexture = activeMaterial.emissionTexture;
-                sel->uvScale = activeMaterial.uvScale;
-                AddLog("LogMaterial", "Applied material '" + activeMaterial.name + "' to Actor '" + sel->name + "'", 2);
+                ApplyMaterialToActorAndChildren(scene, sel, activeMaterial);
             } else {
                 AddLog("LogMaterial", "No Actor currently selected to apply material.", 1);
             }
@@ -2772,6 +2764,24 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         // 3D-shaded Sphere geometry
         ImVec2 center(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
         float radius = (canvasSize.x * 0.5f) - 16.0f;
+
+        // Checkerboard backdrop for transparent / masked materials
+        if (activeMaterial.blendMode != 0 || !activeMaterial.opacityTexture.empty() || activeMaterial.opacity < 1.0f) {
+            float checkSize = 14.0f;
+            for (float cy = center.y - radius; cy < center.y + radius; cy += checkSize) {
+                for (float cx = center.x - radius; cx < center.x + radius; cx += checkSize) {
+                    float dx = (cx + checkSize * 0.5f) - center.x;
+                    float dy = (cy + checkSize * 0.5f) - center.y;
+                    if (dx * dx + dy * dy <= radius * radius) {
+                        int ix = (int)((cx - (center.x - radius)) / checkSize);
+                        int iy = (int)((cy - (center.y - radius)) / checkSize);
+                        ImU32 checkCol = ((ix + iy) % 2 == 0) ? IM_COL32(42, 46, 56, 255) : IM_COL32(22, 24, 30, 255);
+                        drawList->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + checkSize, cy + checkSize), checkCol);
+                    }
+                }
+            }
+        }
+
         glm::vec3 col = activeMaterial.baseColor;
         CachedTexture* previewAlbedo = TextureManager::Get().GetTexture(activeMaterial.baseColorTexture);
         if (previewAlbedo && previewAlbedo->valid) {
@@ -2783,39 +2793,43 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         glm::vec3 V = glm::vec3(0.0f, 0.0f, 1.0f);
         glm::vec3 H = glm::normalize(L + V);
 
+        float sphereAlpha = (activeMaterial.blendMode != 0 || !activeMaterial.opacityTexture.empty()) 
+                            ? glm::clamp(activeMaterial.opacity, 0.08f, 1.0f) : 1.0f;
+        int alphaByte = (int)(sphereAlpha * 255.0f);
+
         // Render multi-pass PBR sphere shading
         // Pass 1: Dark ambient backdrop
         float aoDarken = activeMaterial.aoTexture.empty() ? 1.0f : 0.75f;
         drawList->AddCircleFilled(center, radius,
             IM_COL32((int)glm::clamp(col.r * 45 * aoDarken, 0.0f, 255.0f),
                      (int)glm::clamp(col.g * 45 * aoDarken, 0.0f, 255.0f),
-                     (int)glm::clamp(col.b * 45 * aoDarken, 0.0f, 255.0f), 255), 64);
+                     (int)glm::clamp(col.b * 45 * aoDarken, 0.0f, 255.0f), alphaByte), 64);
 
         if (activeMaterial.shadingModel == 1) {
             // Unlit Shading
             drawList->AddCircleFilled(center, radius,
                 IM_COL32((int)glm::clamp(col.r * 255, 0.0f, 255.0f),
                          (int)glm::clamp(col.g * 255, 0.0f, 255.0f),
-                         (int)glm::clamp(col.b * 255, 0.0f, 255.0f), 255), 64);
+                         (int)glm::clamp(col.b * 255, 0.0f, 255.0f), alphaByte), 64);
         } else {
             // Pass 2: Diffuse gradient towards light
             ImVec2 diffCenter(center.x - L.x * radius * 0.22f, center.y + L.y * radius * 0.22f);
             drawList->AddCircleFilled(diffCenter, radius * 0.88f,
                 IM_COL32((int)glm::clamp(col.r * 180 * aoDarken, 0.0f, 255.0f),
                          (int)glm::clamp(col.g * 180 * aoDarken, 0.0f, 255.0f),
-                         (int)glm::clamp(col.b * 180 * aoDarken, 0.0f, 255.0f), 255), 64);
+                         (int)glm::clamp(col.b * 180 * aoDarken, 0.0f, 255.0f), alphaByte), 64);
 
             // Pass 3: Core lit disk
             ImVec2 coreCenter(center.x - L.x * radius * 0.38f, center.y + L.y * radius * 0.38f);
             drawList->AddCircleFilled(coreCenter, radius * 0.68f,
                 IM_COL32((int)glm::clamp(col.r * 255, 0.0f, 255.0f),
                          (int)glm::clamp(col.g * 255, 0.0f, 255.0f),
-                         (int)glm::clamp(col.b * 255, 0.0f, 255.0f), 255), 64);
+                         (int)glm::clamp(col.b * 255, 0.0f, 255.0f), alphaByte), 64);
 
             // Pass 4: Specular highlight (Roughness & Metallic scaled)
             float specRough = glm::clamp(activeMaterial.roughness, 0.05f, 1.0f);
             float specRadius = radius * glm::mix(0.32f, 0.04f, specRough);
-            int specAlpha = (int)(255.0f * (1.0f - specRough * 0.65f));
+            int specAlpha = (int)(255.0f * (1.0f - specRough * 0.65f) * sphereAlpha);
             glm::vec3 specColor = glm::mix(glm::vec3(1.0f), col, activeMaterial.metallic);
 
             ImVec2 specCenter(center.x - H.x * radius * 0.52f, center.y + H.y * radius * 0.52f);
@@ -2920,6 +2934,9 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (DrawTextureSlot("Emission", activeMaterial.emissionTexture, activeMaterial.emissionAssetId, availableTextures)) {
                 materialDirty = true;
             }
+            if (DrawTextureSlot("Opacity / Mask", activeMaterial.opacityTexture, activeMaterial.opacityAssetId, availableTextures)) {
+                materialDirty = true;
+            }
             ImGui::Spacing();
         }
 
@@ -2945,6 +2962,27 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             }
             if (ImGui::SliderFloat("Emission Power", &activeMaterial.emissiveIntensity, 0.0f, 30.0f, "%.2f")) {
                 materialDirty = true;
+            }
+            if (ImGui::SliderFloat("Opacity", &activeMaterial.opacity, 0.0f, 1.0f, "%.2f")) {
+                materialDirty = true;
+            }
+            if (activeMaterial.blendMode == 1) {
+                if (ImGui::SliderFloat("Opacity Mask Clip Value", &activeMaterial.opacityMaskClipValue, 0.0f, 1.0f, "%.2f")) {
+                    materialDirty = true;
+                }
+            }
+            if (!activeMaterial.opacityTexture.empty() && activeMaterial.blendMode == 0) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.25f, 1.0f), "⚠ Opacity map loaded, but Blend Mode is Opaque.");
+                if (ImGui::SmallButton("Switch to Masked##AutoMaskBtn")) {
+                    activeMaterial.blendMode = 1;
+                    materialDirty = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Switch to Translucent##AutoTransBtn")) {
+                    activeMaterial.blendMode = 2;
+                    materialDirty = true;
+                }
             }
             ImGui::Separator();
             ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "UV Tiling (UV Scale):");
@@ -3010,12 +3048,15 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     obj.twoSided = activeMaterial.twoSided;
                     obj.castShadows = activeMaterial.castShadows;
                     obj.receiveShadows = activeMaterial.receiveShadows;
+                    obj.opacity = activeMaterial.opacity;
+                    obj.opacityMaskClipValue = activeMaterial.opacityMaskClipValue;
                     obj.baseColorTexture = activeMaterial.baseColorTexture;
                     obj.normalTexture = activeMaterial.normalTexture;
                     obj.roughnessTexture = activeMaterial.roughnessTexture;
                     obj.metallicTexture = activeMaterial.metallicTexture;
                     obj.aoTexture = activeMaterial.aoTexture;
                     obj.emissionTexture = activeMaterial.emissionTexture;
+                    obj.opacityTexture = activeMaterial.opacityTexture;
                     obj.uvScale = activeMaterial.uvScale;
                 }
             }
@@ -3605,27 +3646,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                     if (LoadMaterialFile(fullMat.string(), ma)) {
                                         GameObject* sel = scene.GetSelected();
                                         if (sel) {
-                                            sel->materialName = ma.name;
-                                            sel->color = ma.baseColor;
-                                            sel->metallic = ma.metallic;
-                                            sel->roughness = ma.roughness;
-                                            sel->normalStrength = ma.normalStrength;
-                                            sel->specular = ma.specular;
-                                            sel->emissiveColor = ma.emissiveColor;
-                                            sel->emissiveIntensity = ma.emissiveIntensity;
-                                            sel->shadingModel = ma.shadingModel;
-                                            sel->blendMode = ma.blendMode;
-                                            sel->twoSided = ma.twoSided;
-                                            sel->castShadows = ma.castShadows;
-                                            sel->receiveShadows = ma.receiveShadows;
-                                            sel->baseColorTexture = ma.baseColorTexture;
-                                            sel->normalTexture = ma.normalTexture;
-                                            sel->roughnessTexture = ma.roughnessTexture;
-                                            sel->metallicTexture = ma.metallicTexture;
-                                            sel->aoTexture = ma.aoTexture;
-                                            sel->emissionTexture = ma.emissionTexture;
-                                            sel->uvScale = ma.uvScale;
-                                            AddLog("LogMaterial", "Applied material '" + ma.name + "' to Actor '" + sel->name + "'", 2);
+                                            ApplyMaterialToActorAndChildren(scene, sel, ma);
                                         }
                                     }
                                 }

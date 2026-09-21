@@ -230,6 +230,7 @@ struct GameObject {
     std::string metallicTexture = "";
     std::string aoTexture = "";
     std::string emissionTexture = "";
+    std::string opacityTexture = "";
 
     // PBR Material properties
     std::string materialName = "Default_Material";
@@ -239,6 +240,8 @@ struct GameObject {
     float specular = 0.5f;
     glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
     float emissiveIntensity = 0.0f;
+    float opacity = 1.0f;
+    float opacityMaskClipValue = 0.333f;
     int shadingModel = 0; // 0 = Default Lit (PBR), 1 = Unlit, 2 = Subsurface
     int blendMode = 0;    // 0 = Opaque, 1 = Masked, 2 = Translucent
     bool twoSided = false;
@@ -302,6 +305,7 @@ struct GameObject {
         metallicTexture = other.metallicTexture;
         aoTexture = other.aoTexture;
         emissionTexture = other.emissionTexture;
+        opacityTexture = other.opacityTexture;
         materialName = other.materialName;
         metallic = other.metallic;
         roughness = other.roughness;
@@ -309,6 +313,8 @@ struct GameObject {
         specular = other.specular;
         emissiveColor = other.emissiveColor;
         emissiveIntensity = other.emissiveIntensity;
+        opacity = other.opacity;
+        opacityMaskClipValue = other.opacityMaskClipValue;
         shadingModel = other.shadingModel;
         blendMode = other.blendMode;
         twoSided = other.twoSided;
