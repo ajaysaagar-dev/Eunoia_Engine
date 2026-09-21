@@ -93,8 +93,8 @@ struct LightComponent {
     glm::vec3 skyColor{0.4f, 0.6f, 0.9f};
     glm::vec3 groundColor{0.3f, 0.2f, 0.1f};
 
-    // Shadow properties
-    bool castShadows = true;
+    // Shadow properties (only directional light casts shadows)
+    bool castShadows = false;
     float shadowStrength = 0.85f;
     float shadowBias = 0.0012f;
     int shadowResolution = 2048;
@@ -271,15 +271,15 @@ struct GameObject {
         if (IsLightPrimitive(type)) {
             isLight = true;
             switch (type) {
-                case PrimitiveType::DirectionalLight: light.type = LightType::Directional; break;
-                case PrimitiveType::PointLight:       light.type = LightType::Point; break;
-                case PrimitiveType::SpotLight:        light.type = LightType::Spot; break;
-                case PrimitiveType::AreaLight:        light.type = LightType::Area; break;
-                case PrimitiveType::SkyLight:         light.type = LightType::Sky; break;
-                case PrimitiveType::AmbientLight:     light.type = LightType::Ambient; break;
-                case PrimitiveType::HemisphereLight:  light.type = LightType::Hemisphere; break;
-                case PrimitiveType::TubeLight:        light.type = LightType::Tube; break;
-                case PrimitiveType::DiscLight:        light.type = LightType::Disc; break;
+                case PrimitiveType::DirectionalLight: light.type = LightType::Directional; light.castShadows = true; break;
+                case PrimitiveType::PointLight:       light.type = LightType::Point;       light.castShadows = true; break;
+                case PrimitiveType::SpotLight:        light.type = LightType::Spot;        light.castShadows = true; break;
+                case PrimitiveType::AreaLight:        light.type = LightType::Area;        light.castShadows = false; break;
+                case PrimitiveType::SkyLight:         light.type = LightType::Sky;         light.castShadows = false; break;
+                case PrimitiveType::AmbientLight:     light.type = LightType::Ambient;     light.castShadows = false; break;
+                case PrimitiveType::HemisphereLight:  light.type = LightType::Hemisphere;  light.castShadows = false; break;
+                case PrimitiveType::TubeLight:        light.type = LightType::Tube;        light.castShadows = false; break;
+                case PrimitiveType::DiscLight:        light.type = LightType::Disc;        light.castShadows = false; break;
                 default: break;
             }
             light.color = col;

@@ -494,7 +494,7 @@ private:
         // Ambient
         size_t aiPos = envBlock.find("\"ambientIntensity\"");
         if (aiPos != std::string::npos) {
-            scene.ambientIntensity = ParseFloatAt(envBlock, aiPos, 0.25f);
+            scene.ambientIntensity = ParseFloatAt(envBlock, aiPos, 0.0f);
         }
 
         // Sun light
