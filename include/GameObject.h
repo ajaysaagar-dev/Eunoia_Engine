@@ -491,3 +491,19 @@ struct GameObject {
         }
     }
 };
+
+// ============================================================================
+// EunoiaBehaviour::GetBehaviour / HasBehaviour inline implementations
+// (Defined here where GameObject is a complete type)
+// ============================================================================
+template<typename T>
+inline T* EunoiaBehaviour::GetBehaviour() const {
+    if (!m_owner) return nullptr;
+    return m_owner->template GetBehaviour<T>();
+}
+
+template<typename T>
+inline bool EunoiaBehaviour::HasBehaviour() const {
+    return GetBehaviour<T>() != nullptr;
+}
+

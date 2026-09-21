@@ -220,15 +220,10 @@ public:
     // same owner (dev.md Section 62, 63)
     // -------------------------------------------------------------------------
     template<typename T>
-    T* GetBehaviour() const {
-        if (!m_owner) return nullptr;
-        return m_owner->template GetBehaviour<T>();
-    }
+    T* GetBehaviour() const;
 
     template<typename T>
-    bool HasBehaviour() const {
-        return GetBehaviour<T>() != nullptr;
-    }
+    bool HasBehaviour() const;
 
     // -------------------------------------------------------------------------
     // GetTransform() — returns BehaviourTransform reference (dev.md Section 34)
