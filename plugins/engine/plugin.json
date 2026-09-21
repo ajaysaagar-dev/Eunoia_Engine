@@ -1,0 +1,11 @@
+{
+    "name": "engine",
+    "version": "1.0.0",
+    "description": "Engine Core services: Log, JobSystem, Time, UUID, Result, Assert",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "engine",
+    "core": true,
+    "dependencies": [],
+    "provides": ["ILog", "IJobSystem"]
+}

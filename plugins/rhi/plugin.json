@@ -1,0 +1,11 @@
+{
+    "name": "rhi",
+    "version": "1.0.0",
+    "description": "DirectX 12 Render Hardware Interface (RHI)",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "rhi",
+    "core": true,
+    "dependencies": ["engine", "platform"],
+    "provides": ["IRHI"]
+}

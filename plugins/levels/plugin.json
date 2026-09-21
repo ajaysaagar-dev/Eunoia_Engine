@@ -1,0 +1,11 @@
+{
+    "name": "levels",
+    "version": "1.0.0",
+    "description": "Level loading, streaming, and scene serialization",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "levels",
+    "core": false,
+    "dependencies": ["scene", "assets"],
+    "provides": ["ILevelSerializer"]
+}

@@ -1,0 +1,11 @@
+{
+    "name": "behaviours",
+    "version": "1.0.0",
+    "description": "Component gameplay scripting system and behaviour reflection",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "behaviours",
+    "core": false,
+    "dependencies": ["engine", "scene"],
+    "provides": ["IBehaviourService"]
+}

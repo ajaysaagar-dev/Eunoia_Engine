@@ -7,6 +7,9 @@ projects/
 [Cc]ooked
 [Bb]uilds
 [Bb]uild
+*.dll
+*.o
+*.obj
 
 # User-specific files
 *.suo

@@ -1,0 +1,11 @@
+{
+    "name": "scene",
+    "version": "1.0.0",
+    "description": "Scene graph, GameObject, and Camera system",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "scene",
+    "core": false,
+    "dependencies": ["engine"],
+    "provides": ["ISceneManager"]
+}

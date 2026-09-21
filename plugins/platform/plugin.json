@@ -1,0 +1,11 @@
+{
+    "name": "platform",
+    "version": "1.0.0",
+    "description": "Platform Window and Input abstraction",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "platform",
+    "core": true,
+    "dependencies": ["engine"],
+    "provides": ["IWindow", "IInputSystem"]
+}

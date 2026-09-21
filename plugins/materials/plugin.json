@@ -1,0 +1,11 @@
+{
+    "name": "materials",
+    "version": "1.0.0",
+    "description": "Material system, shader parameter bindings, and material serialization",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "materials",
+    "core": false,
+    "dependencies": ["rendering", "assets"],
+    "provides": ["IMaterialSystem"]
+}

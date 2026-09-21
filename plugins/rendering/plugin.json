@@ -1,0 +1,11 @@
+{
+    "name": "rendering",
+    "version": "1.0.0",
+    "description": "Engine Renderer and Shading pipeline",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "rendering",
+    "core": false,
+    "dependencies": ["rhi", "scene", "engine"],
+    "provides": ["IRenderer"]
+}

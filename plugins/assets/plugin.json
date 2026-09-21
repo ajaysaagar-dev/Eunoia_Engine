@@ -1,0 +1,11 @@
+{
+    "name": "assets",
+    "version": "1.0.0",
+    "description": "Asset registry, caching, and model importers (OBJ, GLTF, FBX)",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "assets",
+    "core": false,
+    "dependencies": ["engine"],
+    "provides": ["IAssetService"]
+}

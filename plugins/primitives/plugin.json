@@ -1,0 +1,11 @@
+{
+    "name": "primitives",
+    "version": "1.0.0",
+    "description": "Procedural mesh generation: Cube, Sphere, Cylinder, Plane, Torus, Cone, Capsule, Pyramid, and more.",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "primitives",
+    "core": false,
+    "dependencies": ["engine", "scene", "rendering"],
+    "provides": ["IPrimitiveFactory"]
+}

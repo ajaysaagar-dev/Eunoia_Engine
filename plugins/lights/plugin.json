@@ -1,0 +1,11 @@
+{
+    "name": "lights",
+    "version": "1.0.0",
+    "description": "Lighting system (directional, point, spot, area, sky, ambient)",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "lights",
+    "core": false,
+    "dependencies": ["scene"],
+    "provides": ["ILightSystem"]
+}
