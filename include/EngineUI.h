@@ -216,6 +216,25 @@ public:
     std::vector<TextureAssetEntry> ScanProjectTextures();
     bool DrawTextureSlot(const char* label, std::string& textureSlotValue, AssetID& textureSlotAssetId, const std::vector<TextureAssetEntry>& availableTextures);
 
+    // Behaviours & Play Mode (dev.md)
+    bool showAddBehaviourPopup = false;
+    char behaviourSearchBuf[64] = "";
+    bool showNewBehaviourPopup = false;
+    char newBehaviourNameBuf[64] = "PlayerController";
+
+    // In-Editor Code Editor (dev.md & User Request)
+    bool showCodeEditor = false;
+    std::string activeCodeEditorPath = "";
+    std::string activeCodeEditorFilename = "";
+    std::string activeCodeEditorContent = "";
+    bool codeEditorDirty = false;
+
+    void OpenScriptInCodeEditor(const std::string& path);
+    void RenderCodeEditor();
+    void RenderBehavioursSection(Scene& scene, GameObject* obj);
+    void EnterPlayMode(Scene& scene);
+    void ExitPlayMode(Scene& scene);
+
     uint64_t lightIconGpuHandle = 0;
 
 private:

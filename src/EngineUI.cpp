@@ -14,10 +14,16 @@
 #include <cctype>
 #include <windows.h>
 #include <commdlg.h>
+#ifdef GetClassName
+#undef GetClassName
+#endif
 #include <map>
 #include "TextureManager.h"
 #include "MeshImporter.h"
 #include "EngineLogger.h"
+#include "BehaviourRegistry.h"
+#include "InputSystem.h"
+#include <shellapi.h>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
     if (a.objects.size() != b.objects.size()) return true;
@@ -31,6 +37,7 @@ inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
         if (o1.color != o2.color || o1.metallic != o2.metallic || o1.roughness != o2.roughness) return true;
         if (o1.light.intensity != o2.light.intensity || o1.light.color != o2.light.color || o1.light.range != o2.light.range || o1.light.castShadows != o2.light.castShadows) return true;
         if (o1.materialName != o2.materialName || o1.name != o2.name) return true;
+        if (o1.behaviours.size() != o2.behaviours.size()) return true;
     }
     for (size_t i = 0; i < a.pointLights.size(); ++i) {
         const auto& p1 = a.pointLights[i];
@@ -625,6 +632,32 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         }
     }
 
+    // Play Mode Presentation & Stop-on-Delete (dev.md Section 32, 34)
+    if (scene.isPlayMode) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || InputSystem::Get().IsKeyPressed(Key::Delete)) {
+            ExitPlayMode(scene);
+            return;
+        }
+
+        ImGuiViewport* mainVp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(mainVp->WorkPos.x + 16.0f, mainVp->WorkPos.y + 16.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.75f);
+        ImGuiWindowFlags playFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+        if (ImGui::Begin("##PlayModeBanner", nullptr, playFlags)) {
+            ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ GAME VIEW (PLAY MODE)");
+            ImGui::SameLine();
+            ImGui::TextDisabled("| Press [DELETE] to Stop");
+            ImGui::SameLine();
+            if (ImGui::Button("⏹ Stop (DELETE)")) {
+                ExitPlayMode(scene);
+            }
+        }
+        ImGui::End();
+
+        // Game View occupies the available area; editor UI is hidden
+        return;
+    }
+
     // Global editor change tracking for continuous edits (sliders, drag inputs, colors, text fields)
     static bool s_hasPreEditSnapshot = false;
     static Scene s_preEditSceneSnapshot;
@@ -681,6 +714,11 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     // 8. Asset Cooking Pipeline Modal (dev.md Section 24, 25)
     if (showCookModal) {
         RenderCookModal();
+    }
+
+    // 9. In-Engine Code Editor (dev.md & User Request)
+    if (showCodeEditor) {
+        RenderCodeEditor();
     }
 
     // Undo History Window (52 steps capacity)
@@ -910,17 +948,19 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
 
             ImGui::TextDisabled("|");
 
-            // PIE Controls (Play In Editor)
-            ImGui::PushStyleColor(ImGuiCol_Button, scene.playAnimations ? ImVec4(0.18f, 0.65f, 0.32f, 1.0f) : ImVec4(0.20f, 0.22f, 0.26f, 1.0f));
-            if (ImGui::Button(scene.playAnimations ? "Pause" : "Play")) {
-                scene.playAnimations = !scene.playAnimations;
-                AddLog("LogPlayLevel", scene.playAnimations ? "PIE: Simulation Resumed" : "PIE: Simulation Paused", 0);
+            // PIE Controls (Play In Editor) (dev.md Section 30-36)
+            ImGui::PushStyleColor(ImGuiCol_Button, scene.isPlayMode ? ImVec4(0.18f, 0.75f, 0.32f, 1.0f) : ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
+            if (ImGui::Button("▶ Play")) {
+                EnterPlayMode(scene);
             }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enter Play Mode (Runs Behaviours & Simulation; Press DELETE to stop)");
             ImGui::PopStyleColor();
 
-            if (ImGui::Button("Stop")) {
-                scene.playAnimations = false;
-                AddLog("LogPlayLevel", "PIE: Simulation Stopped", 0);
+            if (scene.isPlayMode) {
+                ImGui::SameLine();
+                if (ImGui::Button("⏹ Stop (DELETE)")) {
+                    ExitPlayMode(scene);
+                }
             }
 
             if (ImGui::Button("Reset View")) {
@@ -2134,6 +2174,9 @@ void EngineUI::RenderDetails(Scene& scene) {
             }
         }
 
+        // 6. Behaviours (dev.md Section 6, 7, 8, 9, 10, 11, 12, 13)
+        RenderBehavioursSection(scene, obj);
+
         ImGui::PopID();
     }
     ImGui::End();
@@ -2945,6 +2988,12 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                     snprintf(newMaterialNameBuf, sizeof(newMaterialNameBuf), "M_NewMaterial");
                 }
                 ImGui::SameLine();
+                if (ImGui::Button("🧩 New Behaviour")) {
+                    showNewBehaviourPopup = true;
+                    snprintf(newBehaviourNameBuf, sizeof(newBehaviourNameBuf), "PlayerController");
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new EunoiaBehaviour C++ script asset (dev.md Section 4, 21)");
+                ImGui::SameLine();
                 if (ImGui::Button("📦 Cook")) {
                     OpenCookModal();
                 }
@@ -3022,6 +3071,97 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                 AddLog("LogContent", "Created material asset: " + newMat.name + " (" + newMat.assetId.ToString() + ")", 2);
                                 OpenMaterialEditor(matFilePath.string());
                             }
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::EndPopup();
+                }
+
+                if (showNewBehaviourPopup) {
+                    ImGui::OpenPopup("Create Behaviour##Modal");
+                    showNewBehaviourPopup = false;
+                }
+                if (ImGui::BeginPopupModal("Create Behaviour##Modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                    ImGui::Text("Enter Behaviour Class Name (inherits EunoiaBehaviour):");
+                    ImGui::SetNextItemWidth(280.0f);
+                    ImGui::InputText("##BehNameInput", newBehaviourNameBuf, sizeof(newBehaviourNameBuf));
+                    ImGui::Spacing();
+                    if (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
+                        if (strlen(newBehaviourNameBuf) > 0) {
+                            std::string behName = newBehaviourNameBuf;
+                            std::string diskSub = currentVirtualDir;
+                            if (diskSub.rfind("/Game", 0) == 0) diskSub = diskSub.substr(5);
+                            if (!diskSub.empty() && diskSub[0] == '/') diskSub.erase(0, 1);
+                            std::filesystem::path behDir = contentRootPath / diskSub / "Behaviours";
+                            std::error_code bec;
+                            std::filesystem::create_directories(behDir, bec);
+
+                            std::filesystem::path hPath = behDir / (behName + ".h");
+                            std::filesystem::path cppPath = behDir / (behName + ".cpp");
+                            std::filesystem::path metaPath = behDir / (behName + ".h.assetmeta");
+
+                            std::ofstream hFile(hPath);
+                            if (hFile.is_open()) {
+                                hFile << "#pragma once\n#include \"EunoiaBehaviour.h\"\n\n"
+                                      << "class " << behName << " : public EunoiaBehaviour {\npublic:\n"
+                                      << "    float MoveSpeed = 5.0f;\n"
+                                      << "    int Health = 100;\n"
+                                      << "    bool IsActive = true;\n"
+                                      << "    Light* WarningLight = nullptr;\n"
+                                      << "    MeshRenderer* TargetMesh = nullptr;\n\n"
+                                      << "    " << behName << "() {\n"
+                                      << "        m_className = \"" << behName << "\";\n"
+                                      << "        m_displayName = \"" << behName << "\";\n"
+                                      << "        RegisterProperties();\n"
+                                      << "    }\n\n"
+                                      << "    void RegisterProperties() override {\n"
+                                      << "        m_properties.clear();\n"
+                                      << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Movement\", 0.0f, 50.0f);\n"
+                                      << "        RegisterProperty(\"Health\", &Health, \"Stats\", 0, 1000);\n"
+                                      << "        RegisterProperty(\"Is Active\", &IsActive, \"General\");\n"
+                                      << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
+                                      << "        RegisterReference(\"Target Mesh\", &TargetMesh, ObjectRefType::Mesh, \"References\");\n"
+                                      << "    }\n\n"
+                                      << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
+                                      << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
+                                      << "        clone->RegisterProperties();\n"
+                                      << "        return clone;\n"
+                                      << "    }\n\n"
+                                      << "    void Start() override;\n"
+                                      << "    void Update(float deltaTime) override;\n};\n";
+                            }
+
+                            std::ofstream cppFile(cppPath);
+                            if (cppFile.is_open()) {
+                                cppFile << "#include \"" << behName << ".h\"\n#include \"BehaviourRegistry.h\"\n#include \"GameObject.h\"\n\n"
+                                        << "void " << behName << "::Start() {\n"
+                                        << "    auto* light = GetRespectiveObject.Light(WarningLight);\n"
+                                        << "    if (light) {\n        // Configure light\n    }\n"
+                                        << "    AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start called on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n}\n\n"
+                                        << "void " << behName << "::Update(float deltaTime) {\n"
+                                        << "    // Custom gameplay logic for " << behName << "\n}\n";
+                            }
+
+                            std::ofstream metaFile(metaPath);
+                            if (metaFile.is_open()) {
+                                AssetID aid = AssetID::CreateRandom();
+                                metaFile << "# Eunoia-Editor Asset Sidecar Metadata\n"
+                                         << "assetId: " << aid.ToString() << "\n"
+                                         << "type: Behaviour\n"
+                                         << "baseClass: EunoiaBehaviour\n"
+                                         << "virtualPath: " << currentVirtualDir << "/Behaviours/" << behName << "\n";
+                            }
+
+                            AssetRegistry::Get().ScanAndSync(contentRootPath);
+                            AddLog("LogContent", "Created Behaviour asset: " + behName + " in " + currentVirtualDir + "/Behaviours/", 2);
+
+                            // Open in code editor immediately
+                            ShellExecuteA(NULL, "open", hPath.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+                            OpenScriptInCodeEditor(hPath.string());
                         }
                         ImGui::CloseCurrentPopup();
                     }
@@ -3192,6 +3332,10 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                 } else if (meta.type == AssetType::Level) {
                                     std::filesystem::path fullLevel = contentRootPath / meta.sourcePath;
                                     OpenLevelFromPath(scene, fullLevel.string());
+                                } else if (meta.type == AssetType::Behaviour || meta.type == AssetType::Script) {
+                                    std::filesystem::path fullScript = contentRootPath / meta.sourcePath;
+                                    ShellExecuteA(NULL, "open", fullScript.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                    OpenScriptInCodeEditor(fullScript.string());
                                 } else {
                                     OpenReferenceViewer(meta.id);
                                 }
@@ -3252,6 +3396,14 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                         // Context Menu on Asset Item
                         if (ImGui::BeginPopupContextItem("AssetRowCtx")) {
+                            if (meta.type == AssetType::Behaviour || meta.type == AssetType::Script) {
+                                if (ImGui::MenuItem("💻 Open in Code Editor")) {
+                                    std::filesystem::path fullScript = contentRootPath / meta.sourcePath;
+                                    ShellExecuteA(NULL, "open", fullScript.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                    OpenScriptInCodeEditor(fullScript.string());
+                                }
+                                ImGui::Separator();
+                            }
                             if (meta.type == AssetType::Material) {
                                 if (ImGui::MenuItem("🎨 Open in Material Editor")) {
                                     std::filesystem::path fullMat = contentRootPath / meta.sourcePath;
@@ -3385,7 +3537,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 }
 
 void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidth, float viewportHeight) {
-    if (!showGizmo || scene.selectedId == -1) return;
+    if (scene.isPlayMode || !showGizmo || scene.selectedId == -1) return;
 
     GameObject* obj = scene.GetSelected();
     if (!obj || !obj->visible) return;
@@ -3864,4 +4016,413 @@ void EngineUI::RenderCookModal() {
 
     ImGui::End();
 }
+
+// ============================================================================
+// Play Mode / Editor Mode Management (dev.md Section 30-36)
+// ============================================================================
+
+void EngineUI::EnterPlayMode(Scene& scene) {
+    if (scene.isPlayMode) return;
+    scene.StartPlayMode();
+    AddLog("LogPlayLevel", "PIE: Play Mode Started. Running Behaviours...", 0);
+}
+
+void EngineUI::ExitPlayMode(Scene& scene) {
+    if (!scene.isPlayMode) return;
+    scene.StopPlayMode();
+    AddLog("LogPlayLevel", "PIE: Play Mode Stopped (DELETE). Restored Editor Scene.", 0);
+}
+
+// ============================================================================
+// In-Editor Code Editor (dev.md & User Request: double click behaviour script)
+// ============================================================================
+
+void EngineUI::OpenScriptInCodeEditor(const std::string& path) {
+    activeCodeEditorPath = path;
+    activeCodeEditorFilename = std::filesystem::path(path).filename().string();
+    activeCodeEditorContent.clear();
+
+    std::ifstream file(path);
+    if (file.is_open()) {
+        std::stringstream ss;
+        ss << file.rdbuf();
+        activeCodeEditorContent = ss.str();
+    }
+    showCodeEditor = true;
+    codeEditorDirty = false;
+    AddLog("LogContent", "Opened Behaviour script in Code Editor: " + activeCodeEditorFilename, 0);
+}
+
+void EngineUI::RenderCodeEditor() {
+    if (!showCodeEditor) return;
+
+    std::string title = "💻 Code Editor — " + activeCodeEditorFilename + (codeEditorDirty ? "*" : "") + "###CodeEditorWin";
+    ImGui::SetNextWindowSize(ImVec2(740, 540), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin(title.c_str(), &showCodeEditor, ImGuiWindowFlags_MenuBar)) {
+        if (ImGui::BeginMenuBar()) {
+            if (ImGui::MenuItem("💾 Save File", "Ctrl+S")) {
+                std::ofstream file(activeCodeEditorPath);
+                if (file.is_open()) {
+                    file << activeCodeEditorContent;
+                    codeEditorDirty = false;
+                    AddLog("LogContent", "Saved file: " + activeCodeEditorFilename, 2);
+                }
+            }
+            if (ImGui::MenuItem("🚀 Open in External IDE")) {
+                ShellExecuteA(NULL, "open", activeCodeEditorPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                AddLog("LogContent", "Launched external editor for: " + activeCodeEditorFilename, 0);
+            }
+            ImGui::EndMenuBar();
+        }
+
+        // Action Toolbar
+        if (ImGui::Button("💾 Save File")) {
+            std::ofstream file(activeCodeEditorPath);
+            if (file.is_open()) {
+                file << activeCodeEditorContent;
+                codeEditorDirty = false;
+                AddLog("LogContent", "Saved file: " + activeCodeEditorFilename, 2);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("🚀 Open in External IDE (VS Code / Visual Studio)")) {
+            ShellExecuteA(NULL, "open", activeCodeEditorPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            AddLog("LogContent", "Launched external editor for: " + activeCodeEditorFilename, 0);
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("| %s", activeCodeEditorPath.c_str());
+
+        ImGui::Separator();
+
+        // Multiline text buffer
+        static std::vector<char> buffer;
+        if (buffer.size() < activeCodeEditorContent.size() + 65536) {
+            buffer.resize(activeCodeEditorContent.size() + 65536);
+            memcpy(buffer.data(), activeCodeEditorContent.c_str(), activeCodeEditorContent.size() + 1);
+        }
+
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        if (ImGui::InputTextMultiline("##CodeEditorText", buffer.data(), buffer.size(), avail,
+            ImGuiInputTextFlags_AllowTabInput)) {
+            activeCodeEditorContent = buffer.data();
+            codeEditorDirty = true;
+        }
+
+        // Ctrl+S hotkey
+        if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+            ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
+            std::ofstream file(activeCodeEditorPath);
+            if (file.is_open()) {
+                file << activeCodeEditorContent;
+                codeEditorDirty = false;
+                AddLog("LogContent", "Saved file: " + activeCodeEditorFilename, 2);
+            }
+        }
+    }
+    ImGui::End();
+}
+
+// ============================================================================
+// Details Panel Behaviours Section (dev.md Section 6, 7, 8, 9, 10, 11, 12, 13)
+// ============================================================================
+
+void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
+    if (!obj) return;
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    char headerLabel[128];
+    snprintf(headerLabel, sizeof(headerLabel), "🧩 Behaviours (%zu)###BehavioursHeader", obj->behaviours.size());
+    if (ImGui::CollapsingHeader(headerLabel, ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Spacing();
+
+        // Button to add behaviour
+        if (ImGui::Button("+ Add Behaviour", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+            showAddBehaviourPopup = true;
+            behaviourSearchBuf[0] = '\0';
+        }
+
+        if (showAddBehaviourPopup) {
+            ImGui::OpenPopup("Add Behaviour##Modal");
+            showAddBehaviourPopup = false;
+        }
+
+        if (ImGui::BeginPopupModal("Add Behaviour##Modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "Select Behaviour to Attach:");
+            ImGui::SetNextItemWidth(300.0f);
+            ImGui::InputTextWithHint("##BehSearch", "🔍 Search Behaviours...", behaviourSearchBuf, sizeof(behaviourSearchBuf));
+            ImGui::Separator();
+
+            std::string searchLower = behaviourSearchBuf;
+            std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+
+            const auto& allBehaviors = BehaviourRegistry::Get().GetAll();
+            int matchCount = 0;
+            for (const auto& pair : allBehaviors) {
+                const auto& info = pair.second;
+                std::string nameLower = info.displayName;
+                std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+                std::string classLower = info.className;
+                std::transform(classLower.begin(), classLower.end(), classLower.begin(), ::tolower);
+
+                if (!searchLower.empty() && nameLower.find(searchLower) == std::string::npos && classLower.find(searchLower) == std::string::npos) {
+                    continue;
+                }
+
+                matchCount++;
+                std::string itemText = "🧩 " + info.displayName + " (" + info.className + ")";
+                if (ImGui::Selectable(itemText.c_str(), false)) {
+                    UndoManager::Get().RecordSnapshot(scene, "Add Behaviour: " + info.className);
+                    auto newB = BehaviourRegistry::Get().Create(info.className);
+                    if (newB) {
+                        newB->SetScene(&scene);
+                        obj->AddBehaviour(std::move(newB));
+                        obj->behaviours.back()->ResolveReferences(scene);
+                        AddLog("LogBehaviour", "Attached " + info.displayName + " to " + obj->name, 2);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                if (!info.description.empty() && ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", info.description.c_str());
+                }
+            }
+
+            if (matchCount == 0) {
+                ImGui::TextDisabled("No behaviours match search query.");
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Render each attached behaviour
+        int removeIdx = -1;
+        int moveUpIdx = -1;
+        int moveDownIdx = -1;
+
+        for (size_t i = 0; i < obj->behaviours.size(); ++i) {
+            auto& b = obj->behaviours[i];
+            if (!b) continue;
+
+            ImGui::PushID((int)i);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
+            ImGui::BeginChild("BehaviourCard", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+
+            // Header line: Reorder, Class Title, Enable checkbox, Remove button
+            if (i > 0) {
+                if (ImGui::SmallButton("▲")) moveUpIdx = (int)i;
+                ImGui::SameLine();
+            }
+            if (i + 1 < obj->behaviours.size()) {
+                if (ImGui::SmallButton("▼")) moveDownIdx = (int)i;
+                ImGui::SameLine();
+            }
+
+            bool isEnabled = b->IsEnabled();
+            if (ImGui::Checkbox("##Enabled", &isEnabled)) {
+                UndoManager::Get().RecordSnapshot(scene, "Toggle Behaviour Enabled");
+                b->SetEnabled(isEnabled);
+            }
+            ImGui::SameLine();
+
+            ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "%s", b->GetDisplayName().c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", b->GetClassName().c_str());
+
+            // Right-aligned Remove button
+            float availW = ImGui::GetContentRegionAvail().x;
+            if (availW > 70.0f) {
+                ImGui::SameLine(ImGui::GetWindowWidth() - 75.0f);
+                if (ImGui::SmallButton("🗑 Remove")) {
+                    removeIdx = (int)i;
+                }
+            }
+
+            ImGui::Separator();
+
+            // Properties list
+            auto& props = b->GetProperties();
+            for (size_t pi = 0; pi < props.size(); ++pi) {
+                auto& prop = props[pi];
+                ImGui::PushID((int)pi);
+
+                switch (prop.type) {
+                    case BehaviourPropertyType::Bool: {
+                        if (prop.dataPtr) {
+                            bool* val = reinterpret_cast<bool*>(prop.dataPtr);
+                            ImGui::Checkbox(prop.displayName.c_str(), val);
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Int: {
+                        if (prop.dataPtr) {
+                            int* val = reinterpret_cast<int*>(prop.dataPtr);
+                            if (prop.hasRange) {
+                                ImGui::SliderInt(prop.displayName.c_str(), val, (int)prop.minVal, (int)prop.maxVal);
+                            } else {
+                                ImGui::DragInt(prop.displayName.c_str(), val);
+                            }
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Float: {
+                        if (prop.dataPtr) {
+                            float* val = reinterpret_cast<float*>(prop.dataPtr);
+                            if (prop.hasRange) {
+                                ImGui::SliderFloat(prop.displayName.c_str(), val, prop.minVal, prop.maxVal);
+                            } else {
+                                ImGui::DragFloat(prop.displayName.c_str(), val, 0.1f);
+                            }
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Double: {
+                        if (prop.dataPtr) {
+                            double* val = reinterpret_cast<double*>(prop.dataPtr);
+                            float tempF = (float)*val;
+                            if (ImGui::DragFloat(prop.displayName.c_str(), &tempF, 0.1f)) {
+                                *val = (double)tempF;
+                            }
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::String: {
+                        if (prop.dataPtr) {
+                            std::string* val = reinterpret_cast<std::string*>(prop.dataPtr);
+                            char strBuf[256] = {};
+                            strncpy(strBuf, val->c_str(), sizeof(strBuf) - 1);
+                            if (ImGui::InputText(prop.displayName.c_str(), strBuf, sizeof(strBuf))) {
+                                *val = strBuf;
+                            }
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Vec2: {
+                        if (prop.dataPtr) {
+                            glm::vec2* val = reinterpret_cast<glm::vec2*>(prop.dataPtr);
+                            ImGui::DragFloat2(prop.displayName.c_str(), &val->x, 0.1f);
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Vec3: {
+                        if (prop.dataPtr) {
+                            glm::vec3* val = reinterpret_cast<glm::vec3*>(prop.dataPtr);
+                            ImGui::DragFloat3(prop.displayName.c_str(), &val->x, 0.1f);
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Vec4: {
+                        if (prop.dataPtr) {
+                            glm::vec4* val = reinterpret_cast<glm::vec4*>(prop.dataPtr);
+                            ImGui::DragFloat4(prop.displayName.c_str(), &val->x, 0.1f);
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::Color3: {
+                        if (prop.dataPtr) {
+                            glm::vec3* val = reinterpret_cast<glm::vec3*>(prop.dataPtr);
+                            ImGui::ColorEdit3(prop.displayName.c_str(), &val->x);
+                        }
+                        break;
+                    }
+                    case BehaviourPropertyType::ObjectRef: {
+                        // Object Reference with Typed Dropdown and Drag & Drop (dev.md Section 9, 10, 11, 12, 13)
+                        ImGui::Text("%s", prop.displayName.c_str());
+
+                        std::string preview = "None (Select " + std::string(ObjectRefTypeToString(prop.refType)) + ")";
+                        if (prop.targetId != -1) {
+                            GameObject* targetObj = scene.FindObject(prop.targetId);
+                            if (targetObj) {
+                                preview = targetObj->name;
+                            } else {
+                                preview = "⚠ Missing Reference (ID: " + std::to_string(prop.targetId) + ")";
+                            }
+                        }
+
+                        if (prop.isMissing) {
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.35f, 0.35f, 1.0f));
+                        }
+
+                        if (ImGui::BeginCombo("##ObjRefCombo", preview.c_str())) {
+                            if (ImGui::Selectable("(None)", prop.targetId == -1)) {
+                                UndoManager::Get().RecordSnapshot(scene, "Clear Reference: " + prop.name);
+                                prop.targetId = -1;
+                                b->ResolveReferences(scene);
+                            }
+                            ImGui::Separator();
+
+                            for (const auto& sceneObj : scene.objects) {
+                                // Filter by requested reference type (dev.md Section 10)
+                                if (prop.refType == ObjectRefType::Light && !sceneObj.isLight) continue;
+                                if (prop.refType == ObjectRefType::Mesh && sceneObj.mesh.indices.empty()) continue;
+
+                                bool isSelected = (prop.targetId == sceneObj.id);
+                                std::string itemLabel = sceneObj.name + " (ID: " + std::to_string(sceneObj.id) + ")";
+                                if (ImGui::Selectable(itemLabel.c_str(), isSelected)) {
+                                    UndoManager::Get().RecordSnapshot(scene, "Assign Reference: " + prop.name);
+                                    prop.targetId = sceneObj.id;
+                                    b->ResolveReferences(scene);
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+
+                        if (prop.isMissing) {
+                            ImGui::PopStyleColor();
+                        }
+
+                        // Drag & Drop Target from Hierarchy (dev.md Section 12)
+                        if (ImGui::BeginDragDropTarget()) {
+                            if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("OUTLINER_ACTOR")) {
+                                int draggedId = *(const int*)payload->Data;
+                                GameObject* draggedObj = scene.FindObject(draggedId);
+                                if (draggedObj) {
+                                    bool compatible = true;
+                                    if (prop.refType == ObjectRefType::Light && !draggedObj->isLight) compatible = false;
+                                    if (prop.refType == ObjectRefType::Mesh && draggedObj->mesh.indices.empty()) compatible = false;
+
+                                    if (compatible) {
+                                        UndoManager::Get().RecordSnapshot(scene, "Drop Reference: " + prop.name);
+                                        prop.targetId = draggedId;
+                                        b->ResolveReferences(scene);
+                                        AddLog("LogBehaviour", "Assigned " + draggedObj->name + " to " + prop.displayName, 2);
+                                    } else {
+                                        AddLog("LogBehaviour", "Cannot assign " + draggedObj->name + " — incompatible type (" + ObjectRefTypeToString(prop.refType) + " expected).", 1);
+                                    }
+                                }
+                            }
+                            ImGui::EndDragDropTarget();
+                        }
+
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Select %s or drag & drop actor from Outliner onto this field.", ObjectRefTypeToString(prop.refType));
+                        }
+                        break;
+                    }
+                }
+
+                ImGui::PopID();
+            }
+
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+            ImGui::PopID();
+        }
+
+        if (removeIdx >= 0) {
+            UndoManager::Get().RecordSnapshot(scene, "Remove Behaviour");
+            obj->RemoveBehaviour((size_t)removeIdx);
+        } else if (moveUpIdx > 0) {
+            UndoManager::Get().RecordSnapshot(scene, "Reorder Behaviour");
+            obj->ReorderBehaviour((size_t)moveUpIdx, (size_t)(moveUpIdx - 1));
+        } else if (moveDownIdx >= 0 && moveDownIdx + 1 < (int)obj->behaviours.size()) {
+            UndoManager::Get().RecordSnapshot(scene, "Reorder Behaviour");
+            obj->ReorderBehaviour((size_t)moveDownIdx, (size_t)(moveDownIdx + 1));
+        }
+    }
+}
+
 

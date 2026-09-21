@@ -2772,8 +2772,8 @@ int main()
 
 		if (deltaTime > 0.1f) deltaTime = 0.1f;
 
-		// Process In-Editor Fly Mode (Hold RMB + W, S, A, D, E, Q)
-		if (s_isRightMouseDown && g_camera.isFlying)
+		// Process In-Editor Fly Mode (Hold RMB + W, S, A, D, E, Q) (Disabled in Play Mode so behaviours receive game input)
+		if (!g_scene.isPlayMode && s_isRightMouseDown && g_camera.isFlying)
 		{
 			float speed = g_camera.moveSpeed;
 			if (glfwGetKey(g_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
@@ -2799,6 +2799,12 @@ int main()
 				deltaMove = glm::normalize(deltaMove) * speed * deltaTime;
 				g_camera.Move(deltaMove);
 			}
+		}
+
+		// Play Mode stop key listener (dev.md Section 34: DELETE stops Play Mode even if Game View has focus)
+		if (g_scene.isPlayMode && (InputSystem::Get().IsKeyPressed(Key::Delete) || glfwGetKey(g_window, GLFW_KEY_DELETE) == GLFW_PRESS))
+		{
+			g_engineUI.ExitPlayMode(g_scene);
 		}
 
 		frameCount += 1.0f;
@@ -2828,8 +2834,8 @@ int main()
 			glfwSetWindowShouldClose(g_window, GLFW_TRUE);
 		}
 
-		// Process deferred 3D object picking only if the click was NOT on an active/hovered gizmo or UI element
-		if (s_pendingPickClick)
+		// Process deferred 3D object picking only if the click was NOT on an active/hovered gizmo or UI element (disabled in Play Mode)
+		if (!g_scene.isPlayMode && s_pendingPickClick)
 		{
 			s_pendingPickClick = false;
 			ImGuiIO& io = ImGui::GetIO();
