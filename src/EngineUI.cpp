@@ -566,7 +566,8 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     ImGuizmo::BeginFrame();
 
     // Unreal Keyboard Shortcuts (when not typing and not currently in free fly mode)
-    if (!ImGui::GetIO().WantTextInput && !camera.isFlying) {
+    // During Play Mode, suppress editor shortcuts so gameplay input is uninterrupted (dev.md §54)
+    if (!ImGui::GetIO().WantTextInput && !camera.isFlying && !scene.isPlayMode) {
         // F: Focus selected actor
         if (ImGui::IsKeyPressed(ImGuiKey_F) && scene.selectedId != -1) {
             GameObject* obj = scene.GetSelected();
@@ -3138,49 +3139,77 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                             std::ofstream cppFile(cppPath);
                             if (cppFile.is_open()) {
                                 cppFile << "#include \"EunoiaBehaviour.h\"\n"
-                                        << "#include \"BehaviourRegistry.h\"\n"
-                                        << "#include \"GameObject.h\"\n"
-                                        << "#include \"InputSystem.h\"\n"
-                                        << "#include \"EngineLogger.h\"\n\n"
-                                        << "class " << behName << " : public EunoiaBehaviour {\n"
-                                        << "public:\n"
-                                        << "    // Properties exposed in Details Panel\n"
-                                        << "    float MoveSpeed = 5.0f;\n"
-                                        << "    bool IsActive = true;\n"
-                                        << "    Light* WarningLight = nullptr;\n\n"
-                                        << "    " << behName << "() {\n"
-                                        << "        m_className = \"" << behName << "\";\n"
-                                        << "        m_displayName = \"" << behName << "\";\n"
-                                        << "        RegisterProperties();\n"
-                                        << "    }\n\n"
-                                        << "    void RegisterProperties() override {\n"
-                                        << "        m_properties.clear();\n"
-                                        << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Locomotion\", 0.0f, 50.0f);\n"
-                                        << "        RegisterProperty(\"Is Active\", &IsActive, \"General\");\n"
-                                        << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
-                                        << "    }\n\n"
-                                        << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
-                                        << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
-                                        << "        clone->RegisterProperties();\n"
-                                        << "        return clone;\n"
-                                        << "    }\n\n"
-                                        << "    void Start() override {\n"
-                                        << "        auto* light = GetRespectiveObject.Light(WarningLight);\n"
-                                        << "        if (light) {\n"
-                                        << "            // Configure light\n"
-                                        << "        }\n"
-                                        << "        AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start called on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n"
-                                        << "    }\n\n"
-                                        << "    void Update(float deltaTime) override {\n"
-                                        << "        if (!m_owner) return;\n"
-                                        << "        // Control transform using capitalized keywords:\n"
-                                        << "        // Transform.Location.LocalSpace(Transform.Location.LocalSpace() + glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime));\n"
-                                        << "        // Transform.Position.WorldSpace(glm::vec3(0, 0, 0));\n"
-                                        << "        // Transform.Rotation.LocalSpace(glm::vec3(0, 45, 0));\n"
-                                        << "        // Transform.Scale.LocalSpace(glm::vec3(1, 1, 1));\n"
-                                        << "    }\n"
-                                        << "};\n\n"
-                                        << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
+                                    << "#include \"BehaviourRegistry.h\"\n"
+                                    << "#include \"GameObject.h\"\n"
+                                    << "#include \"InputSystem.h\"\n"
+                                    << "#include \"EngineLogger.h\"\n\n"
+                                    << "// ============================================================================\n"
+                                    << "// " << behName << " — Eunoia Behaviour Script\n"
+                                    << "// Inherits EunoiaBehaviour. Register properties in RegisterProperties().\n"
+                                    << "// ============================================================================\n\n"
+                                    << "class " << behName << " : public EunoiaBehaviour {\n"
+                                    << "public:\n"
+                                    << "    // --- Exposed Properties (appear in Details Panel) ---\n"
+                                    << "    float MoveSpeed = 5.0f;\n"
+                                    << "    bool  IsActive  = true;\n"
+                                    << "    int   Health    = 100;\n"
+                                    << "    Light* WarningLight = nullptr;\n\n"
+                                    << "    " << behName << "() {\n"
+                                    << "        m_className   = \"" << behName << "\";\n"
+                                    << "        m_displayName = \"" << behName << "\";\n"
+                                    << "        RegisterProperties();\n"
+                                    << "    }\n\n"
+                                    << "    void RegisterProperties() override {\n"
+                                    << "        m_properties.clear();\n"
+                                    << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Locomotion\", 0.0f, 50.0f);\n"
+                                    << "        RegisterProperty(\"Is Active\",  &IsActive,  \"General\");\n"
+                                    << "        RegisterProperty(\"Health\",     &Health,    \"Stats\", 0, 1000);\n"
+                                    << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
+                                    << "    }\n\n"
+                                    << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
+                                    << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
+                                    << "        clone->RegisterProperties();\n"
+                                    << "        return clone;\n"
+                                    << "    }\n\n"
+                                    << "    void OnCreate() override {\n"
+                                    << "        // Called once when behaviour is first attached to an object.\n"
+                                    << "    }\n\n"
+                                    << "    void Start() override {\n"
+                                    << "        // Called once before the first Update. Use for initialization.\n"
+                                    << "        auto* light = GetRespectiveObject.Light(WarningLight);\n"
+                                    << "        if (light) {\n"
+                                    << "            // Configure light\n"
+                                    << "        }\n"
+                                    << "        AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n"
+                                    << "    }\n\n"
+                                    << "    void Update(float deltaTime) override {\n"
+                                    << "        if (!m_owner || !IsActive) return;\n\n"
+                                    << "        // --- Transform examples (capitalized keywords) ---\n"
+                                    << "        // Move forward:\n"
+                                    << "        // Transform.Location += glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime);\n"
+                                    << "        // Set world position:\n"
+                                    << "        // Transform.Position.WorldSpace(glm::vec3(0, 1, 0));\n"
+                                    << "        // Set rotation:\n"
+                                    << "        // Transform.Rotation.LocalSpace(glm::vec3(0, 90, 0));\n\n"
+                                    << "        // --- Input example ---\n"
+                                    << "        // if (InputSystem::Get().IsKeyDown(Key::W)) {\n"
+                                    << "        //     Transform.Location += glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime);\n"
+                                    << "        // }\n\n"
+                                    << "        // --- Access sibling behaviours ---\n"
+                                    << "        // auto* health = GetBehaviour<HealthBehaviour>();\n"
+                                    << "        // if (health) { /* use it */ }\n\n"
+                                    << "        // --- Runtime spawn ---\n"
+                                    << "        // GameObject* bullet = SpawnGameObject(\"Bullet\", m_owner->position);\n"
+                                    << "        // if (bullet) { bullet->AddBehaviour(std::make_shared<BulletBehaviour>()); }\n"
+                                    << "    }\n\n"
+                                    << "    void LateUpdate(float deltaTime) override {\n"
+                                    << "        // Called after all Update() calls each frame.\n"
+                                    << "    }\n\n"
+                                    << "    void OnDestroy() override {\n"
+                                    << "        // Called once when behaviour is destroyed / owner is deleted.\n"
+                                    << "    }\n"
+                                    << "};\n\n"
+                                    << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
                             }
 
                             std::ofstream metaFile(metaPath);
@@ -4062,14 +4091,37 @@ void EngineUI::RenderCookModal() {
 
 void EngineUI::EnterPlayMode(Scene& scene) {
     if (scene.isPlayMode) return;
+
+    // Hide all editor UI panels so the game view takes the full window
+    prevShowOutliner     = showOutliner;
+    prevShowDetails      = showDetails;
+    prevShowBottomDrawer = showBottomDrawer;
+    showOutliner     = false;
+    showDetails      = false;
+    showBottomDrawer = false;
+
+    // Hide gizmo and grid
+    prevShowGizmo = showGizmo;
+    prevShowGrid  = scene.showGrid;
+    showGizmo       = false;
+    scene.showGrid  = false;
+
     scene.StartPlayMode();
-    AddLog("LogPlayLevel", "PIE: Play Mode Started. Running Behaviours...", 0);
+    AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press DELETE to stop.", 0);
 }
 
 void EngineUI::ExitPlayMode(Scene& scene) {
     if (!scene.isPlayMode) return;
     scene.StopPlayMode();
-    AddLog("LogPlayLevel", "PIE: Play Mode Stopped (DELETE). Restored Editor Scene.", 0);
+
+    // Restore all editor panels
+    showOutliner     = prevShowOutliner;
+    showDetails      = prevShowDetails;
+    showBottomDrawer = prevShowBottomDrawer;
+    showGizmo        = prevShowGizmo;
+    scene.showGrid   = prevShowGrid;
+
+    AddLog("LogPlayLevel", "PIE: Play Mode Stopped (DELETE). Editor restored.", 0);
 }
 
 // ============================================================================
