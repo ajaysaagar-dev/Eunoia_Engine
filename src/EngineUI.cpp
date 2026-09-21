@@ -4233,6 +4233,22 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
             behaviourSearchBuf[0] = '\0';
         }
 
+        if (!obj->behaviours.empty()) {
+            if (!scene.isPlayMode) {
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.70f, 0.32f, 1.0f));
+                if (ImGui::Button("▶ Run Play Mode to Test Movement", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                    EnterPlayMode(scene);
+                }
+                ImGui::PopStyleColor(2);
+                ImGui::TextDisabled("ℹ Press [▶ Play] in toolbar or above to run behaviours.");
+                ImGui::Spacing();
+            } else {
+                ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ Simulation Active — Move with W, A, S, D keys!");
+                ImGui::Spacing();
+            }
+        }
+
         if (showAddBehaviourPopup) {
             ImGui::OpenPopup("Add Behaviour##Modal");
             showAddBehaviourPopup = false;

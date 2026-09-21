@@ -40,6 +40,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui...
     "%PROJECT_DIR%\src\TextureManager.cpp" ^
     "%PROJECT_DIR%\src\AssetRegistry.cpp" ^
     "%PROJECT_DIR%\src\AssetManager.cpp" ^
+    "%PROJECT_DIR%\projects\test\Behaviours\Behaviours\FPS_Player.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_draw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_tables.cpp" ^
