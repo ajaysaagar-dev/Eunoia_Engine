@@ -53,7 +53,8 @@ public:
     bool Save(const std::filesystem::path& registryFilePath);
     bool Load(const std::filesystem::path& registryFilePath);
 
-    void ScanAndSync(const std::filesystem::path& projectRoot);
+    using AssetRegistryProgressFn = std::function<void(float progress, const std::string& step, const std::string& detail)>;
+    void ScanAndSync(const std::filesystem::path& projectRoot, AssetRegistryProgressFn onProgress = nullptr);
 
     size_t GetAssetCount() const { return m_assetsByID.size(); }
     const std::unordered_map<AssetID, AssetMetadata>& GetAllAssets() const { return m_assetsByID; }

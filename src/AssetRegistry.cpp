@@ -447,11 +447,14 @@ void AssetRegistry::WriteSidecar(const std::filesystem::path& diskFilePath, cons
     }
 }
 
-void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot) {
+void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot, AssetRegistryProgressFn onProgress) {
     std::error_code ec;
     if (!std::filesystem::exists(projectRoot, ec)) return;
     m_projectRoot = projectRoot;
 
+    if (onProgress) onProgress(0.1f, "Scanning project directory tree...", projectRoot.string());
+
+    size_t scannedCount = 0;
     auto options = std::filesystem::directory_options::skip_permission_denied;
     for (auto it = std::filesystem::recursive_directory_iterator(projectRoot, options, ec);
          !ec && it != std::filesystem::recursive_directory_iterator();
@@ -486,8 +489,17 @@ void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot) {
 
             // Register asset
             RegisterAsset(meta);
+            scannedCount++;
+
+            if (onProgress && (scannedCount % 5 == 0 || scannedCount <= 5)) {
+                onProgress(0.1f + 0.55f * (float)(scannedCount % 30) / 30.0f,
+                           "Indexing asset #" + std::to_string(scannedCount) + ": " + meta.objectName,
+                           meta.virtualPath);
+            }
         }
     }
+
+    if (onProgress) onProgress(0.70f, "Resolving material texture dependencies...", std::to_string(scannedCount) + " assets indexed");
 
     // Now resolve dependencies for materials
     for (auto& pair : m_assetsByID) {
@@ -517,7 +529,13 @@ void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot) {
         }
     }
 
+    if (onProgress) onProgress(0.90f, "Saving persistent AssetRegistry.json...", projectRoot.string());
+
     // Save persistent registry
     std::filesystem::path regPath = projectRoot / "Registry" / "AssetRegistry.json";
     Save(regPath);
+
+    if (onProgress) {
+        onProgress(1.0f, "Asset Registry synchronized (" + std::to_string(m_assetsByID.size()) + " assets)", regPath.string());
+    }
 }

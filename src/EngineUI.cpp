@@ -55,6 +55,74 @@ void AddEngineLog(const std::string& category, const std::string& message, int l
     }
 }
 
+EngineUI::LoadingProgressState EngineUI::s_loadingState;
+
+void EngineUI::StartLoadingTask(const std::string& title, const std::string& initialDetail, float initialProgress, bool modal) {
+    s_loadingState.active = true;
+    s_loadingState.title = title;
+    s_loadingState.currentDetail = initialDetail;
+    s_loadingState.subDetail = "";
+    s_loadingState.progress = initialProgress;
+    s_loadingState.recentHistory.clear();
+    if (!initialDetail.empty()) {
+        s_loadingState.recentHistory.push_back(initialDetail);
+    }
+    s_loadingState.startTime = ImGui::GetTime();
+    s_loadingState.finishTime = 0.0;
+    s_loadingState.completed = false;
+    s_loadingState.hasError = false;
+    s_loadingState.autoCloseDelay = 1.0f;
+    s_loadingState.completionTimer = 0.0f;
+    s_loadingState.isModal = modal;
+}
+
+void EngineUI::UpdateLoadingTask(float progress, const std::string& currentDetail, const std::string& subDetail) {
+    if (!s_loadingState.active) return;
+    s_loadingState.progress = progress;
+    if (!currentDetail.empty() && currentDetail != s_loadingState.currentDetail) {
+        if (s_loadingState.recentHistory.empty() || s_loadingState.recentHistory.back() != s_loadingState.currentDetail) {
+            s_loadingState.recentHistory.push_back(s_loadingState.currentDetail);
+            if (s_loadingState.recentHistory.size() > 5) {
+                s_loadingState.recentHistory.erase(s_loadingState.recentHistory.begin());
+            }
+        }
+        s_loadingState.currentDetail = currentDetail;
+    }
+    if (!subDetail.empty()) {
+        s_loadingState.subDetail = subDetail;
+    }
+}
+
+void EngineUI::FinishLoadingTask(const std::string& completionMessage, bool success) {
+    if (!s_loadingState.active) return;
+    s_loadingState.progress = 1.0f;
+    s_loadingState.completed = true;
+    s_loadingState.hasError = !success;
+    s_loadingState.currentDetail = completionMessage;
+    s_loadingState.finishTime = ImGui::GetTime();
+    s_loadingState.completionTimer = s_loadingState.autoCloseDelay;
+    if (!completionMessage.empty()) {
+        s_loadingState.recentHistory.push_back(completionMessage);
+    }
+}
+
+void EngineUI::CancelLoadingTask() {
+    s_loadingState.active = false;
+    s_loadingState.completed = false;
+}
+
+bool EngineUI::IsLoadingTaskActive() {
+    return s_loadingState.active;
+}
+
+static void SyncRegistryWithUIProgress(const std::filesystem::path& path) {
+    EngineUI::StartLoadingTask("Syncing Asset Registry", "Scanning project content...", 0.1f);
+    AssetRegistry::Get().ScanAndSync(path, [](float p, const std::string& step, const std::string& detail) {
+        EngineUI::UpdateLoadingTask(p, step, detail);
+    });
+    EngineUI::FinishLoadingTask("Asset Registry synchronized (" + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets)");
+}
+
 static void LaunchVSCodeWorkspace(const std::string& filePath) {
     try {
         std::filesystem::path currentDir = std::filesystem::current_path();
@@ -186,11 +254,17 @@ bool EngineUI::SaveLevel(Scene& level) {
     if (currentLevelFilePath.empty()) {
         return SaveLevelAs(level);
     }
-    if (SceneSerializer::SaveScene(level, currentLevelFilePath)) {
+    std::string filename = std::filesystem::path(currentLevelFilePath).filename().string();
+    StartLoadingTask("Saving Level", "Serializing actors to disk...", 0.1f);
+    if (SceneSerializer::SaveScene(level, currentLevelFilePath, [](float p, const std::string& step, const std::string& detail) {
+        UpdateLoadingTask(p, step, detail);
+    })) {
         levelUnsaved = false;
+        FinishLoadingTask("Level saved: " + filename);
         AddLog("LogWorld", "Saved Level to: " + currentLevelFilePath, 2);
         return true;
     } else {
+        FinishLoadingTask("Failed to save Level: " + filename, false);
         AddLog("LogWorld", "Failed to save Level to: " + currentLevelFilePath, 3);
         return false;
     }
@@ -213,12 +287,18 @@ bool EngineUI::OpenLevel(Scene& level) {
 }
 
 bool EngineUI::OpenLevelFromPath(Scene& level, const std::string& filePath) {
-    if (SceneSerializer::LoadScene(level, filePath)) {
+    std::string filename = std::filesystem::path(filePath).filename().string();
+    StartLoadingTask("Loading Level", "Opening file: " + filename, 0.05f);
+    if (SceneSerializer::LoadScene(level, filePath, [](float p, const std::string& step, const std::string& detail) {
+        UpdateLoadingTask(p, step, detail);
+    })) {
         currentLevelFilePath = filePath;
         levelUnsaved = false;
+        FinishLoadingTask("Level loaded: " + filename + " (" + std::to_string(level.objects.size()) + " actors)");
         AddLog("LogWorld", "Opened Level from: " + currentLevelFilePath + " (" + std::to_string(level.objects.size()) + " actors)", 2);
         return true;
     } else {
+        FinishLoadingTask("Failed to open Level: " + filename, false);
         AddLog("LogWorld", "Failed to open Level: " + filePath, 3);
         return false;
     }
@@ -351,7 +431,7 @@ void EngineUI::ImportMeshWithSavePrompt(Scene& level) {
     }
 
     // Sync Asset Registry so Content Browser immediately has the new asset
-    AssetRegistry::Get().ScanAndSync(contentRootPath);
+    SyncRegistryWithUIProgress(contentRootPath);
 
     // Spawn mesh in level
     GameObject& newObj = level.AddImportedMesh(destPath.string(), {0.0f, 0.5f, 0.0f});
@@ -401,7 +481,7 @@ void EngineUI::HandleFileDrop(const char** paths, int count) {
     }
 
     if (importedCount > 0) {
-        AssetRegistry::Get().ScanAndSync(contentRootPath);
+        SyncRegistryWithUIProgress(contentRootPath);
         AddLog("LogContent", "Successfully imported " + std::to_string(importedCount) + " model/asset file(s) into Content Browser.", 2);
     }
 }
@@ -687,6 +767,7 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         ImGui::End();
 
         // Game View occupies the available area; editor UI is hidden
+        RenderLoadingModal();
         return;
     }
 
@@ -784,6 +865,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     ImGuiViewport* vp = ImGui::GetMainViewport();
     auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
     RenderGizmo(scene, camera, vpRect.width, vpRect.height);
+
+    // 10. Futuristic Loading Progress Modal (all loading situations)
+    RenderLoadingModal();
 }
 
 void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
@@ -893,7 +977,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
 
             if (ImGui::BeginMenu("Assets")) {
                 if (ImGui::MenuItem("🔄 Scan & Sync Asset Registry")) {
-                    AssetRegistry::Get().ScanAndSync(contentRootPath);
+                    SyncRegistryWithUIProgress(contentRootPath);
                     AddLog("LogAsset", "Rescanned and synchronized Asset Registry (" + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets)", 2);
                 }
                 if (ImGui::MenuItem("🔍 Asset Reference Viewer")) {
@@ -3000,7 +3084,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                 ImGui::SameLine();
                 if (ImGui::Button("🔄 Sync Registry")) {
-                    AssetRegistry::Get().ScanAndSync(contentRootPath);
+                    SyncRegistryWithUIProgress(contentRootPath);
                     AddLog("LogAsset", "Synchronized Asset Registry (" + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets)", 2);
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Rescan project and synchronize Asset Registry");
@@ -3093,7 +3177,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                             std::filesystem::path newDiskDir = contentRootPath / diskSub / newFolderNameBuf;
                             std::error_code dirEc;
                             if (std::filesystem::create_directories(newDiskDir, dirEc)) {
-                                AssetRegistry::Get().ScanAndSync(contentRootPath);
+                                SyncRegistryWithUIProgress(contentRootPath);
                                 AddLog("LogContent", "Created folder: " + std::string(newFolderNameBuf), 2);
                             }
                         }
@@ -3137,7 +3221,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                             newMat.specular = 0.5f;
 
                             if (SaveMaterialFile(matFilePath.string(), newMat)) {
-                                AssetRegistry::Get().ScanAndSync(contentRootPath);
+                                SyncRegistryWithUIProgress(contentRootPath);
                                 AddLog("LogContent", "Created material asset: " + newMat.name + " (" + newMat.assetId.ToString() + ")", 2);
                                 OpenMaterialEditor(matFilePath.string());
                             }
@@ -3262,7 +3346,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                             // Register the newly created script file immediately so it appears in Details Panel Behaviours list
                             BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
-                            AssetRegistry::Get().ScanAndSync(contentRootPath);
+                            SyncRegistryWithUIProgress(contentRootPath);
                             AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir + "/Behaviours/", 2);
 
                             // Open project as workspace in VS Code and open the script file
@@ -3877,6 +3961,173 @@ void EngineUI::RenderHelpModal() {
     }
 }
 
+void EngineUI::RenderLoadingModal() {
+    if (!s_loadingState.active) return;
+
+    float dt = ImGui::GetIO().DeltaTime;
+    if (s_loadingState.completed) {
+        s_loadingState.completionTimer -= dt;
+        if (s_loadingState.completionTimer <= 0.0f) {
+            s_loadingState.active = false;
+            return;
+        }
+    }
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    // 1. Semi-transparent backdrop dimming
+    if (s_loadingState.isModal) {
+        ImDrawList* bgDrawList = ImGui::GetForegroundDrawList();
+        bgDrawList->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), IM_COL32(8, 10, 15, 185));
+    }
+
+    // 2. Centered dialog box
+    float boxW = 560.0f;
+    float boxH = 260.0f;
+    ImVec2 centerPos(vp->Pos.x + (vp->Size.x - boxW) * 0.5f, vp->Pos.y + (vp->Size.y - boxH) * 0.5f);
+
+    ImGui::SetNextWindowPos(centerPos, ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(boxW, 0.0f), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
+
+    ImVec4 borderColor = s_loadingState.hasError ? ImVec4(0.95f, 0.25f, 0.25f, 0.95f) :
+                         (s_loadingState.completed ? ImVec4(0.25f, 0.90f, 0.45f, 0.95f) :
+                         ImVec4(0.12f, 0.68f, 1.00f, 0.95f));
+
+    ImGui::PushStyleColor(ImGuiCol_Border, borderColor);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.07f, 0.08f, 0.11f, 0.98f));
+
+    if (ImGui::Begin("###LoadingOverlayWindow", nullptr, flags)) {
+        float curTime = (float)ImGui::GetTime();
+        double elapsed = s_loadingState.completed ? (s_loadingState.finishTime - s_loadingState.startTime) : (ImGui::GetTime() - s_loadingState.startTime);
+        if (elapsed < 0.0) elapsed = 0.0;
+
+        // Header Row: Spinner / Checkmark + Title + Status badge
+        float spinnerRadius = 11.0f;
+        ImVec2 curCursor = ImGui::GetCursorScreenPos();
+        ImVec2 spinnerCenter(curCursor.x + spinnerRadius, curCursor.y + spinnerRadius + 2.0f);
+        ImDrawList* drawList = ImGui::GetWindowDrawList();
+
+        if (s_loadingState.completed) {
+            // Completed icon
+            drawList->AddCircleFilled(spinnerCenter, spinnerRadius, IM_COL32(30, 200, 80, 255));
+            drawList->AddLine(ImVec2(spinnerCenter.x - 5, spinnerCenter.y), ImVec2(spinnerCenter.x - 1, spinnerCenter.y + 4), IM_COL32(255, 255, 255, 255), 2.5f);
+            drawList->AddLine(ImVec2(spinnerCenter.x - 1, spinnerCenter.y + 4), ImVec2(spinnerCenter.x + 6, spinnerCenter.y - 4), IM_COL32(255, 255, 255, 255), 2.5f);
+        } else if (s_loadingState.hasError) {
+            drawList->AddCircleFilled(spinnerCenter, spinnerRadius, IM_COL32(220, 50, 50, 255));
+            drawList->AddLine(ImVec2(spinnerCenter.x - 5, spinnerCenter.y - 5), ImVec2(spinnerCenter.x + 5, spinnerCenter.y + 5), IM_COL32(255, 255, 255, 255), 2.5f);
+            drawList->AddLine(ImVec2(spinnerCenter.x + 5, spinnerCenter.y - 5), ImVec2(spinnerCenter.x - 5, spinnerCenter.y + 5), IM_COL32(255, 255, 255, 255), 2.5f);
+        } else {
+            // Rotating animated futuristic arc spinner
+            drawList->AddCircle(spinnerCenter, spinnerRadius, IM_COL32(40, 50, 70, 255), 24, 2.5f);
+            float startAngle = curTime * 7.0f;
+            float endAngle = startAngle + 1.8f + 0.8f * sinf(curTime * 3.0f);
+            drawList->PathArcTo(spinnerCenter, spinnerRadius, startAngle, endAngle, 20);
+            drawList->PathStroke(IM_COL32(31, 162, 255, 255), false, 3.0f);
+        }
+
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + spinnerRadius * 2.0f + 14.0f);
+
+        // Title
+        ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", s_loadingState.title.c_str());
+
+        // Status badge on right
+        float badgeW = 90.0f;
+        ImGui::SameLine(boxW - badgeW - 48.0f);
+        if (s_loadingState.completed) {
+            ImGui::TextColored(ImVec4(0.3f, 0.95f, 0.5f, 1.0f), "[COMPLETE]");
+        } else if (s_loadingState.hasError) {
+            ImGui::TextColored(ImVec4(0.95f, 0.3f, 0.3f, 1.0f), "[FAILED]");
+        } else {
+            ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "[PROCESSING]");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // High-tech Progress Bar
+        float clampedProgress = s_loadingState.progress;
+        if (clampedProgress < 0.0f) {
+            clampedProgress = 0.5f + 0.45f * sinf(curTime * 4.0f);
+        } else if (clampedProgress > 1.0f) {
+            clampedProgress = 1.0f;
+        }
+
+        char overlayBuf[64];
+        if (s_loadingState.completed) {
+            snprintf(overlayBuf, sizeof(overlayBuf), "100%% - Finished (%.1fs)", (float)elapsed);
+        } else if (s_loadingState.progress < 0.0f) {
+            snprintf(overlayBuf, sizeof(overlayBuf), "Working... (%.1fs)", (float)elapsed);
+        } else {
+            snprintf(overlayBuf, sizeof(overlayBuf), "%.1f%% (%.1fs)", clampedProgress * 100.0f, (float)elapsed);
+        }
+
+        ImVec4 barColor = s_loadingState.hasError ? ImVec4(0.85f, 0.20f, 0.20f, 1.0f) :
+                          (s_loadingState.completed ? ImVec4(0.20f, 0.85f, 0.40f, 1.0f) :
+                          ImVec4(0.12f, 0.65f, 1.00f, 1.0f));
+
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barColor);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.04f, 0.05f, 0.07f, 1.0f));
+        ImGui::ProgressBar(clampedProgress, ImVec2(-1, 24.0f), overlayBuf);
+        ImGui::PopStyleColor(2);
+
+        ImGui::Spacing();
+
+        // Details Panel under progress bar showing "What's happening now"
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.04f, 0.05f, 0.08f, 0.95f));
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 6.0f);
+        ImGui::BeginChild("LoadingDetailsRegion", ImVec2(-1, 80.0f), true, ImGuiWindowFlags_NoScrollbar);
+
+        ImGui::TextColored(ImVec4(0.55f, 0.60f, 0.70f, 1.0f), "CURRENT STATUS:");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.00f, 1.0f), "> %s", s_loadingState.currentDetail.c_str());
+
+        if (!s_loadingState.subDetail.empty()) {
+            ImGui::TextColored(ImVec4(0.48f, 0.52f, 0.60f, 1.0f), "    %s", s_loadingState.subDetail.c_str());
+        }
+
+        // Show last history item if available
+        if (!s_loadingState.recentHistory.empty()) {
+            size_t count = s_loadingState.recentHistory.size();
+            const std::string& prev = (count >= 2) ? s_loadingState.recentHistory[count - 2] : s_loadingState.recentHistory[0];
+            if (prev != s_loadingState.currentDetail) {
+                ImGui::TextColored(ImVec4(0.35f, 0.70f, 0.40f, 1.0f), "  [OK] %s", prev.c_str());
+            }
+        }
+
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+
+        // Footer: Elapsed time & Dismiss button
+        ImGui::TextColored(ImVec4(0.5f, 0.55f, 0.65f, 1.0f), "Elapsed Time: %.2f sec", (float)elapsed);
+        ImGui::SameLine(boxW - 140.0f);
+        if (s_loadingState.completed) {
+            if (ImGui::Button("Close Now", ImVec2(92.0f, 26.0f))) {
+                s_loadingState.active = false;
+            }
+        } else {
+            static const char* dots[] = { "Running.", "Running..", "Running...", "Running...." };
+            int dotIdx = (int)(curTime * 3.0f) % 4;
+            ImGui::TextColored(ImVec4(0.2f, 0.7f, 1.0f, 1.0f), "%s", dots[dotIdx]);
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
+}
+
 void EngineUI::RenderReferenceViewer(Scene& scene) {
     ImGui::SetNextWindowSize(ImVec2(800, 520), ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Asset Reference Viewer (dev.md Section 33)", &showReferenceViewer)) {
@@ -4092,14 +4343,19 @@ void EngineUI::RenderCookModal() {
         cookLog += "Target Platform: " + std::string(platforms[targetPlatform]) + "\n";
         cookLog += "Destination: " + std::string(outputDirBuf) + "\n";
 
-        bool ok = AssetManager::Get().CookProject(outputDirBuf, cookLog);
+        StartLoadingTask("Cooking Project Assets", "Initializing destination...", 0.05f);
+        bool ok = AssetManager::Get().CookProject(outputDirBuf, cookLog, [](float p, const std::string& item, const std::string& sub) {
+            UpdateLoadingTask(p, item, sub);
+        });
         if (ok) {
             cookLog += ">>> SUCCESS: All project assets cooked successfully!\n";
             cookLog += ">>> Cooked Asset Registry saved to: " + std::string(outputDirBuf) + "/CookedAssetRegistry.json\n";
             AddLog("LogCook", "Project cooking finished successfully at " + std::string(outputDirBuf), 2);
+            FinishLoadingTask("Project assets cooked successfully!");
         } else {
             cookLog += ">>> ERROR: Asset cooking encountered errors. Check output log.\n";
             AddLog("LogCook", "Asset cooking failed! Check log.", 1);
+            FinishLoadingTask("Asset cooking failed! Check log.", false);
         }
     }
 

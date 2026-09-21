@@ -227,11 +227,10 @@ public:
 
     // In-Editor Code Editor (dev.md & User Request)
     bool showCodeEditor = false;
+    bool codeEditorDirty = false;
     std::string activeCodeEditorPath = "";
     std::string activeCodeEditorFilename = "";
     std::string activeCodeEditorContent = "";
-    bool codeEditorDirty = false;
-
     void OpenScriptInCodeEditor(const std::string& path);
     void RenderCodeEditor();
     void RenderBehavioursSection(Scene& scene, GameObject* obj);
@@ -239,6 +238,33 @@ public:
     void ExitPlayMode(Scene& scene);
 
     uint64_t lightIconGpuHandle = 0;
+
+    // ========================================================================
+    // Futuristic Loading Progress System
+    // ========================================================================
+    struct LoadingProgressState {
+        bool active = false;
+        std::string title = "Loading...";
+        std::string currentDetail = "Please wait...";
+        std::string subDetail = "";
+        float progress = 0.0f; // 0.0f to 1.0f (or < 0.0f for indeterminate pulse)
+        std::vector<std::string> recentHistory;
+        double startTime = 0.0;
+        double finishTime = 0.0;
+        bool completed = false;
+        bool hasError = false;
+        float autoCloseDelay = 1.2f; // Seconds to auto-dismiss on completion
+        float completionTimer = 0.0f;
+        bool isModal = true;
+    };
+
+    static LoadingProgressState s_loadingState;
+
+    static void StartLoadingTask(const std::string& title, const std::string& initialDetail, float initialProgress = 0.0f, bool modal = true);
+    static void UpdateLoadingTask(float progress, const std::string& currentDetail, const std::string& subDetail = "");
+    static void FinishLoadingTask(const std::string& completionMessage = "Operation complete.", bool success = true);
+    static void CancelLoadingTask();
+    static bool IsLoadingTaskActive();
 
 private:
     void RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
@@ -251,6 +277,7 @@ private:
     void RenderReferenceViewer(Scene& scene);
     void RenderCookModal();
     void RenderHelpModal();
+    void RenderLoadingModal();
 
     // Custom UE5-style UI widgets
     bool DrawTransformPill(const char* label, float& value, const glm::vec4& color, float resetValue = 0.0f, float speed = 0.05f);

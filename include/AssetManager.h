@@ -37,7 +37,8 @@ public:
     CachedTexture* GetMissingTextureFallback();
 
     // Asset Cooking & Packaging Pipeline (dev.md Section 24, 25)
-    bool CookProject(const std::filesystem::path& outputDir, std::string& outLog);
+    using AssetCookProgressFn = std::function<void(float progress, const std::string& currentItem, const std::string& subDetail)>;
+    bool CookProject(const std::filesystem::path& outputDir, std::string& outLog, AssetCookProgressFn onProgress = nullptr);
 
     void Clear();
 

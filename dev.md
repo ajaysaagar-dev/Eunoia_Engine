@@ -1,227 +1,200 @@
-# Task: Convert Eunoia Engine to a Plugin-Based Architecture
+# Task: Finish the Plugin Migration and Close the Engine's Feature Gaps
 
 ## Context
 
-Eunoia is a C++17 / DirectX 12 game engine + Dear ImGui level editor, built with
-CMake (repo: `ajaysaagar-dev/Eunoia_Engine`). It's mid-refactor: `EngineCore`,
-`EnginePlatform`, `EngineRHI`, `EngineRenderer`, `EngineScene`, `EngineAssets`,
-`Editor` each already have their own `include/<Module>/` folder, but every one
-of them is a CMake `INTERFACE`/`STATIC` library linked directly into a single
-`Eunoia-Editor.exe`. There's no runtime module boundary — nothing can be
-rebuilt or reloaded independently, and modules can freely reach into each
-other's internals since they all compile into one binary. A chunk of logic
-(D3D12 device setup, procedural mesh generation, app entry point) still lives
-in the pre-refactor root-level `Cube.cpp`, `include/`, and `src/`.
+Eunoia is a C++17 / DirectX 12 engine + Dear ImGui editor. Three commits
+(`732a1d8`, `518e9e7`, `c847172`) added a `/plugins/<category>/<name>/`
+architecture (manifests, `EunoiaPluginCore`, per-plugin `.cpp` stubs for
+`engine`, `platform`, `rhi`, `rendering`, `scene`, `levels`, `assets`,
+`primitives`, `materials`, `lights`, `behaviours`, and six `editor/*` panels)
+alongside `tests/PluginSystem.tests/PluginManagerTest.cpp`.
 
-**Goal:** turn this into a real plugin system. Every subsystem becomes a
-self-contained folder under `/plugins/<category>/<name>/` with its own
-manifest and build file. New plugins are drop-in — adding a folder with a
-`plugin.json` and a `CMakeLists.txt` is enough for the build and the runtime
-loader to pick it up, no other files need to change.
+**None of this is connected to the real build.** Root `CMakeLists.txt` still
+compiles the pre-plugin layout (`Cube.cpp`, `EngineRenderer/`, `EngineAssets/`,
+etc. at repo root) directly into `Eunoia-Editor.exe`. It never includes
+`cmake/EunoiaPlugin.cmake`, never calls `eunoia_discover_plugins()`, never
+links `EunoiaPluginCore`, and nothing in `main()`/`Cube.cpp` ever constructs a
+`PluginManager` or calls `LoadAll()`. Only `plugins/primitives/CMakeLists.txt`
+exists — every other plugin folder has no build file at all. The test target
+isn't wired into `CMakeLists.txt` either (`EUNOIA_BUILD_TESTS` block has the
+`add_subdirectory` calls commented out).
 
-## Non-negotiable design constraints
+There are also three overlapping copies of engine code right now:
+`include/`+`src/` (pre-refactor, e.g. `include/Scene.h`, `include/GameObject.h`,
+`include/EunoiaBehaviour.h`), `EngineCore/`/`EngineRenderer/`/`EngineScene/`/
+etc. at repo root (the first module-split attempt, mostly thin forwarding
+headers), and `/plugins/*` (the newest split, currently disconnected). This
+must be reduced to one before any further feature work, or every change has
+to be made three times.
 
-1. **ABI boundary is C, not C++.** Every plugin is a separately-compiled DLL.
-   C++ vtable layout and name mangling are not guaranteed compatible across
-   DLLs, even from the same compiler version. Only plain structs and C
-   function pointers may cross the boundary. Each plugin exports exactly
-   three C functions: `Eunoia_GetPluginInfo`, `Eunoia_CreatePlugin`,
-   `Eunoia_DestroyPlugin`.
-2. **Cross-plugin calls go through a typed `ServiceRegistry` only**, keyed by
-   string name (not `typeid`/RTTI — identity isn't guaranteed stable across
-   DLLs either), never through a plugin including another plugin's internal
-   headers.
-3. **Dependency order is declared, not assumed.** Each `plugin.json` lists
-   `dependencies`. The loader topologically sorts by that list and hard-fails
-   on a missing dependency or a cycle — it never silently skips or guesses
-   order.
-4. **Two tiers, one folder layout.** `engine`, `platform`, and `rhi` hold live
-   GPU/OS resources (window, D3D12 device, swapchain) that can't be swapped
-   under a running app — they're marked `"core": true` in their manifest,
-   loaded first, statically linked into the host executable, and never
-   hot-reloaded. Every other plugin (`rendering`, `scene`, `levels`, `assets`,
-   `primitives`, `materials`, `lights`, `behaviours`, `editor/*`) is
-   dynamically loaded from a `.dll` and can be hot-reloaded during editor use.
-   Both tiers use the identical manifest shape and `IPlugin` lifecycle — only
-   the build/load mechanics differ.
-5. **Lifecycle is two-phase.** `OnRegister(registry)` runs for every plugin,
-   in dependency order, publishing what that plugin provides. Only after
-   *every* plugin has registered does `OnInit()` run, also in dependency
-   order — this is when a plugin is allowed to `Resolve()`/`Require()`
-   something another plugin published. Shutdown reverses the order.
+Work through the sections below **in order** — later sections assume earlier
+ones are done and building.
 
-## Target folder layout
+---
 
-```
-/plugins
-  /engine        EngineCore: Log, JobSystem, Time, UUID, Result, Assert        [core]
-  /platform      EnginePlatform: Window, InputSystem                          [core]
-  /rhi           EngineRHI: Device, SwapChain, CommandContext, Fence,
-                 DescriptorAllocator, PipelineState, UploadHeap               [core]
-  /rendering     EngineRenderer: SceneRenderer, ConstantBuffers, TextureManager
-                 (MaterialSystem moves out — see /materials)
-  /scene         EngineScene: Scene, GameObject, Camera (live graph state only)
-  /levels        Level, LevelSerializer, SceneSerializer (load/save/stream,
-                 split out from live scene state)
-  /assets        EngineAssets: AssetManager, AssetRegistry, AssetMetadata,
-                 SoftAssetReference + /importers (Fbx, Gltf, Obj, Mesh)
-  /primitives    Procedural mesh gen currently in Cube.cpp/EngineUI.cpp:
-                 Cube, Plane, Sphere, Cylinder, Pyramid, Torus, Ground Grid
-  /materials     MaterialSystem, pulled out of EngineRenderer
-  /lights        New: point/directional/spot light components — currently
-                 only implied by the editor's light.png icon, not a real system
-  /behaviours    EunoiaBehaviour, BehaviourRegistry
-  /editor
-    /outliner
-    /details
-    /content-browser
-    /viewport
-    /world-settings
-    /console
-```
+## Phase 1 (P0) — Make the plugin system real
 
-Every leaf folder follows the same shape:
+This phase produces zero new user-facing features. Its only job is to make
+the three existing plugin commits actually run, and collapse the three
+parallel copies of the engine into one.
 
-```
-/plugins/<category>/<name>/
-  plugin.json
-  CMakeLists.txt
-  include/<Name>/*.h     (public headers other plugins may include)
-  src/*.cpp
-```
+1. **Give every plugin folder a `CMakeLists.txt`.** Only `plugins/primitives`
+   has one. Add one to `assets`, `behaviours`, `engine`, `levels`, `lights`,
+   `materials`, `platform`, `rendering`, `rhi`, `scene`, and each
+   `editor/<panel-name>` folder, each calling `eunoia_add_plugin(NAME ...
+   CATEGORY ... SOURCES ... DEPENDS ...)` per the pattern already established
+   in `plugins/primitives/CMakeLists.txt` and `cmake/EunoiaPlugin.cmake`.
+2. **Wire discovery into the root build.** Add
+   `include(${EUNOIA_ROOT}/cmake/EunoiaPlugin.cmake)` and
+   `eunoia_discover_plugins(${EUNOIA_ROOT}/plugins)` to `CMakeLists.txt`.
+   Add `EunoiaPluginCore` as a `STATIC` library
+   (`EunoiaPluginCore/PluginManager.cpp` + headers) and link it into
+   `Eunoia-Editor`.
+3. **Load plugins at startup.** In `Cube.cpp` (or wherever `main()` lives),
+   after the window/D3D12 device exist, construct a `PluginManager`, call
+   `LoadAll("plugins")`, drive `Update(dt)` from the frame loop, and call
+   `ShutdownAll()` on exit — matching the lifecycle already defined in
+   `EunoiaPluginCore/PluginManager.h`.
+4. **Wire the test target.** Uncomment/add the `add_subdirectory` calls for
+   `tests/PluginSystem.tests`, `tests/EngineCore.tests`,
+   `tests/EngineScene.tests`, `tests/EngineAssets.tests` under the existing
+   `EUNOIA_BUILD_TESTS` option, and confirm
+   `tests/PluginSystem.tests/PluginManagerTest.cpp` passes — it already
+   asserts `LoadAll()` succeeds and prints topological load order, so a
+   green run of that binary is your signal Phase 1 is done.
+5. **Collapse the three engine copies into one.** For each subsystem, decide
+   whether the `/plugins/<category>/` version or the legacy
+   `include/`+`src/`/root-module version is the one moving forward (default:
+   the plugin version, since that's where new work goes), move any real
+   implementation that's still only in the legacy copy over to it, update
+   every `#include` across the codebase accordingly, and delete the losing
+   copy. Do this one subsystem at a time, confirming the build still succeeds
+   after each, rather than as one giant sweep — a broken intermediate state
+   is fine as long as it's a single subsystem's worth of `#include` churn.
 
-## Files to create
+**Acceptance for Phase 1:** `cmake --build .` succeeds; `Eunoia-Editor.exe`
+starts, and its log output shows every plugin loading in dependency order
+with no missing-dependency or api-version errors; `PluginManagerTest`
+executable runs green; no header exists in more than one of
+`include/`, `<Module>/include/`, `plugins/<category>/include/` for the same
+subsystem.
 
-### 1. `EunoiaPluginCore/PluginAPI.h`
+---
 
-The ABI contract. Contents:
+## Phase 2 (P1) — Core gameplay loop
 
-- `#include <cstdint>`, `EUNOIA_EXPORT` macro (`__declspec(dllexport)` on
-  Windows / `__attribute__((visibility("default")))` elsewhere).
-- `constexpr uint32_t kPluginAPIVersion = 1;` — bump whenever `IPlugin`,
-  `ServiceRegistry`, or `EngineContext` change shape in a binary-incompatible
-  way.
-- `enum class PluginCategory { Engine, Platform, RHI, Rendering, Scene,
-  Levels, Assets, Primitives, Materials, Lights, Behaviours, Editor, Custom };`
-- POD `struct PluginInfo { const char* name; const char* version;
-  PluginCategory category; uint32_t apiVersion;
-  const char* const* dependencies; bool isCore; };`
-- `using PluginGetInfoFn = const PluginInfo* (*)();`
-  `using PluginCreateFn  = IPlugin* (*)(EngineContext*);`
-  `using PluginDestroyFn = void (*)(IPlugin*);`
-- `#define EUNOIA_DECLARE_PLUGIN(PluginClass, InfoPtr)` — expands to the three
-  exported C functions (`Eunoia_GetPluginInfo`, `Eunoia_CreatePlugin`,
-  `Eunoia_DestroyPlugin`) wrapping `PluginClass`'s constructor/destructor.
+### 2a. Script authoring + compile pipeline
 
-### 2. `EunoiaPluginCore/IPlugin.h`
+The engine already has a real foundation for this: `include/EunoiaBehaviour.h`
+(lifecycle: `OnCreate`/`OnEnable`/`Start`/`Update`/`FixedUpdate`/`LateUpdate`/
+`OnDisable`/`OnDestroy`, typed property reflection via `RegisterProperty`,
+object-reference resolution, `GetComponent<T>`/`GetBehaviour<T>`) and
+`include/BehaviourRegistry.h` (factory-based registration, five built-ins:
+`RotatorBehaviour`, `LightFlickerBehaviour`, `DoorController`,
+`PlayerController`, `EnemyController`). What's missing is everything the
+former `dev.md` (recoverable at `git show 518e9e7:dev.md`) asked for around
+*authoring* a behaviour from inside the editor:
 
-- `class EngineContext { public: virtual ~EngineContext() = default;
-  virtual ServiceRegistry& Services() = 0; };`
-- `class IPlugin` with pure virtuals `OnRegister(ServiceRegistry&)` and
-  `OnInit()`, plus virtual-with-default `WantsUpdate() const`,
-  `OnUpdate(float)`, `OnShutdown()`, `SupportsHotReload() const`,
-  `OnSerializeState(std::vector<uint8_t>&)`,
-  `OnDeserializeState(const std::vector<uint8_t>&)`.
+- Content Browser → "Create → Behaviour" action that generates a `.h`/`.cpp`
+  pair from a template, using `EunoiaBehaviour` as the base class and
+  `REGISTER_BEHAVIOUR(ClassName, DisplayName)` already defined at the bottom
+  of `BehaviourRegistry.h`.
+- A build step that compiles just the new/changed behaviour source(s) into a
+  loadable module (this is exactly what the Phase 1 plugin loader/hot-reload
+  path exists for — a user behaviour is the natural case for
+  `IPlugin::SupportsHotReload()` and `PluginManager::HotReload()`) and
+  re-registers it with `BehaviourRegistry::Get()` without restarting the
+  editor.
+- Surface compile errors in the Console panel (`plugins/editor/console`)
+  instead of failing silently.
 
-### 3. `EunoiaPluginCore/ServiceRegistry.h`
+### 2b. Physics / collision
 
-- `template<typename T> void Provide(const std::string& name, T* instance)`
-- `template<typename T> T* Resolve(const std::string& name) const`
-- `template<typename T> T& Require(const std::string& name) const` — throws
-  `std::runtime_error` if missing.
-- `bool Has(const std::string& name) const`
-- Backing store: `std::unordered_map<std::string, void*>`.
+There is currently no physics system anywhere in the codebase — not even a
+stub. Add:
 
-### 4. `EunoiaPluginCore/PluginManager.h` / `.cpp`
+- A minimal collision layer first: AABB/sphere colliders attachable to
+  `GameObject`, broad-phase + narrow-phase collision detection, and
+  `OnCollisionEnter`/`OnCollisionStay`/`OnCollisionExit` callbacks threaded
+  through `EunoiaBehaviour` alongside the existing lifecycle methods.
+- Basic rigidbody dynamics (gravity, velocity integration, restitution)
+  gated behind Play Mode (`Scene::isPlayMode`, `include/Scene.h`) only — the
+  editor's static viewport shouldn't simulate physics while not playing.
+- Register the system as `/plugins/physics` (new category, not in the
+  original list — add it to `PluginCategory` in `EunoiaPluginCore/PluginAPI.h`)
+  depending on `engine` and `scene`.
 
-- `PluginManifest` struct parsed from `plugin.json`
-  (name/version/category/apiVersion/isCore/dependencies/provides/
-  manifestPath/binaryPath).
-- `LoadedPlugin` struct (manifest, module handle, destroy fn, `IPlugin*`).
-- `PluginManager::LoadAll(root)`:
-  1. Recursively find every `plugins/**/plugin.json`.
-  2. Parse each with `nlohmann::json` (vendor `deps/json/json.hpp`, MIT,
-     single header — this is the one new third-party dependency).
-  3. Topologically sort by `dependencies`; throw on missing dependency or
-     cycle.
-  4. In sorted order: `LoadLibrary`/`dlopen` the binary next to the manifest,
-     resolve the three exported symbols, verify `apiVersion ==
-     kPluginAPIVersion`, construct the instance, call `OnRegister`.
-  5. Then, in the same order, call `OnInit()` on every loaded plugin.
-- `Update(float dt)` — calls `OnUpdate` on every plugin where
-  `WantsUpdate()` is true.
-- `ShutdownAll()` — reverse order: `OnShutdown()` → destroy → unload.
-- `HotReload(name)` — refuses if the plugin is core or
-  `SupportsHotReload()` is false; otherwise serialize state, shut down,
-  unload, reload, re-init, deserialize state, and reinsert at the same
-  position in the load order.
+### 2c. Audio
 
-### 5. `cmake/EunoiaPlugin.cmake`
+`AssetType::Audio` (`include/AssetType.h`) already detects `.wav`/`.mp3`/
+`.ogg` and has an icon, but there's no playback system behind it. Add a
+`/plugins/audio` plugin providing an `IAudioSystem` (`PlaySound`,
+`PlayMusic`, `Stop`, per-source volume/pitch/loop, 3D positional attenuation
+tied to `GameObject` transforms) and an `AudioSourceBehaviour`/component so
+designers can attach a sound to an object the same way they attach a
+`Light` or `PrimitiveMesh` today.
 
-- `eunoia_add_plugin(NAME ... CATEGORY ... SOURCES ... DEPENDS ...)` —
-  builds a `SHARED` target named `EunoiaPlugin_<NAME>`, links
-  `EunoiaPluginCore` plus `DEPENDS`, sets output dir to
-  `${CMAKE_BINARY_DIR}/plugins/<category>/<name>/`, and copies that plugin's
-  `plugin.json` next to the built binary as a post-build step.
-- `eunoia_discover_plugins(ROOT)` — globs every `ROOT/<category>/<name>/`
-  that contains a `CMakeLists.txt` and calls `add_subdirectory()` on it.
-  Called once, from the root `CMakeLists.txt`.
+**Acceptance for Phase 2:** a user can, without touching engine source,
+create a new behaviour from the Content Browser, have it compile and attach
+to a `GameObject`, drop a collider + rigidbody on two objects and see them
+collide in Play Mode, and attach a looping sound to an object and hear it
+play in Play Mode.
 
-### 6. Root `CMakeLists.txt` (rewrite)
+---
 
-- Keep `EngineCore`/`EnginePlatform`/`EngineRHI` as `INTERFACE` libs, sourced
-  from `plugins/engine|platform|rhi/include`, statically linked into
-  `Eunoia-Editor` (core tier, per constraint 4).
-- Add `EunoiaPluginCore` as a small `STATIC` lib (`PluginManager.cpp` +
-  headers).
-- Replace the old fixed `add_library(EngineRenderer ...)` /
-  `add_library(EngineAssets ...)` block with a single
-  `eunoia_discover_plugins(${EUNOIA_ROOT}/plugins)` call.
-- `Eunoia-Editor` becomes a thin bootstrapper: create window/device (core
-  tier), construct a `PluginManager`, call `LoadAll("plugins/")`, run the
-  loop calling `PluginManager::Update(dt)`, call `ShutdownAll()` on exit. Move
-  whatever's left of `Cube.cpp`'s app-entry responsibility into
-  `Editor/src/EditorApp.cpp`.
+## Phase 3 (P2) — Content and rendering depth
 
-## Migration order (do this incrementally, verify build after each step)
+1. **Verify material/asset round-tripping.** `EngineRenderer/include/
+   EngineRenderer/MaterialSystem.h`, `include/MeshImporter.h`, and the
+   Fbx/Gltf/Obj importer headers under `EngineAssets/include/EngineAssets/
+   Importers/` exist; confirm a material created and assigned in the editor
+   actually survives a full save (`include/SceneSerializer.h`,
+   `include/LevelSerializer.h`) → close editor → reopen → reload cycle, not
+   just an in-session assignment. Fix whatever breaks.
+2. **Prefabs.** `AssetType::Prefab` exists as an enum value only. Add a real
+   prefab asset (serialized `GameObject` subtree + component/behaviour data),
+   an instancing path from the Content Browser into the scene, and
+   override-tracking so an instance can diverge from its source prefab.
+3. **Animation / skeletal mesh.** `AssetType::Animation` and
+   `AssetType::SkeletalMesh` are enum-only. Scope this as its own follow-up
+   task once Phases 1–2 land — needs skeleton/bone data in the mesh import
+   path (`ufbx`/`cgltf` already vendored under `deps/`), skinning in the
+   vertex shader (see the metallic/roughness PBR shader inlined in
+   `Cube.cpp` around line 1358 for the current shader-embedding pattern), and
+   a timeline/clip playback system. Don't start it until Phase 2 is solid.
+4. **Shadow parity.** Point-light shadows were enabled in `2ac1d0c`; bring
+   directional and spot lights to the same coverage, and add basic shadow
+   quality/resolution settings to World Settings
+   (`plugins/editor/world-settings`).
 
-1. Add `EunoiaPluginCore` (files above) and `cmake/EunoiaPlugin.cmake`.
-   Nothing else changes yet; confirm it compiles standalone.
-2. Extract `/plugins/primitives` first — it's pure, stateless procedural mesh
-   generation currently in `Cube.cpp`/`EngineUI.cpp`, so it's the lowest-risk
-   proof of the pattern. Define `IPrimitiveFactory` (`CreateCube`,
-   `CreatePlane`, `CreateSphere`, `CreateCylinder`, `CreatePyramid`,
-   `CreateTorus`, `CreateGroundGrid`), move the bodies over, register it as
-   `"IPrimitiveFactory"`, set `SupportsHotReload()` to `true`.
-3. Pull `MaterialSystem` out of `EngineRenderer` into `/plugins/materials` —
-   it's already a separate header, so this is close to a file move plus a
-   manifest.
-4. Move each `Editor/include/Editor/Panels/*.h` into its own
-   `/plugins/editor/<panel-name>/`, replacing direct `Scene`/`GameObject`
-   includes with `ServiceRegistry` lookups.
-5. Split `EngineScene` (live graph: `Scene`, `GameObject`, `Camera`) from a
-   new `/plugins/levels` (`Level`, `LevelSerializer`, `SceneSerializer`).
-6. Convert `rendering`, `assets`, `behaviours` the same way. Keep `engine`,
-   `platform`, `rhi` core-tier per constraint 4 — wrap them in manifests for
-   uniformity but do not make them `SHARED`/hot-reloadable.
-7. Add `/plugins/lights` as new work — no existing code to migrate, just the
-   component types and a manifest declaring it depends on `scene` and
-   `rendering`.
-8. Delete the now-empty root-level `include/`, `src/`, and `Cube.cpp` once
-   everything they contained has moved into a plugin.
+---
 
-## Acceptance criteria
+## Phase 4 (P3) — Production and polish
 
-- `cmake --build .` succeeds with zero changes to the root `CMakeLists.txt`
-  after adding a brand-new folder under `/plugins/<category>/<name>/` with a
-  valid manifest and `CMakeLists.txt`.
-- Deleting a non-core plugin's folder and reconfiguring does not break the
-  build of any plugin that doesn't depend on it.
-- Starting the editor with a `plugins/<x>/plugin.json` that lists a
-  nonexistent dependency fails fast with a clear error naming the missing
-  dependency, instead of loading in the wrong order or silently continuing.
-- `primitives` can be hot-reloaded from the editor (rebuild its DLL
-  externally, trigger `PluginManager::HotReload("primitives")`) without
-  restarting `Eunoia-Editor.exe` or losing scene state.
-- No plugin's `.cpp` includes another plugin's `include/` headers directly —
-  every cross-plugin call goes through `ServiceRegistry::Resolve`/`Require`.
+1. **Make hot reload real.** Once Phase 1 lands, exercise
+   `PluginManager::HotReload()` on a genuinely stateless plugin first
+   (`primitives` is the right candidate — see its
+   `SupportsHotReload() { return true; }`), confirm it round-trips cleanly,
+   then extend the same path to user behaviours from Phase 2a.
+2. **Standalone runtime export.** `run.bat`/`build.bat` currently only build
+   the editor. Add a packaging step that bundles a built level + only the
+   plugins/assets it references into a runnable, editor-free executable.
+3. **Particle system.** `AssetType::Particle` is enum-only; lowest priority
+   of the remaining stub systems — schedule after Phase 3.
+
+---
+
+## Ground rules for every phase
+
+- Confirm the build after each individual change, not at the end of a phase.
+  A phase that leaves the tree non-building for CMake is not done.
+- Reuse what's already there. `UndoManager` (`include/UndoManager.h`, 52-step
+  snapshot undo/redo), Play Mode (`Scene::StartPlayMode`/`StopPlayMode`,
+  `include/Scene.h`), and the existing `BehaviourRegistry`/`EunoiaBehaviour`
+  reflection system are all real, working features — extend them, don't
+  replace them.
+- New cross-plugin functionality goes through `ServiceRegistry`
+  (`EunoiaPluginCore/ServiceRegistry.h`), never a direct include of another
+  plugin's internal headers — this is the whole point of Phase 1.
+- Update `plugin.json` `dependencies`/`provides` for every plugin you touch
+  so `PluginManager`'s topological sort and the manifest stay truthful.

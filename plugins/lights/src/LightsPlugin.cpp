@@ -24,7 +24,7 @@ public:
 
     void OnRegister(ServiceRegistry& registry) override {
         std::cout << "[LightsPlugin] Registering ILightSystem service..." << std::endl;
-        registry.Register<ILightSystem>("ILightSystem", &m_lightSystem);
+        registry.Register<ILightSystem>("ILightSystem", &m_lightSystem); 
     }
 
     void OnInit() override {

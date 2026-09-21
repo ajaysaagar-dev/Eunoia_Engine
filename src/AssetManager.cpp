@@ -144,10 +144,12 @@ void AssetManager::Clear() {
     m_states.clear();
 }
 
-bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::string& outLog) {
+bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::string& outLog, AssetCookProgressFn onProgress) {
     std::stringstream log;
     log << "=== COOKING PROJECT ASSETS ===\n";
     log << "Target Directory: " << outputDir.string() << "\n";
+
+    if (onProgress) onProgress(0.05f, "Initializing target output directory...", outputDir.string());
 
     std::error_code ec;
     std::filesystem::path contentDir = outputDir / "Content";
@@ -155,18 +157,22 @@ bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::stri
     if (ec) {
         log << "[ERROR] Failed to create cooked Content directory: " << ec.message() << "\n";
         outLog = log.str();
+        if (onProgress) onProgress(1.0f, "Error creating output directory: " + ec.message(), "");
         return false;
     }
 
     const auto& allAssets = AssetRegistry::Get().GetAllAssets();
     size_t cookedCount = 0;
     size_t skippedCount = 0;
+    size_t totalAssets = allAssets.size();
+    size_t currentIndex = 0;
 
     std::filesystem::path cookedRegistryPath = outputDir / "CookedAssetRegistry.json";
     std::ofstream regFile(cookedRegistryPath);
     if (!regFile.is_open()) {
         log << "[ERROR] Failed to create CookedAssetRegistry.json\n";
         outLog = log.str();
+        if (onProgress) onProgress(1.0f, "Error creating CookedAssetRegistry.json", "");
         return false;
     }
 
@@ -175,6 +181,14 @@ bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::stri
 
     for (const auto& pair : allAssets) {
         const auto& meta = pair.second;
+        currentIndex++;
+        float progress = 0.05f + 0.85f * ((float)currentIndex / (float)(totalAssets > 0 ? totalAssets : 1));
+
+        if (onProgress) {
+            std::string detail = "Cooking (" + std::to_string(currentIndex) + "/" + std::to_string(totalAssets) + "): " + meta.objectName;
+            onProgress(progress, detail, meta.virtualPath);
+        }
+
         std::filesystem::path src = m_projectRoot / meta.sourcePath;
         if (!std::filesystem::exists(src, ec)) {
             log << "[WARNING] Missing source for asset: " << meta.virtualPath << "\n";
@@ -209,6 +223,8 @@ bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::stri
         log << "[COOKED] " << meta.virtualPath << " -> Content/" << cookedFilename << "\n";
     }
 
+    if (onProgress) onProgress(0.95f, "Writing CookedAssetRegistry.json...", cookedRegistryPath.string());
+
     regFile << "  ]\n}\n";
     regFile.close();
 
@@ -216,5 +232,9 @@ bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::stri
     log << "Total Assets Cooked: " << cookedCount << " | Skipped: " << skippedCount << "\n";
     log << "Cooked Registry: " << cookedRegistryPath.string() << "\n";
     outLog = log.str();
+
+    if (onProgress) {
+        onProgress(1.0f, "Cooking completed successfully! " + std::to_string(cookedCount) + " assets cooked", outputDir.string());
+    }
     return true;
 }

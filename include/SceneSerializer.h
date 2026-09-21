@@ -8,17 +8,22 @@
 #include <cmath>
 #include <filesystem>
 
+#include <functional>
+
 // ============================================================================
 // SceneSerializer — JSON-based Scene Save/Load System
 // Saves and loads complete scene state including actors, lights, and environment.
 // Format: .escene (Eunoia Scene) JSON files
 // ============================================================================
 
+using SceneProgressFn = std::function<void(float progress, const std::string& step, const std::string& detail)>;
+
 class SceneSerializer {
 public:
 
     // Save the entire scene to a JSON file
-    static bool SaveScene(const Scene& scene, const std::string& filePath) {
+    static bool SaveScene(const Scene& scene, const std::string& filePath, SceneProgressFn onProgress = nullptr) {
+        if (onProgress) onProgress(0.1f, "Opening file for writing", filePath);
         std::ofstream file(filePath);
         if (!file.is_open()) return false;
 
@@ -232,12 +237,13 @@ public:
     }
 
     // Save level alias
-    static bool SaveLevel(const Scene& level, const std::string& filePath) {
-        return SaveScene(level, filePath);
+    static bool SaveLevel(const Scene& level, const std::string& filePath, SceneProgressFn onProgress = nullptr) {
+        return SaveScene(level, filePath, onProgress);
     }
 
     // Load a scene from a JSON file
-    static bool LoadScene(Scene& scene, const std::string& filePath) {
+    static bool LoadScene(Scene& scene, const std::string& filePath, SceneProgressFn onProgress = nullptr) {
+        if (onProgress) onProgress(0.1f, "Opening level file", filePath);
         std::ifstream file(filePath);
         if (!file.is_open()) return false;
 
@@ -247,20 +253,25 @@ public:
         file.close();
         std::string content = ss.str();
 
+        if (onProgress) onProgress(0.25f, "Resetting scene graph", "Preparing container");
         // Clear the scene first
         scene.objects.clear();
         scene.pointLights.clear();
         scene.selectedId = -1;
 
+        if (onProgress) onProgress(0.40f, "Parsing environment & lighting", "Sun light, shadows & ambiance");
         // Parse environment
         ParseEnvironment(content, scene);
 
+        if (onProgress) onProgress(0.55f, "Parsing point lights", "Loading light components");
         // Parse point lights
         ParsePointLights(content, scene);
 
+        if (onProgress) onProgress(0.70f, "Parsing scene actors", "Loading geometry, materials & hierarchy");
         // Parse actors
         ParseActors(content, scene);
 
+        if (onProgress) onProgress(0.90f, "Finalizing scene metadata", std::to_string(scene.objects.size()) + " actors loaded");
         // Parse metadata
         scene.nextId = ParseInt(content, "\"nextId\"", 1);
         scene.playAnimations = ParseBool(content, "\"playAnimations\"", true);
@@ -277,6 +288,7 @@ public:
         if (!scene.objects.empty()) {
             scene.selectedId = scene.objects.front().id;
         }
+        if (onProgress) onProgress(1.0f, "Level loaded successfully", filePath);
 
         return true;
     }
