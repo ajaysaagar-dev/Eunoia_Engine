@@ -41,10 +41,35 @@ ImportedModel MeshImporter::LoadOBJ(const std::string& filePath) {
 
     auto& attrib = reader.GetAttrib();
     auto& shapes = reader.GetShapes();
+    auto& materials = reader.GetMaterials();
+    std::filesystem::path objDir = std::filesystem::path(filePath).parent_path();
+    auto resolveObjTex = [&](const std::string& texname) -> std::string {
+        if (texname.empty()) return "";
+        std::filesystem::path resolved = objDir / texname;
+        return std::filesystem::exists(resolved) ? resolved.string() : texname; // bare name lets TextureManager's recursive search try
+    };
 
     for (const auto& shape : shapes) {
         ImportedMesh mesh;
         mesh.name = shape.name;
+
+        if (!shape.mesh.material_ids.empty()) {
+            int matId = shape.mesh.material_ids[0];
+            if (matId >= 0 && matId < (int)materials.size()) {
+                const auto& tm = materials[matId];
+                ImportedMaterial& m = mesh.material;
+                m.hasMaterial = true;
+                m.name = tm.name.empty() ? "Material" : tm.name;
+                m.baseColorTexture = resolveObjTex(tm.diffuse_texname);
+                m.normalTexture    = resolveObjTex(!tm.normal_texname.empty() ? tm.normal_texname : tm.bump_texname);
+                m.roughnessTexture = resolveObjTex(tm.roughness_texname);
+                m.metallicTexture  = resolveObjTex(tm.metallic_texname);
+                m.aoTexture        = resolveObjTex(tm.ambient_texname);
+                m.emissionTexture  = resolveObjTex(tm.emissive_texname);
+                if (m.roughnessTexture.empty() && tm.roughness > 0.0f && std::isfinite(tm.roughness)) m.roughness = tm.roughness;
+                if (m.metallicTexture.empty() && tm.metallic > 0.0f && std::isfinite(tm.metallic)) m.metallic = tm.metallic;
+            }
+        }
 
         for (size_t s = 0; s < shape.mesh.indices.size(); s++) {
             tinyobj::index_t idx = shape.mesh.indices[s];
@@ -125,6 +150,38 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
         return model;
     }
 
+    std::filesystem::path gltfDir = std::filesystem::path(filePath).parent_path();
+    std::filesystem::path gltfCacheDir = gltfDir / "ImportedTextures";
+    auto resolveGltfImage = [&](cgltf_texture* tex, const std::string& matName, const std::string& slotName) -> std::string {
+        if (!tex || !tex->image) return "";
+        cgltf_image* img = tex->image;
+        if (img->uri) {
+            std::string uri = img->uri;
+            if (uri.rfind("data:", 0) == 0) {
+                // Embedded base64 data URI — cgltf can decode this for us via buffer_view if present;
+                // fall through to buffer_view handling below if uri decoding isn't wired up.
+            } else {
+                std::filesystem::path resolved = gltfDir / uri;
+                if (std::filesystem::exists(resolved)) return resolved.string();
+            }
+        }
+        if (img->buffer_view) {
+            // GLB-embedded or data-URI image: extract raw bytes and cache to disk.
+            std::error_code ec;
+            std::filesystem::create_directories(gltfCacheDir, ec);
+            const uint8_t* dataBytes = (const uint8_t*)cgltf_buffer_view_data(img->buffer_view);
+            size_t size = img->buffer_view->size;
+            if (dataBytes && size > 0) {
+                std::string ext = ".png";
+                if (img->mime_type && std::string(img->mime_type).find("jpeg") != std::string::npos) ext = ".jpg";
+                std::filesystem::path outPath = gltfCacheDir / (matName + "_" + slotName + ext);
+                FILE* f = fopen(outPath.string().c_str(), "wb");
+                if (f) { fwrite(dataBytes, 1, size, f); fclose(f); return outPath.string(); }
+            }
+        }
+        return "";
+    };
+
     for (cgltf_size i = 0; i < data->meshes_count; ++i) {
         ImportedMesh mesh;
         mesh.name = data->meshes[i].name ? data->meshes[i].name : "Mesh";
@@ -133,6 +190,27 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
             cgltf_primitive* primitive = &data->meshes[i].primitives[j];
 
             if (primitive->type != cgltf_primitive_type_triangles) continue;
+
+            if (!mesh.material.hasMaterial && primitive->material) {
+                cgltf_material* mat = primitive->material;
+                ImportedMaterial& m = mesh.material;
+                m.hasMaterial = true;
+                m.name = mat->name ? mat->name : "Material";
+                if (mat->has_pbr_metallic_roughness) {
+                    auto& pbr = mat->pbr_metallic_roughness;
+                    m.baseColorTexture = resolveGltfImage(pbr.base_color_texture.texture, m.name, "BaseColor");
+                    m.metallicTexture  = resolveGltfImage(pbr.metallic_roughness_texture.texture, m.name, "MetallicRoughness");
+                    m.roughnessTexture = m.metallicTexture; // packed texture — see Task 4b limitation note
+                    if (m.metallicTexture.empty() && std::isfinite(pbr.metallic_factor)) m.metallic = pbr.metallic_factor;
+                    if (m.roughnessTexture.empty() && std::isfinite(pbr.roughness_factor)) m.roughness = pbr.roughness_factor;
+                }
+                m.normalTexture   = resolveGltfImage(mat->normal_texture.texture, m.name, "Normal");
+                m.aoTexture       = resolveGltfImage(mat->occlusion_texture.texture, m.name, "AO");
+                m.emissionTexture = resolveGltfImage(mat->emissive_texture.texture, m.name, "Emissive");
+                if (std::isfinite(mat->emissive_factor[0])) {
+                    m.emissiveColor = glm::vec3(mat->emissive_factor[0], mat->emissive_factor[1], mat->emissive_factor[2]);
+                }
+            }
 
             uint32_t vertexStart = mesh.vertices.size();
 
@@ -199,6 +277,45 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
 
 #include "ufbx.h"
 
+static std::string ResolveFbxTexturePath(ufbx_texture* tex, const std::filesystem::path& fbxDir,
+                                          const std::filesystem::path& cacheDir, const std::string& matName,
+                                          const std::string& slotName) {
+    if (!tex) return "";
+
+    // Embedded media: extract to a cache file next to the source FBX so the
+    // existing path-based TextureManager can load it with no renderer changes.
+    if (tex->content.size > 0) {
+        std::error_code ec;
+        std::filesystem::create_directories(cacheDir, ec);
+        std::string ext = ".png";
+        if (tex->filename.length > 0) {
+            std::string origExt = std::filesystem::path(std::string(tex->filename.data, tex->filename.length)).extension().string();
+            if (!origExt.empty()) ext = origExt;
+        }
+        std::filesystem::path outPath = cacheDir / (matName + "_" + slotName + ext);
+        FILE* f = fopen(outPath.string().c_str(), "wb");
+        if (f) {
+            fwrite(tex->content.data, 1, tex->content.size, f);
+            fclose(f);
+            return outPath.string();
+        }
+        return "";
+    }
+
+    // External reference: prefer absolute filename, fall back to relative-to-FBX-dir.
+    if (tex->filename.length > 0) {
+        std::string abs(tex->filename.data, tex->filename.length);
+        if (std::filesystem::exists(abs)) return abs;
+    }
+    if (tex->relative_filename.length > 0) {
+        std::filesystem::path rel(std::string(tex->relative_filename.data, tex->relative_filename.length));
+        std::filesystem::path resolved = fbxDir / rel;
+        if (std::filesystem::exists(resolved)) return resolved.string();
+        return resolved.string(); // let TextureManager's recursive search try the bare filename
+    }
+    return "";
+}
+
 ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
     ImportedModel model;
     ufbx_load_opts opts = { 0 };
@@ -216,6 +333,8 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
     }
 
     std::vector<uint32_t> tri_indices;
+    std::filesystem::path fbxDir = std::filesystem::path(filePath).parent_path();
+    std::filesystem::path cacheDir = fbxDir / "ImportedTextures";
 
     for (size_t i = 0; i < scene->meshes.count; ++i) {
         ufbx_mesh* mesh = scene->meshes.data[i];
@@ -274,6 +393,33 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
                 v1.normal = n;
                 v2.normal = n;
             }
+        }
+
+        if (mesh->materials.count > 0 && mesh->materials.data[0]) {
+            ufbx_material* mat = mesh->materials.data[0];
+            ImportedMaterial& m = im.material;
+            m.hasMaterial = true;
+            m.name = mat->name.length > 0 ? std::string(mat->name.data, mat->name.length) : "Material";
+
+            m.baseColorTexture = ResolveFbxTexturePath(mat->pbr.base_color.texture, fbxDir, cacheDir, m.name, "BaseColor");
+            m.normalTexture    = ResolveFbxTexturePath(mat->pbr.normal_map.texture, fbxDir, cacheDir, m.name, "Normal");
+            m.roughnessTexture = ResolveFbxTexturePath(mat->pbr.roughness.texture, fbxDir, cacheDir, m.name, "Roughness");
+            m.metallicTexture  = ResolveFbxTexturePath(mat->pbr.metalness.texture, fbxDir, cacheDir, m.name, "Metallic");
+            m.aoTexture        = ResolveFbxTexturePath(mat->pbr.ambient_occlusion.texture, fbxDir, cacheDir, m.name, "AO");
+            m.emissionTexture  = ResolveFbxTexturePath(mat->pbr.emission_color.texture, fbxDir, cacheDir, m.name, "Emissive");
+
+            // Constant fallbacks when a slot has a value but no texture (e.g. a flat metalness/roughness number)
+            if (mat->pbr.metalness.has_value && m.metallicTexture.empty())
+                m.metallic = std::isfinite((float)mat->pbr.metalness.value_real) ? (float)mat->pbr.metalness.value_real : 0.0f;
+            if (mat->pbr.roughness.has_value && m.roughnessTexture.empty())
+                m.roughness = std::isfinite((float)mat->pbr.roughness.value_real) ? (float)mat->pbr.roughness.value_real : 0.5f;
+            if (mat->pbr.emission_color.has_value) {
+                ufbx_vec3 ec = mat->pbr.emission_color.value_vec3;
+                if (std::isfinite((float)ec.x) && std::isfinite((float)ec.y) && std::isfinite((float)ec.z))
+                    m.emissiveColor = glm::vec3((float)ec.x, (float)ec.y, (float)ec.z);
+            }
+            if (mat->pbr.emission_factor.has_value && std::isfinite((float)mat->pbr.emission_factor.value_real))
+                m.emissiveIntensity = (float)mat->pbr.emission_factor.value_real;
         }
 
         im.valid = !im.vertices.empty();

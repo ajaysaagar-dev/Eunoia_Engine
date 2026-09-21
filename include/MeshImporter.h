@@ -2,13 +2,30 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <glm/glm.hpp>
 #include "Geometry.h"
+
+struct ImportedMaterial {
+    std::string name = "Default_Material";
+    std::string baseColorTexture;
+    std::string normalTexture;
+    std::string roughnessTexture;
+    std::string metallicTexture;
+    std::string aoTexture;
+    std::string emissionTexture;
+    float metallic = 0.0f;
+    float roughness = 0.5f;
+    glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
+    float emissiveIntensity = 0.0f;
+    bool hasMaterial = false; // false = importer found no material data; leave GameObject defaults alone
+};
 
 struct ImportedMesh {
     std::vector<MeshVertex> vertices;
     std::vector<uint32_t> indices;
     std::string name;
     bool valid = false;
+    ImportedMaterial material;
 };
 
 struct ImportedModel {
