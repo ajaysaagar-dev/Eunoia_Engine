@@ -25,7 +25,7 @@ struct PointLight {
     float intensity = 2.0f;
     float range = 10.0f;
     bool enabled = true;
-    bool castShadows = false;
+    bool castShadows = true;
 };
 
 class Scene {
@@ -275,7 +275,7 @@ public:
         GameObject& obj = objects.back();
         obj.isLight = true;
         obj.lightId = lightIndex;
-        obj.light.castShadows = false;
+        obj.light.castShadows = pl.castShadows;
         obj.parentId = parentId;
         obj.mesh.vertices.clear();
         obj.mesh.indices.clear();

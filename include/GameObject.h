@@ -94,8 +94,8 @@ struct LightComponent {
     glm::vec3 skyColor{0.4f, 0.6f, 0.9f};
     glm::vec3 groundColor{0.3f, 0.2f, 0.1f};
 
-    // Shadow properties (only directional light casts shadows)
-    bool castShadows = false;
+    // Shadow properties
+    bool castShadows = true;
     float shadowStrength = 0.85f;
     float shadowBias = 0.0012f;
     int shadowResolution = 2048;

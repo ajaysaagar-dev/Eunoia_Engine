@@ -1628,7 +1628,7 @@ int createShadersAndPipeline()
 
 					float pShadowFactor = 1.0f;
 					int shadowIdx = (int)pointLightCastShadows[i / 4][i % 4];
-					if (shadowIdx >= 0 && shadowIdx < 4 && enableShadows > 0.5f && receiveShadows > 0.5f)
+					if (shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
 					{
 						pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N);
 					}
@@ -2068,7 +2068,7 @@ void renderFrame()
 	// ----------------------------------------------------
 	// PASS 1.5: Point Light Shadow Cubemap Array Pass (512x512, up to 4 lights * 6 faces)
 	// ----------------------------------------------------
-	if (!g_deviceLost && g_currentIndexCount > 0 && g_pointShadowDepthBuffer && g_shadowPipelineState && g_scene.enableShadows && g_activeShadowPointLights > 0)
+	if (!g_deviceLost && g_currentIndexCount > 0 && g_pointShadowDepthBuffer && g_shadowPipelineState && g_activeShadowPointLights > 0)
 	{
 		D3D12_RESOURCE_BARRIER ptBarrier = CreateTransitionBarrier(
 			g_pointShadowDepthBuffer,
