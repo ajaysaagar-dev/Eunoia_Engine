@@ -400,7 +400,49 @@ void DynamicScriptBehaviour::Start() {
 }
 
 void DynamicScriptBehaviour::Update(float deltaTime) {
-    // Custom script update logic
+    if (!m_owner || !m_enabled || !IsActive) return;
+    auto& input = InputSystem::Get();
+
+    float currentSpeed = MoveSpeed;
+    if (input.IsKeyDown(Key::LShift) || input.IsActionDown("Sprint")) {
+        currentSpeed *= 1.75f;
+    }
+
+    // Heading vectors from owner rotation (yaw)
+    float yawRad = glm::radians(m_owner->rotation.y);
+    glm::vec3 forward(std::sin(yawRad), 0.0f, -std::cos(yawRad));
+    glm::vec3 right(std::cos(yawRad), 0.0f, std::sin(yawRad));
+
+    glm::vec3 moveDir(0.0f);
+    // W: Move Forward
+    if (input.IsKeyDown(Key::W) || input.IsKeyDown(Key::Up) || input.IsActionDown("MoveForward")) {
+        moveDir += forward;
+    }
+    // S: Move Backward
+    if (input.IsKeyDown(Key::S) || input.IsKeyDown(Key::Down) || input.IsActionDown("MoveBackward")) {
+        moveDir -= forward;
+    }
+    // A: Strafe Left
+    if (input.IsKeyDown(Key::A) || input.IsKeyDown(Key::Left) || input.IsActionDown("MoveLeft")) {
+        moveDir -= right;
+    }
+    // D: Strafe Right
+    if (input.IsKeyDown(Key::D) || input.IsKeyDown(Key::Right) || input.IsActionDown("MoveRight")) {
+        moveDir += right;
+    }
+    // Space: Ascend / Jump
+    if (input.IsKeyDown(Key::Space) || input.IsActionDown("Jump")) {
+        moveDir.y += 1.0f;
+    }
+    // C or LCtrl: Descend / Crouch
+    if (input.IsKeyDown(Key::LCtrl) || input.IsKeyDown(Key::C)) {
+        moveDir.y -= 1.0f;
+    }
+
+    if (glm::length(moveDir) > 0.001f) {
+        moveDir = glm::normalize(moveDir);
+        m_owner->position += moveDir * (currentSpeed * deltaTime);
+    }
 }
 
 // ============================================================================
