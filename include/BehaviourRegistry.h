@@ -189,6 +189,40 @@ public:
     void Update(float deltaTime) override;
 };
 
+// 6. Dynamic Script Behaviour (for user-created .cpp scripts)
+class DynamicScriptBehaviour : public EunoiaBehaviour {
+public:
+    float MoveSpeed = 5.0f;
+    bool IsActive = true;
+    Light* WarningLight = nullptr;
+
+    DynamicScriptBehaviour(const std::string& className = "CustomBehaviour") {
+        m_className = className;
+        m_displayName = className;
+        RegisterProperties();
+    }
+
+    std::unique_ptr<EunoiaBehaviour> Clone() const override {
+        auto clone = std::make_unique<DynamicScriptBehaviour>(m_className);
+        clone->m_displayName = m_displayName;
+        clone->MoveSpeed = MoveSpeed;
+        clone->IsActive = IsActive;
+        clone->WarningLight = WarningLight;
+        clone->RegisterProperties();
+        return clone;
+    }
+
+    void RegisterProperties() override {
+        m_properties.clear();
+        RegisterProperty("Move Speed", &MoveSpeed, "Locomotion", 0.0f, 50.0f);
+        RegisterProperty("Is Active", &IsActive, "General");
+        RegisterReference("Warning Light", &WarningLight, ObjectRefType::Light, "References");
+    }
+
+    void Start() override;
+    void Update(float deltaTime) override;
+};
+
 // ============================================================================
 // BehaviourRegistry Singleton (dev.md Section 5)
 // ============================================================================
@@ -217,6 +251,25 @@ public:
 
     void RegisterCustom(const BehaviourClassInfo& info) {
         m_registry[info.className] = info;
+    }
+
+    void RegisterScriptFile(const std::string& scriptName, const std::string& cppPath) {
+        if (m_registry.find(scriptName) != m_registry.end()) {
+            m_registry[scriptName].sourceCpp = cppPath;
+            return;
+        }
+        BehaviourClassInfo info;
+        info.className = scriptName;
+        info.displayName = scriptName;
+        info.description = "User C++ Script: " + cppPath;
+        info.sourceCpp = cppPath;
+        info.factory = [scriptName]() -> std::unique_ptr<EunoiaBehaviour> {
+            auto b = std::make_unique<DynamicScriptBehaviour>(scriptName);
+            b->SetClassName(scriptName);
+            b->SetDisplayName(scriptName);
+            return b;
+        };
+        m_registry[scriptName] = info;
     }
 
     std::unique_ptr<EunoiaBehaviour> Create(const std::string& className) const {

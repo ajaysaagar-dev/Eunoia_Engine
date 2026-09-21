@@ -55,6 +55,37 @@ void AddEngineLog(const std::string& category, const std::string& message, int l
     }
 }
 
+static void LaunchVSCodeWorkspace(const std::string& filePath) {
+    try {
+        std::filesystem::path currentDir = std::filesystem::current_path();
+        std::filesystem::path vscodeDir = currentDir / ".vscode";
+        std::filesystem::path propPath = vscodeDir / "c_cpp_properties.json";
+        if (!std::filesystem::exists(propPath)) {
+            std::error_code ec;
+            std::filesystem::create_directories(vscodeDir, ec);
+            std::ofstream pf(propPath);
+            if (pf.is_open()) {
+                pf << "{\n  \"configurations\": [\n    {\n      \"name\": \"Eunoia-Engine\",\n"
+                   << "      \"includePath\": [\"${workspaceFolder}/**\", \"${workspaceFolder}/include\", \"${workspaceFolder}/Content/**\"],\n"
+                   << "      \"defines\": [\"_DEBUG\", \"UNICODE\", \"_UNICODE\", \"WIN32_LEAN_AND_MEAN\"],\n"
+                   << "      \"cStandard\": \"c11\",\n      \"cppStandard\": \"c++17\",\n"
+                   << "      \"intelliSenseMode\": \"windows-gcc-x64\"\n    }\n  ],\n  \"version\": 4\n}\n";
+            }
+        }
+    } catch (...) {}
+
+    std::filesystem::path cur = std::filesystem::current_path();
+    std::string projectDir = cur.string();
+    std::filesystem::path absFilePath = std::filesystem::absolute(filePath);
+
+    // Launch: code "<projectDir>" "<absFilePath>"
+    std::string cmdParams = "/c code \"" + projectDir + "\" \"" + absFilePath.string() + "\"";
+    HINSTANCE hInst = ShellExecuteA(NULL, "open", "cmd.exe", cmdParams.c_str(), NULL, SW_HIDE);
+    if ((INT_PTR)hInst <= 32) {
+        ShellExecuteA(NULL, "open", absFilePath.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+    }
+}
+
 EngineUI::EngineUI() {
     g_pEngineUI = this;
     AddLog("LogInit", "Eunoia-Editor Initialized (DirectX 12)", 2);
@@ -3100,50 +3131,56 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                             std::error_code bec;
                             std::filesystem::create_directories(behDir, bec);
 
-                            std::filesystem::path hPath = behDir / (behName + ".h");
+                            // User Request: ONLY create a single .cpp file
                             std::filesystem::path cppPath = behDir / (behName + ".cpp");
-                            std::filesystem::path metaPath = behDir / (behName + ".h.assetmeta");
-
-                            std::ofstream hFile(hPath);
-                            if (hFile.is_open()) {
-                                hFile << "#pragma once\n#include \"EunoiaBehaviour.h\"\n\n"
-                                      << "class " << behName << " : public EunoiaBehaviour {\npublic:\n"
-                                      << "    float MoveSpeed = 5.0f;\n"
-                                      << "    int Health = 100;\n"
-                                      << "    bool IsActive = true;\n"
-                                      << "    Light* WarningLight = nullptr;\n"
-                                      << "    MeshRenderer* TargetMesh = nullptr;\n\n"
-                                      << "    " << behName << "() {\n"
-                                      << "        m_className = \"" << behName << "\";\n"
-                                      << "        m_displayName = \"" << behName << "\";\n"
-                                      << "        RegisterProperties();\n"
-                                      << "    }\n\n"
-                                      << "    void RegisterProperties() override {\n"
-                                      << "        m_properties.clear();\n"
-                                      << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Movement\", 0.0f, 50.0f);\n"
-                                      << "        RegisterProperty(\"Health\", &Health, \"Stats\", 0, 1000);\n"
-                                      << "        RegisterProperty(\"Is Active\", &IsActive, \"General\");\n"
-                                      << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
-                                      << "        RegisterReference(\"Target Mesh\", &TargetMesh, ObjectRefType::Mesh, \"References\");\n"
-                                      << "    }\n\n"
-                                      << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
-                                      << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
-                                      << "        clone->RegisterProperties();\n"
-                                      << "        return clone;\n"
-                                      << "    }\n\n"
-                                      << "    void Start() override;\n"
-                                      << "    void Update(float deltaTime) override;\n};\n";
-                            }
+                            std::filesystem::path metaPath = behDir / (behName + ".cpp.assetmeta");
 
                             std::ofstream cppFile(cppPath);
                             if (cppFile.is_open()) {
-                                cppFile << "#include \"" << behName << ".h\"\n#include \"BehaviourRegistry.h\"\n#include \"GameObject.h\"\n\n"
-                                        << "void " << behName << "::Start() {\n"
-                                        << "    auto* light = GetRespectiveObject.Light(WarningLight);\n"
-                                        << "    if (light) {\n        // Configure light\n    }\n"
-                                        << "    AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start called on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n}\n\n"
-                                        << "void " << behName << "::Update(float deltaTime) {\n"
-                                        << "    // Custom gameplay logic for " << behName << "\n}\n";
+                                cppFile << "#include \"EunoiaBehaviour.h\"\n"
+                                        << "#include \"BehaviourRegistry.h\"\n"
+                                        << "#include \"GameObject.h\"\n"
+                                        << "#include \"InputSystem.h\"\n"
+                                        << "#include \"EngineLogger.h\"\n\n"
+                                        << "class " << behName << " : public EunoiaBehaviour {\n"
+                                        << "public:\n"
+                                        << "    // Properties exposed in Details Panel\n"
+                                        << "    float MoveSpeed = 5.0f;\n"
+                                        << "    bool IsActive = true;\n"
+                                        << "    Light* WarningLight = nullptr;\n\n"
+                                        << "    " << behName << "() {\n"
+                                        << "        m_className = \"" << behName << "\";\n"
+                                        << "        m_displayName = \"" << behName << "\";\n"
+                                        << "        RegisterProperties();\n"
+                                        << "    }\n\n"
+                                        << "    void RegisterProperties() override {\n"
+                                        << "        m_properties.clear();\n"
+                                        << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Locomotion\", 0.0f, 50.0f);\n"
+                                        << "        RegisterProperty(\"Is Active\", &IsActive, \"General\");\n"
+                                        << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
+                                        << "    }\n\n"
+                                        << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
+                                        << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
+                                        << "        clone->RegisterProperties();\n"
+                                        << "        return clone;\n"
+                                        << "    }\n\n"
+                                        << "    void Start() override {\n"
+                                        << "        auto* light = GetRespectiveObject.Light(WarningLight);\n"
+                                        << "        if (light) {\n"
+                                        << "            // Configure light\n"
+                                        << "        }\n"
+                                        << "        AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start called on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n"
+                                        << "    }\n\n"
+                                        << "    void Update(float deltaTime) override {\n"
+                                        << "        if (!m_owner) return;\n"
+                                        << "        // Control transform using capitalized keywords:\n"
+                                        << "        // Transform.Location.LocalSpace(Transform.Location.LocalSpace() + glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime));\n"
+                                        << "        // Transform.Position.WorldSpace(glm::vec3(0, 0, 0));\n"
+                                        << "        // Transform.Rotation.LocalSpace(glm::vec3(0, 45, 0));\n"
+                                        << "        // Transform.Scale.LocalSpace(glm::vec3(1, 1, 1));\n"
+                                        << "    }\n"
+                                        << "};\n\n"
+                                        << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
                             }
 
                             std::ofstream metaFile(metaPath);
@@ -3153,15 +3190,17 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                          << "assetId: " << aid.ToString() << "\n"
                                          << "type: Behaviour\n"
                                          << "baseClass: EunoiaBehaviour\n"
-                                         << "virtualPath: " << currentVirtualDir << "/Behaviours/" << behName << "\n";
+                                         << "virtualPath: " << currentVirtualDir << "/Behaviours/" << behName << ".cpp\n";
                             }
 
+                            // Register the newly created script file immediately so it appears in Details Panel Behaviours list
+                            BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
                             AssetRegistry::Get().ScanAndSync(contentRootPath);
-                            AddLog("LogContent", "Created Behaviour asset: " + behName + " in " + currentVirtualDir + "/Behaviours/", 2);
+                            AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir + "/Behaviours/", 2);
 
-                            // Open in code editor immediately
-                            ShellExecuteA(NULL, "open", hPath.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
-                            OpenScriptInCodeEditor(hPath.string());
+                            // Open project as workspace in VS Code and open the script file
+                            LaunchVSCodeWorkspace(cppPath.string());
+                            OpenScriptInCodeEditor(cppPath.string());
                         }
                         ImGui::CloseCurrentPopup();
                     }
@@ -3334,7 +3373,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                     OpenLevelFromPath(scene, fullLevel.string());
                                 } else if (meta.type == AssetType::Behaviour || meta.type == AssetType::Script) {
                                     std::filesystem::path fullScript = contentRootPath / meta.sourcePath;
-                                    ShellExecuteA(NULL, "open", fullScript.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                    LaunchVSCodeWorkspace(fullScript.string());
                                     OpenScriptInCodeEditor(fullScript.string());
                                 } else {
                                     OpenReferenceViewer(meta.id);
@@ -3397,9 +3436,9 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                         // Context Menu on Asset Item
                         if (ImGui::BeginPopupContextItem("AssetRowCtx")) {
                             if (meta.type == AssetType::Behaviour || meta.type == AssetType::Script) {
-                                if (ImGui::MenuItem("💻 Open in Code Editor")) {
+                                if (ImGui::MenuItem("💻 Open in Code Editor (VS Code)")) {
                                     std::filesystem::path fullScript = contentRootPath / meta.sourcePath;
-                                    ShellExecuteA(NULL, "open", fullScript.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
+                                    LaunchVSCodeWorkspace(fullScript.string());
                                     OpenScriptInCodeEditor(fullScript.string());
                                 }
                                 ImGui::Separator();
@@ -4068,9 +4107,9 @@ void EngineUI::RenderCodeEditor() {
                     AddLog("LogContent", "Saved file: " + activeCodeEditorFilename, 2);
                 }
             }
-            if (ImGui::MenuItem("🚀 Open in External IDE")) {
-                ShellExecuteA(NULL, "open", activeCodeEditorPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
-                AddLog("LogContent", "Launched external editor for: " + activeCodeEditorFilename, 0);
+            if (ImGui::MenuItem("🚀 Open in External IDE (VS Code)")) {
+                LaunchVSCodeWorkspace(activeCodeEditorPath);
+                AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
             }
             ImGui::EndMenuBar();
         }
@@ -4085,9 +4124,9 @@ void EngineUI::RenderCodeEditor() {
             }
         }
         ImGui::SameLine();
-        if (ImGui::Button("🚀 Open in External IDE (VS Code / Visual Studio)")) {
-            ShellExecuteA(NULL, "open", activeCodeEditorPath.c_str(), NULL, NULL, SW_SHOWNORMAL);
-            AddLog("LogContent", "Launched external editor for: " + activeCodeEditorFilename, 0);
+        if (ImGui::Button("🚀 Open in External IDE (VS Code)")) {
+            LaunchVSCodeWorkspace(activeCodeEditorPath);
+            AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
         }
         ImGui::SameLine();
         ImGui::TextDisabled("| %s", activeCodeEditorPath.c_str());
@@ -4155,6 +4194,21 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
 
             std::string searchLower = behaviourSearchBuf;
             std::transform(searchLower.begin(), searchLower.end(), searchLower.begin(), ::tolower);
+
+            // Dynamically scan content folder for user-created .cpp script files so they show in the list
+            std::error_code sEc;
+            if (std::filesystem::exists(contentRootPath, sEc)) {
+                for (auto it = std::filesystem::recursive_directory_iterator(contentRootPath, std::filesystem::directory_options::skip_permission_denied, sEc);
+                     !sEc && it != std::filesystem::recursive_directory_iterator();
+                     it.increment(sEc)) {
+                    if (!it->is_directory(sEc) && it->path().extension() == ".cpp") {
+                        std::string stem = it->path().stem().string();
+                        if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" && stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
+                            BehaviourRegistry::Get().RegisterScriptFile(stem, it->path().string());
+                        }
+                    }
+                }
+            }
 
             const auto& allBehaviors = BehaviourRegistry::Get().GetAll();
             int matchCount = 0;
