@@ -1,4 +1,5 @@
 #include "EngineUI.h"
+#include "UndoManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -18,7 +19,37 @@
 #include "MeshImporter.h"
 #include "EngineLogger.h"
 
+inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
+    if (a.objects.size() != b.objects.size()) return true;
+    if (a.pointLights.size() != b.pointLights.size()) return true;
+    if (a.lightDirection != b.lightDirection || a.lightColor != b.lightColor || a.lightIntensity != b.lightIntensity) return true;
+    if (a.ambientIntensity != b.ambientIntensity || a.enableShadows != b.enableShadows || a.shadowStrength != b.shadowStrength || a.shadowBias != b.shadowBias) return true;
+    for (size_t i = 0; i < a.objects.size(); ++i) {
+        const auto& o1 = a.objects[i];
+        const auto& o2 = b.objects[i];
+        if (o1.id != o2.id || o1.position != o2.position || o1.rotation != o2.rotation || o1.scale != o2.scale) return true;
+        if (o1.color != o2.color || o1.metallic != o2.metallic || o1.roughness != o2.roughness) return true;
+        if (o1.light.intensity != o2.light.intensity || o1.light.color != o2.light.color || o1.light.range != o2.light.range || o1.light.castShadows != o2.light.castShadows) return true;
+        if (o1.materialName != o2.materialName || o1.name != o2.name) return true;
+    }
+    for (size_t i = 0; i < a.pointLights.size(); ++i) {
+        const auto& p1 = a.pointLights[i];
+        const auto& p2 = b.pointLights[i];
+        if (p1.position != p2.position || p1.color != p2.color || p1.intensity != p2.intensity || p1.range != p2.range || p1.castShadows != p2.castShadows || p1.enabled != p2.enabled) return true;
+    }
+    return false;
+}
+
+static EngineUI* g_pEngineUI = nullptr;
+
+void AddEngineLog(const std::string& category, const std::string& message, int level) {
+    if (g_pEngineUI) {
+        g_pEngineUI->AddLog(category, message, level);
+    }
+}
+
 EngineUI::EngineUI() {
+    g_pEngineUI = this;
     AddLog("LogInit", "Eunoia-Editor Initialized (DirectX 12)", 2);
     AddLog("LogD3D12", "Hardware Adapter: NVIDIA GeForce RTX 3060 Laptop GPU (Feature Level 12_1)", 0);
     AddLog("LogWorld", "Default Level loaded with 5 initial Actors", 0);
@@ -431,23 +462,25 @@ void EngineUI::SetupTheme() {
     ImGuiStyle& style = ImGui::GetStyle();
     ImVec4* colors = style.Colors;
 
-    // Blueprint Styling matching UI_Ref.svg (fill="#2B2B2B", flush docked panels)
+    // Friendly, comfortable UI sizing and clean modern styling
     style.WindowRounding    = 0.0f;
-    style.ChildRounding     = 2.0f;
-    style.FrameRounding     = 3.0f;
+    style.ChildRounding     = 3.0f;
+    style.FrameRounding     = 4.0f;
     style.PopupRounding     = 4.0f;
-    style.ScrollbarRounding = 3.0f;
-    style.GrabRounding      = 3.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.GrabRounding      = 4.0f;
     style.TabRounding       = 4.0f;
 
     style.WindowBorderSize  = 1.0f;
     style.FrameBorderSize   = 0.0f;
     style.PopupBorderSize   = 1.0f;
 
-    style.WindowPadding     = ImVec2(10.0f, 9.0f);
-    style.FramePadding      = ImVec2(6.0f, 4.0f);
-    style.ItemSpacing       = ImVec2(7.0f, 6.0f);
-    style.ItemInnerSpacing  = ImVec2(6.0f, 4.0f);
+    style.WindowPadding     = ImVec2(12.0f, 10.0f);
+    style.FramePadding      = ImVec2(8.0f, 6.0f);
+    style.ItemSpacing       = ImVec2(9.0f, 7.0f);
+    style.ItemInnerSpacing  = ImVec2(7.0f, 5.0f);
+    style.ScrollbarSize     = 16.0f;
+    style.GrabMinSize       = 14.0f;
 
     // Color Palette: #2B2B2B is RGB (0.169f, 0.169f, 0.169f)
     colors[ImGuiCol_Text]                  = ImVec4(0.96f, 0.96f, 0.96f, 1.00f);
@@ -486,6 +519,12 @@ void EngineUI::SetupTheme() {
 }
 
 void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit) {
+    if (!scene.onPreChange) {
+        scene.onPreChange = [&scene](const std::string& action) {
+            UndoManager::Get().RecordSnapshot(scene, action);
+        };
+    }
+
     ImGuizmo::BeginFrame();
 
     // Unreal Keyboard Shortcuts (when not typing and not currently in free fly mode)
@@ -526,18 +565,47 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             currentGizmoMode = (currentGizmoMode == ImGuizmo::WORLD) ? ImGuizmo::LOCAL : ImGuizmo::WORLD;
             AddLog("LogEditor", (currentGizmoMode == ImGuizmo::WORLD) ? "Coordinate Space: World" : "Coordinate Space: Local", 0);
         }
+        // Undo / Redo Shortcuts (52 steps)
+        if (ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+            if (UndoManager::Get().CanUndo()) {
+                std::string act = UndoManager::Get().GetUndoActionName();
+                UndoManager::Get().Undo(scene);
+                AddLog("LogEditor", "Undo: " + act, 0);
+            }
+        }
+        if (ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Y) || (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z)))) {
+            if (UndoManager::Get().CanRedo()) {
+                std::string act = UndoManager::Get().GetRedoActionName();
+                UndoManager::Get().Redo(scene);
+                AddLog("LogEditor", "Redo: " + act, 0);
+            }
+        }
+
         if (ImGui::IsKeyPressed(ImGuiKey_Z) && !ImGui::GetIO().KeyCtrl) {
             gizmoUseCenter = !gizmoUseCenter;
             AddLog("LogEditor", gizmoUseCenter ? "Gizmo Position: Center (Z)" : "Gizmo Position: Pivot (Z)", 0);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Delete) && scene.selectedId != -1) {
             GameObject* o = scene.GetSelected();
-            if (o) AddLog("LogActor", "Deleted Actor: " + o->name, 1);
+            if (o) {
+                UndoManager::Get().RecordSnapshot(scene, "Delete Actor: " + o->name);
+                AddLog("LogActor", "Deleted Actor: " + o->name, 1);
+            }
             scene.RemoveObject(scene.selectedId);
         }
-        if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D) && scene.selectedId != -1) {
-            GameObject* copy = scene.DuplicateObject(scene.selectedId);
-            if (copy) AddLog("LogActor", "Duplicated Actor: " + copy->name, 2);
+        if (ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_D) || ImGui::IsKeyPressed(ImGuiKey_W)) && scene.selectedId != -1) {
+            if (!ImGui::GetIO().WantTextInput) {
+                UndoManager::Get().RecordSnapshot(scene, "Duplicate Actor");
+                GameObject* copy = scene.DuplicateObject(scene.selectedId);
+                if (copy) {
+                    std::string logMsg = "Duplicated Actor: " + copy->name;
+                    if (!copy->childIds.empty()) {
+                        logMsg += " (along with " + std::to_string(copy->childIds.size()) + " children)";
+                    }
+                    AddLog("LogActor", logMsg, 2);
+                    EngineLogger::Get().LogAction("DUPLICATE_ACTOR", copy->name, "Children: " + std::to_string(copy->childIds.size()));
+                }
+            }
         }
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S)) {
             if (ImGui::GetIO().KeyShift) SaveSceneAs(scene);
@@ -547,12 +615,28 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             OpenScene(scene);
         }
         if (ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_N)) {
+            UndoManager::Get().RecordSnapshot(scene, "Clear Scene");
             scene.Clear();
             currentLevelFilePath = "";
             AddLog("LogWorld", "Cleared Level (New Level)", 0);
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             scene.selectedId = -1;
+        }
+    }
+
+    // Global editor change tracking for continuous edits (sliders, drag inputs, colors, text fields)
+    static bool s_hasPreEditSnapshot = false;
+    static Scene s_preEditSceneSnapshot;
+    if (ImGui::IsAnyItemActive()) {
+        if (!s_hasPreEditSnapshot) {
+            s_hasPreEditSnapshot = true;
+            s_preEditSceneSnapshot = scene;
+        }
+    } else if (s_hasPreEditSnapshot) {
+        s_hasPreEditSnapshot = false;
+        if (HasSceneStateChanged(s_preEditSceneSnapshot, scene)) {
+            UndoManager::Get().RecordSnapshot(s_preEditSceneSnapshot, "Modify Properties");
         }
     }
 
@@ -597,6 +681,33 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     // 8. Asset Cooking Pipeline Modal (dev.md Section 24, 25)
     if (showCookModal) {
         RenderCookModal();
+    }
+
+    // Undo History Window (52 steps capacity)
+    if (showUndoHistory) {
+        ImGui::SetNextWindowSize(ImVec2(360, 440), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Undo History (52 Steps)###UndoHistoryWin", &showUndoHistory)) {
+            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "History Stack: %zu / 52 steps", UndoManager::Get().GetUndoCount());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Clear History")) {
+                UndoManager::Get().Clear();
+            }
+            ImGui::Separator();
+
+            const auto& stack = UndoManager::Get().GetUndoStack();
+            if (stack.empty()) {
+                ImGui::TextDisabled("No undo history yet. Edit or transform objects!");
+            } else {
+                for (int i = (int)stack.size() - 1; i >= 0; --i) {
+                    std::string label = "#" + std::to_string(i + 1) + ": " + stack[i].actionName;
+                    if (ImGui::Selectable(label.c_str(), false)) {
+                        UndoManager::Get().JumpToUndoStep(i, scene);
+                        AddLog("LogEditor", "Jumped to: " + stack[i].actionName, 0);
+                    }
+                }
+            }
+        }
+        ImGui::End();
     }
 
     // 9. Interactive 3D Transform Gizmo
@@ -654,10 +765,41 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
             }
 
             if (ImGui::BeginMenu("Edit")) {
+                std::string undoLabel = "Undo";
+                if (UndoManager::Get().CanUndo()) undoLabel += " " + UndoManager::Get().GetUndoActionName();
+                if (ImGui::MenuItem(undoLabel.c_str(), "Ctrl+Z", false, UndoManager::Get().CanUndo())) {
+                    UndoManager::Get().Undo(scene);
+                    AddLog("LogEditor", "Undo: " + undoLabel, 0);
+                }
+
+                std::string redoLabel = "Redo";
+                if (UndoManager::Get().CanRedo()) redoLabel += " " + UndoManager::Get().GetRedoActionName();
+                if (ImGui::MenuItem(redoLabel.c_str(), "Ctrl+Y", false, UndoManager::Get().CanRedo())) {
+                    UndoManager::Get().Redo(scene);
+                    AddLog("LogEditor", "Redo: " + redoLabel, 0);
+                }
+                ImGui::Separator();
+                ImGui::MenuItem("📜 Undo History (52 Steps)", nullptr, &showUndoHistory);
+                ImGui::Separator();
+
                 if (ImGui::MenuItem("Duplicate", "Ctrl+D", false, scene.selectedId != -1)) {
-                    scene.DuplicateObject(scene.selectedId);
+                    UndoManager::Get().RecordSnapshot(scene, "Duplicate Actor");
+                    GameObject* copy = scene.DuplicateObject(scene.selectedId);
+                    if (copy) {
+                        std::string logMsg = "Duplicated Actor: " + copy->name;
+                        if (!copy->childIds.empty()) {
+                            logMsg += " (along with " + std::to_string(copy->childIds.size()) + " children)";
+                        }
+                        AddLog("LogActor", logMsg, 2);
+                        EngineLogger::Get().LogAction("DUPLICATE_ACTOR", copy->name, "Children: " + std::to_string(copy->childIds.size()));
+                    }
                 }
                 if (ImGui::MenuItem("Delete", "Del", false, scene.selectedId != -1)) {
+                    GameObject* o = scene.GetSelected();
+                    if (o) {
+                        UndoManager::Get().RecordSnapshot(scene, "Delete Actor: " + o->name);
+                        AddLog("LogActor", "Deleted Actor: " + o->name, 1);
+                    }
                     scene.RemoveObject(scene.selectedId);
                 }
                 ImGui::Separator();
@@ -673,6 +815,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 ImGui::MenuItem("Content Browser (Bottom Dock)", nullptr, &showBottomDrawer);
                 ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
                 ImGui::Separator();
+                ImGui::MenuItem("📜 Undo History (52 Steps)", nullptr, &showUndoHistory);
                 ImGui::MenuItem("🎨 Material Editor", nullptr, &showMaterialEditor);
                 ImGui::MenuItem("🔍 Asset Reference Viewer", nullptr, &showReferenceViewer);
                 ImGui::EndMenu();
@@ -796,7 +939,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Cook & Package Project Assets (dev.md Section 24, 25)");
 
             // Right side info
-            float rightWidth = 220.0f;
+            float rightWidth = 250.0f;
             if (ImGui::GetContentRegionAvail().x > rightWidth) {
                 ImGui::SameLine(ImGui::GetWindowWidth() - rightWidth);
                 ImGui::TextColored(ImVec4(0.40f, 0.70f, 1.00f, 1.00f), "DirectX 12 | RTX 3060");
@@ -906,7 +1049,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
             if (screenX < vp->Pos.x + vpRect.x || screenX > vp->Pos.x + vpRect.x + vpRect.width ||
                 screenY < vp->Pos.y + vpRect.y || screenY > vp->Pos.y + vpRect.y + vpRect.height) continue;
 
-            float iconSize = 34.0f;
+            float iconSize = 38.0f;
             ImVec2 pMin(screenX - iconSize * 0.5f, screenY - iconSize * 0.5f);
             ImVec2 pMax(screenX + iconSize * 0.5f, screenY + iconSize * 0.5f);
 
@@ -984,6 +1127,24 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_se
     if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen()) {
         scene.selectedId = obj.id;
     }
+    if (ImGui::BeginPopupContextItem()) {
+        scene.selectedId = obj.id;
+        if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+            GameObject* copy = scene.DuplicateObject(obj.id);
+            if (copy) {
+                std::string logMsg = "Duplicated Actor: " + copy->name;
+                if (!copy->childIds.empty()) {
+                    logMsg += " (along with " + std::to_string(copy->childIds.size()) + " children)";
+                }
+                AddLog("LogActor", logMsg, 2);
+                EngineLogger::Get().LogAction("DUPLICATE_ACTOR", copy->name, "Children: " + std::to_string(copy->childIds.size()));
+            }
+        }
+        if (ImGui::MenuItem("Delete", "Delete")) {
+            scene.RemoveObject(obj.id);
+        }
+        ImGui::EndPopup();
+    }
 
     // Drag source: drag this actor to reparent it
     if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_None)) {
@@ -1045,7 +1206,7 @@ void EngineUI::RenderOutliner(Scene& scene) {
         ImGui::TextDisabled("Level: MainWorld (%d actors)", (int)scene.objects.size());
 
         // Outliner Actor List Table
-        ImGui::BeginChild("OutlinerList", ImVec2(0, -36), true);
+        ImGui::BeginChild("OutlinerList", ImVec2(0, -44), true);
 
         // If filtering, display matching flat list
         if (outlinerFilter[0] != '\0') {
@@ -1206,7 +1367,15 @@ void EngineUI::RenderOutliner(Scene& scene) {
 
         ImGui::SameLine();
         if (ImGui::Button("Duplicate") && scene.selectedId != -1) {
-            scene.DuplicateObject(scene.selectedId);
+            GameObject* copy = scene.DuplicateObject(scene.selectedId);
+            if (copy) {
+                std::string logMsg = "Duplicated Actor: " + copy->name;
+                if (!copy->childIds.empty()) {
+                    logMsg += " (along with " + std::to_string(copy->childIds.size()) + " children)";
+                }
+                AddLog("LogActor", logMsg, 2);
+                EngineLogger::Get().LogAction("DUPLICATE_ACTOR", copy->name, "Children: " + std::to_string(copy->childIds.size()));
+            }
         }
         ImGui::SameLine();
         if (ImGui::Button("Delete") && scene.selectedId != -1) {
@@ -1249,7 +1418,7 @@ bool EngineUI::DrawTransformPill(const char* label, float& value, const glm::vec
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 1, 1, 1));
     char btnLabel[32];
     snprintf(btnLabel, sizeof(btnLabel), "%s##btn_%s", label, label);
-    if (ImGui::Button(btnLabel, ImVec2(20, 0))) {
+    if (ImGui::Button(btnLabel, ImVec2(24, 0))) {
         value = resetValue;
         modified = true;
     }
@@ -1479,19 +1648,21 @@ void EngineUI::RenderDetails(Scene& scene) {
                                       ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
                 }
 
-                ImGui::Separator();
-                ImGui::TextDisabled("Shadows");
-                ImGui::Checkbox("Cast Shadows", &obj->light.castShadows);
-                if (obj->light.castShadows) {
-                    ImGui::SliderFloat("Shadow Strength", &obj->light.shadowStrength, 0.0f, 1.0f);
-                    ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.00001f, 0.05f, "%.5f");
-                    const char* resOptions[] = { "512", "1024", "2048", "4096" };
-                    int curResIdx = (obj->light.shadowResolution >= 4096) ? 3 : (obj->light.shadowResolution >= 2048) ? 2 : (obj->light.shadowResolution >= 1024) ? 1 : 0;
-                    if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 4)) {
-                        int resVals[] = { 512, 1024, 2048, 4096 };
-                        obj->light.shadowResolution = resVals[curResIdx];
+                if (obj->light.type == LightType::Directional || obj->light.type == LightType::Point || obj->light.type == LightType::Spot) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Shadows");
+                    ImGui::Checkbox("Cast Shadows", &obj->light.castShadows);
+                    if (obj->light.castShadows) {
+                        ImGui::SliderFloat("Shadow Strength", &obj->light.shadowStrength, 0.0f, 1.0f);
+                        ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.00001f, 0.05f, "%.5f");
+                        const char* resOptions[] = { "512", "1024", "2048", "4096" };
+                        int curResIdx = (obj->light.shadowResolution >= 4096) ? 3 : (obj->light.shadowResolution >= 2048) ? 2 : (obj->light.shadowResolution >= 1024) ? 1 : 0;
+                        if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 4)) {
+                            int resVals[] = { 512, 1024, 2048, 4096 };
+                            obj->light.shadowResolution = resVals[curResIdx];
+                        }
+                        ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 5.0f, 1000.0f, "%.1f m");
                     }
-                    ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 5.0f, 1000.0f, "%.1f m");
                 }
 
                 ImGui::Separator();
@@ -2672,9 +2843,9 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
     if (ImGui::Begin("Content Browser", &showBottomDrawer, flags)) {
         // Tab Header buttons
+        if (bottomDrawerTab > 1) bottomDrawerTab = 0;
         bool isContentTab = (bottomDrawerTab == 0);
         bool isLogTab     = (bottomDrawerTab == 1);
-        bool isWorldTab   = (bottomDrawerTab == 2);
 
         if (isContentTab) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
         if (ImGui::Button("📁 Content Browser")) bottomDrawerTab = 0;
@@ -2684,11 +2855,6 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
         if (isLogTab) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
         if (ImGui::Button("📋 Output Log")) bottomDrawerTab = 1;
         if (isLogTab) ImGui::PopStyleColor();
-
-        ImGui::SameLine();
-        if (isWorldTab) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
-        if (ImGui::Button("🌐 World Settings")) bottomDrawerTab = 2;
-        if (isWorldTab) ImGui::PopStyleColor();
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");
@@ -2867,7 +3033,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 }
 
                 // Two-Pane Content Browser Layout (Left: Virtual Folders, Right: Assets)
-                float leftFolderPaneW = 180.0f;
+                float leftFolderPaneW = 200.0f;
                 ImGui::BeginChild("CBFolderTreePane", ImVec2(leftFolderPaneW, 0), true);
                 ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "VIRTUAL FOLDERS");
                 ImGui::Separator();
@@ -3213,87 +3379,6 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 ImGui::SameLine();
                 if (ImGui::Button("Clear")) logs.clear();
             }
-            else if (bottomDrawerTab == 2) {
-                // 3. World Settings & Lighting
-                ImGui::Columns(2, "WorldSettingsCols", false);
-                ImGui::SetColumnWidth(0, 440.0f);
-
-                ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "☀️ Directional Sun Light & Sky");
-                ImGui::ColorEdit3("Sky/Background Color", &scene.clearColor.r);
-                ImGui::SliderFloat("Sky Ambient Light", &scene.ambientIntensity, 0.05f, 1.0f);
-                if (ImGui::SliderFloat3("Sun Light Direction", &scene.lightDirection.x, -1.0f, 1.0f)) {
-                    if (glm::length(scene.lightDirection) > 0.001f)
-                        scene.lightDirection = glm::normalize(scene.lightDirection);
-                }
-                ImGui::ColorEdit3("Sun Light Color", &scene.lightColor.r);
-                ImGui::SliderFloat("Sun Intensity", &scene.lightIntensity, 0.0f, 5.0f);
-
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1.0f), "🌑 Real-Time Shadow Mapping (2048x2048 D32 PCF)");
-                ImGui::Checkbox("Enable Real-Time Shadows", &scene.enableShadows);
-                if (scene.enableShadows) {
-                    ImGui::SliderFloat("Shadow Strength", &scene.shadowStrength, 0.0f, 1.0f);
-                    ImGui::SliderFloat("Shadow Bias", &scene.shadowBias, 0.0001f, 0.0100f, "%.4f");
-                    ImGui::SliderFloat("PCF Softness Radius", &scene.pcfRadius, 0.2f, 3.0f);
-                }
-
-                ImGui::Spacing();
-                ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.4f, 1.0f), "📐 Grid Settings");
-                ImGui::Checkbox("Draw Ground Grid", &scene.showGrid);
-                if (scene.showGrid) {
-                    ImGui::SameLine();
-                    ImGui::SliderFloat("Grid Size", &scene.gridSize, 4.0f, 40.0f);
-                }
-
-                ImGui::NextColumn();
-
-                // Point Lights section
-                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f), "💡 Point Lights (Local In-Engine Lights)");
-                if (ImGui::Button("+ Add Point Light")) {
-                    if (scene.pointLights.size() < 4) {
-                        PointLight pl;
-                        pl.id = (int)scene.pointLights.size() + 1;
-                        pl.name = "Point Light " + std::to_string(pl.id);
-                        pl.position = glm::vec3(0.0f, 2.5f, 0.0f);
-                        pl.color = glm::vec3(1.0f, 0.9f, 0.7f);
-                        pl.intensity = 2.0f;
-                        pl.range = 10.0f;
-                        pl.enabled = true;
-                        scene.pointLights.push_back(pl);
-                        AddLog("LogLight", "Added new Point Light (" + pl.name + ")", 2);
-                    } else {
-                        AddLog("LogLight", "Maximum of 4 hardware point lights supported.", 1);
-                    }
-                }
-
-                ImGui::Spacing();
-                int removeIdx = -1;
-                for (size_t i = 0; i < scene.pointLights.size(); ++i) {
-                    PointLight& pl = scene.pointLights[i];
-                    ImGui::PushID((int)i);
-                    char lightHeader[64];
-                    snprintf(lightHeader, sizeof(lightHeader), "%s###PL%d", pl.name.c_str(), pl.id);
-                    if (ImGui::CollapsingHeader(lightHeader, ImGuiTreeNodeFlags_DefaultOpen)) {
-                        ImGui::Checkbox("Enabled", &pl.enabled);
-                        ImGui::SameLine();
-                        if (ImGui::SmallButton("Delete Light")) {
-                            removeIdx = (int)i;
-                        }
-                        ImGui::DragFloat3("Position", &pl.position.x, 0.1f);
-                        ImGui::ColorEdit3("Color##PointLightColor", &pl.color.r,
-                                          ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                        ImGui::SliderFloat("Intensity", &pl.intensity, 0.0f, 10.0f);
-                        ImGui::SliderFloat("Radius / Range", &pl.range, 0.5f, 30.0f);
-                    }
-                    ImGui::PopID();
-                }
-                if (removeIdx >= 0 && removeIdx < (int)scene.pointLights.size()) {
-                    AddLog("LogLight", "Removed Point Light: " + scene.pointLights[removeIdx].name, 1);
-                    scene.pointLights.erase(scene.pointLights.begin() + removeIdx);
-                }
-
-                ImGui::Columns(1);
-            }
         }
     }
     ImGui::End();
@@ -3386,7 +3471,12 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         pSnap
     );
 
+    static bool s_isGizmoUsing = false;
     if (ImGuizmo::IsUsing() || manipulated) {
+        if (!s_isGizmoUsing) {
+            s_isGizmoUsing = true;
+            UndoManager::Get().RecordSnapshot(scene, "Transform Actor: " + obj->name);
+        }
         obj->autoRotate = false; // Pause and disable auto-spinning when user is moving object
 
         // --- Task 1: Guard parent-inverse against degenerate/singular parent transforms ---
@@ -3476,6 +3566,9 @@ void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidt
         }
     }
 
+    if (!ImGuizmo::IsUsing()) {
+        s_isGizmoUsing = false;
+    }
     scene.isInteracting = ImGuizmo::IsUsing();
     ImGuizmo::PopID();
 }
@@ -3514,7 +3607,7 @@ void EngineUI::RenderHelpModal() {
         ImGui::BulletText("Top Bar: Unified Menu Bar, Tool toggles, Simulation PIE controls");
         ImGui::BulletText("Outliner (Left): Actor hierarchy, visibility, duplicate/delete");
         ImGui::BulletText("Details (Right): Transform pills, Mobility, Static Mesh, Materials");
-        ImGui::BulletText("Content Browser (Bottom): Quick-spawn asset shapes, Output Log, World Settings");
+        ImGui::BulletText("Content Browser (Bottom): Quick-spawn asset shapes, Output Log");
         ImGui::Separator();
 
         if (ImGui::Button("Close Guide", ImVec2(120, 0))) {

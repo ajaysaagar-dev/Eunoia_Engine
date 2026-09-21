@@ -68,8 +68,9 @@ public:
     bool showBottomDrawer = true;
     bool showViewportOverlay = true;
     bool showHelpModal = false;
+    bool showUndoHistory = false;
 
-    // Bottom drawer active tab: 0=Output Log, 1=Content Browser, 2=World Settings
+    // Bottom drawer active tab: 0=Content Browser, 1=Output Log
     int bottomDrawerTab = 0;
     bool bottomDrawerOpen = true;
 
@@ -103,13 +104,13 @@ public:
     float snapRotation = 15.0f; // degrees
     float snapScale = 0.25f;
 
-    // Blueprint UI layout dimensions (from UI_Ref.svg: 1728x1117 canvas)
+    // UI layout dimensions (scaled for friendly visibility and comfort)
     float uiMargin = 0.0f;
     float uiGap = 0.0f;
-    float topBarHeight = 58.0f;
-    float leftSidebarWidth = 246.0f;
-    float rightSidebarWidth = 267.0f;
-    float bottomDockHeight = 240.0f;
+    float topBarHeight = 62.0f;
+    float leftSidebarWidth = 280.0f;
+    float rightSidebarWidth = 320.0f;
+    float bottomDockHeight = 260.0f;
 
     struct ViewportRect {
         float x, y, width, height;

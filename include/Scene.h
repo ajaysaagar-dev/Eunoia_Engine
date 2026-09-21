@@ -3,6 +3,8 @@
 #include <string>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
+#include <functional>
 #include <utility>
 #include <cmath>
 #include <glm/glm.hpp>
@@ -13,6 +15,8 @@
 #include "MeshImporter.h"
 #include <filesystem>
 
+void AddEngineLog(const std::string& category, const std::string& message, int level = 0);
+
 struct PointLight {
     int id = 0;
     std::string name = "Point Light";
@@ -21,7 +25,7 @@ struct PointLight {
     float intensity = 2.0f;
     float range = 10.0f;
     bool enabled = true;
-    bool castShadows = true;
+    bool castShadows = false;
 };
 
 class Scene {
@@ -30,12 +34,13 @@ public:
     int nextId = 1;
     int selectedId = -1;
     bool isInteracting = false;
+    std::function<void(const std::string&)> onPreChange = nullptr;
 
     // Environment & Directional Sun Light
     glm::vec3 lightDirection = glm::normalize(glm::vec3(0.6f, 1.0f, 0.8f));
     glm::vec3 lightColor{1.0f, 0.98f, 0.92f};
     float lightIntensity = 1.0f;
-    float ambientIntensity = 0.25f;
+    float ambientIntensity = 0.0f;
     glm::vec4 clearColor{0.07f, 0.07f, 0.08f, 1.0f};
 
     // Shadow Mapping Parameters (Hardware D32_FLOAT 2048x2048 PCF)
@@ -74,6 +79,7 @@ public:
         pl1.intensity = 2.2f;
         pl1.range = 12.0f;
         pl1.enabled = true;
+        pl1.castShadows = true;
         pointLights.push_back(pl1);
 
         PointLight pl2;
@@ -84,6 +90,7 @@ public:
         pl2.intensity = 1.6f;
         pl2.range = 10.0f;
         pl2.enabled = true;
+        pl2.castShadows = true;
         pointLights.push_back(pl2);
 
         glm::vec3 defaultGray{0.55f, 0.55f, 0.55f};
@@ -225,6 +232,7 @@ public:
     }
 
     GameObject& AddObject(PrimitiveType type, glm::vec3 pos = {0.0f, 0.5f, 0.0f}, glm::vec3 color = {0.55f, 0.55f, 0.55f}, int parentId = -1) {
+        if (onPreChange) onPreChange("Add " + std::string(GetPrimitiveTypeName(type)));
         int id = nextId++;
         std::string name = std::string(GetPrimitiveTypeName(type)) + " " + std::to_string(id);
         objects.emplace_back(id, name, type, pos, color);
@@ -243,6 +251,7 @@ public:
     }
 
     GameObject& AddEmptyActor(glm::vec3 pos = {0.0f, 0.0f, 0.0f}, int parentId = -1) {
+        if (onPreChange) onPreChange("Add Empty Actor");
         int id = nextId++;
         std::string name = "Empty Actor " + std::to_string(id);
         objects.emplace_back(id, name, PrimitiveType::Empty, pos, glm::vec3{1.0f});
@@ -266,7 +275,7 @@ public:
         GameObject& obj = objects.back();
         obj.isLight = true;
         obj.lightId = lightIndex;
-        obj.light.castShadows = pl.castShadows;
+        obj.light.castShadows = false;
         obj.parentId = parentId;
         obj.mesh.vertices.clear();
         obj.mesh.indices.clear();
@@ -280,6 +289,7 @@ public:
 
     // Create a brand-new Light + its actor
     GameObject& AddNewLight(PrimitiveType lightType = PrimitiveType::PointLight, glm::vec3 pos = {0.0f, 2.5f, 0.0f}, int parentId = -1) {
+        if (onPreChange) onPreChange("Add " + std::string(GetPrimitiveTypeName(lightType)));
         int id = nextId++;
         std::string name = std::string(GetPrimitiveTypeName(lightType)) + " " + std::to_string(id);
         glm::vec3 col(1.0f, 0.95f, 0.85f);
@@ -331,6 +341,7 @@ public:
 
     // Keep all lights synced from their GameObjects (called each frame)
     void SyncLightPositionsFromActors() {
+        ambientIntensity = 0.0f;
         for (auto& obj : objects) {
             if (obj.isLight || IsLightPrimitive(obj.type)) {
                 obj.isLight = true;
@@ -351,7 +362,8 @@ public:
                     shadowStrength = obj.light.shadowStrength;
                     shadowBias = obj.light.shadowBias;
                 }
-                else if (obj.light.type == LightType::Ambient && obj.light.enabled) {
+
+                if (obj.light.type == LightType::Ambient && obj.light.enabled) {
                     ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
                 }
                 else if (obj.light.type == LightType::Sky && obj.light.enabled) {
@@ -393,6 +405,7 @@ public:
     }
 
     GameObject& AddImportedMesh(const std::string& filePath, glm::vec3 pos = {0.0f, 0.0f, 0.0f}) {
+        if (onPreChange) onPreChange("Import 3D Mesh: " + filePath);
         ImportedModel model;
         try { model = MeshImporter::Load(filePath); } catch (...) {}
 
@@ -443,6 +456,24 @@ public:
                 child.specular = 0.5f;
                 child.parentId = rootId;
 
+                if (im.material.hasMaterial) {
+                    child.materialName       = im.material.name;
+                    child.baseColorTexture   = im.material.baseColorTexture;
+                    child.normalTexture      = im.material.normalTexture;
+                    child.roughnessTexture   = im.material.roughnessTexture;
+                    child.metallicTexture    = im.material.metallicTexture;
+                    child.aoTexture          = im.material.aoTexture;
+                    child.emissionTexture    = im.material.emissionTexture;
+                    child.metallic           = im.material.metallic;
+                    child.roughness          = im.material.roughness;
+                    child.emissiveColor      = im.material.emissiveColor;
+                    child.emissiveIntensity  = im.material.emissiveIntensity;
+
+                    AddEngineLog("LogImport",
+                        "Auto-assigned material \"" + im.material.name + "\" to \"" + child.name + "\"" +
+                        (im.material.baseColorTexture.empty() ? " (no base color texture found)" : ""), 0);
+                }
+
                 // Center mesh vertices relative to its pivot point
                 child.mesh.vertices = im.vertices;
                 child.mesh.indices  = im.indices;
@@ -478,6 +509,25 @@ public:
         obj.roughness = 0.5f;
         obj.specular = 0.5f;
         obj.parentId = -1;
+
+        if (!model.meshes.empty() && model.meshes[0].material.hasMaterial) {
+            const auto& mat = model.meshes[0].material;
+            obj.materialName       = mat.name;
+            obj.baseColorTexture   = mat.baseColorTexture;
+            obj.normalTexture      = mat.normalTexture;
+            obj.roughnessTexture   = mat.roughnessTexture;
+            obj.metallicTexture    = mat.metallicTexture;
+            obj.aoTexture          = mat.aoTexture;
+            obj.emissionTexture    = mat.emissionTexture;
+            obj.metallic           = mat.metallic;
+            obj.roughness          = mat.roughness;
+            obj.emissiveColor      = mat.emissiveColor;
+            obj.emissiveIntensity  = mat.emissiveIntensity;
+
+            AddEngineLog("LogImport",
+                "Auto-assigned material \"" + mat.name + "\" to \"" + obj.name + "\"" +
+                (mat.baseColorTexture.empty() ? " (no base color texture found)" : ""), 0);
+        }
 
         if (model.valid && !model.meshes.empty()) {
             obj.mesh = model.GetMergedMesh();
@@ -569,6 +619,13 @@ public:
     }
 
     void RemoveObject(int id) {
+        static bool s_inRemove = false;
+        bool isRootRemove = !s_inRemove;
+        if (isRootRemove) {
+            s_inRemove = true;
+            if (onPreChange) onPreChange("Delete Actor");
+        }
+
         // First recursively remove children
         GameObject* obj = FindObject(id);
         if (obj) {
@@ -599,46 +656,109 @@ public:
                 selectedId = objects.empty() ? -1 : objects.front().id;
             }
         }
+
+        if (isRootRemove) {
+            s_inRemove = false;
+        }
     }
 
     GameObject* DuplicateObject(int id) {
+        if (onPreChange) onPreChange("Duplicate Actor");
         GameObject* orig = FindObject(id);
         if (!orig) return nullptr;
 
-        int newId = nextId++;
-        std::string newName = orig->name + " (Copy)";
-        glm::vec3 newPos = orig->position + glm::vec3(0.5f, 0.0f, 0.5f);
+        // 1. Collect all descendant IDs in pre-order traversal (starting from 'id')
+        std::vector<int> subtreeIds;
+        std::unordered_set<int> visited;
+        std::function<void(int)> collectSubtree = [&](int curId) {
+            if (visited.count(curId)) return;
+            visited.insert(curId);
+            subtreeIds.push_back(curId);
+            const GameObject* curObj = FindObject(curId);
+            if (curObj) {
+                for (int childId : curObj->childIds) {
+                    collectSubtree(childId);
+                }
+            }
+        };
+        collectSubtree(id);
 
-        objects.emplace_back(newId, newName, orig->type, newPos, orig->color);
-        GameObject& copy = objects.back();
-        copy.rotation = orig->rotation;
-        copy.scale = orig->scale;
-        copy.autoRotate = orig->autoRotate;
-        copy.autoRotateSpeed = orig->autoRotateSpeed;
-        copy.visible = orig->visible;
+        // 2. Pre-allocate new unique IDs for each node in the subtree
+        std::unordered_map<int, int> oldToNewId;
+        for (int oldId : subtreeIds) {
+            oldToNewId[oldId] = nextId++;
+        }
 
-        // PBR Material copy
-        copy.materialName = orig->materialName;
-        copy.metallic = orig->metallic;
-        copy.roughness = orig->roughness;
-        copy.normalStrength = orig->normalStrength;
-        copy.specular = orig->specular;
-        copy.emissiveColor = orig->emissiveColor;
-        copy.emissiveIntensity = orig->emissiveIntensity;
-        copy.shadingModel = orig->shadingModel;
-        copy.blendMode = orig->blendMode;
-        copy.twoSided = orig->twoSided;
-        copy.castShadows = orig->castShadows;
-        copy.receiveShadows = orig->receiveShadows;
-        copy.baseColorTexture = orig->baseColorTexture;
-        copy.normalTexture = orig->normalTexture;
-        copy.roughnessTexture = orig->roughnessTexture;
-        copy.metallicTexture = orig->metallicTexture;
-        copy.aoTexture = orig->aoTexture;
-        copy.emissionTexture = orig->emissionTexture;
+        int rootNewId = oldToNewId[id];
+        int originalParentId = orig->parentId;
 
-        selectedId = newId;
-        return &copy;
+        // 3. Duplicate all objects in the subtree
+        // Store in temporary list first to avoid pointer/iterator invalidation during push_back
+        std::vector<GameObject> newObjects;
+        newObjects.reserve(subtreeIds.size());
+
+        for (int oldId : subtreeIds) {
+            const GameObject* srcObj = FindObject(oldId);
+            if (!srcObj) continue;
+
+            GameObject copy = *srcObj;
+            copy.id = oldToNewId[oldId];
+
+            if (oldId == id) {
+                copy.name = srcObj->name + " (Copy)";
+                // Duplicated object is positioned exactly at the main object (no offset)
+                copy.position = srcObj->position;
+                copy.parentId = originalParentId;
+            } else {
+                // For children in the duplicated subtree:
+                // Reparent to the corresponding newly duplicated parent copy
+                if (oldToNewId.count(srcObj->parentId)) {
+                    copy.parentId = oldToNewId[srcObj->parentId];
+                } else {
+                    copy.parentId = -1;
+                }
+                // Keep the exact same local position
+                copy.position = srcObj->position;
+            }
+
+            // Remap childIds to point to the newly duplicated children
+            std::vector<int> remappedChildIds;
+            for (int chId : srcObj->childIds) {
+                if (oldToNewId.count(chId)) {
+                    remappedChildIds.push_back(oldToNewId[chId]);
+                }
+            }
+            copy.childIds = remappedChildIds;
+
+            // If it's a light, reset lightId so SyncLightPositionsFromActors allocates a unique PointLight
+            if (copy.isLight) {
+                copy.lightId = -1;
+            }
+
+            newObjects.push_back(copy);
+        }
+
+        // Append all duplicated objects to the scene
+        for (auto& newObj : newObjects) {
+            objects.push_back(newObj);
+        }
+
+        // 4. If the root object being duplicated had a parent outside the subtree,
+        // register the new root copy in that parent's childIds list
+        if (originalParentId != -1 && !oldToNewId.count(originalParentId)) {
+            GameObject* parentObj = FindObject(originalParentId);
+            if (parentObj) {
+                parentObj->childIds.push_back(rootNewId);
+            }
+        }
+
+        // 5. Select the newly duplicated root object in the viewport
+        selectedId = rootNewId;
+
+        // 6. Ensure lights and transforms are synchronized immediately
+        SyncLightPositionsFromActors();
+
+        return FindObject(rootNewId);
     }
 
     GameObject* GetSelected() {
