@@ -102,9 +102,8 @@ struct MaterialShaderConstants
 	float hasRoughTex;
 	float hasAoTex;
 	float receiveShadows;
+	float uvScale[2];
 	float pad0;
-	float pad1;
-	float pad2;
 };
 
 // Window & GLFW
@@ -1391,9 +1390,8 @@ int createShadersAndPipeline()
 			float hasRoughTex;
 			float hasAoTex;
 			float receiveShadows;
+			float2 uvScale;
 			float pad0;
-			float pad1;
-			float pad2;
 		};
 
 		Texture2D g_albedoTex : register(t0);
@@ -1512,12 +1510,14 @@ int createShadersAndPipeline()
 
 		float4 PSMain(PSInput input) : SV_TARGET
 		{
+			float2 uv = input.uv * uvScale;
+
 			if (isUnlit > 0.5f)
 			{
 				float3 col = input.color * baseColor;
 				if (hasAlbedoTex > 0.5f)
 				{
-					col = g_albedoTex.Sample(g_sampler, input.uv).rgb;
+					col = g_albedoTex.Sample(g_sampler, uv).rgb;
 				}
 				return float4(col + emissiveColor * emissiveIntensity, 1.0f);
 			}
@@ -1525,7 +1525,7 @@ int createShadersAndPipeline()
 			float3 N = normalize(input.normal);
 			if (hasNormalTex > 0.5f && normalStrength > 0.01f)
 			{
-				float3 nSample = g_normalTex.Sample(g_sampler, input.uv).rgb * 2.0f - 1.0f;
+				float3 nSample = g_normalTex.Sample(g_sampler, uv).rgb * 2.0f - 1.0f;
 				nSample.xy *= normalStrength;
 				float3 up = abs(N.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
 				float3 T = normalize(cross(up, N));
@@ -1536,26 +1536,26 @@ int createShadersAndPipeline()
 			float3 albedo = input.color * baseColor;
 			if (hasAlbedoTex > 0.5f)
 			{
-				albedo = g_albedoTex.Sample(g_sampler, input.uv).rgb;
+				albedo = g_albedoTex.Sample(g_sampler, uv).rgb;
 			}
 
 			float rough = roughness;
 			if (hasRoughTex > 0.5f)
 			{
-				rough = g_roughTex.Sample(g_sampler, input.uv).r;
+				rough = g_roughTex.Sample(g_sampler, uv).r;
 			}
 			rough = clamp(rough, 0.04f, 1.0f);
 
 			float metal = metallic;
 			if (hasAlbedoTex > 0.5f && metallic > 0.0f)
 			{
-				metal = clamp(g_metalTex.Sample(g_sampler, input.uv).r, 0.0f, 1.0f);
+				metal = clamp(g_metalTex.Sample(g_sampler, uv).r, 0.0f, 1.0f);
 			}
 
 			float ao = 1.0f;
 			if (hasAoTex > 0.5f)
 			{
-				ao = clamp(g_aoTex.Sample(g_sampler, input.uv).r, 0.05f, 1.0f);
+				ao = clamp(g_aoTex.Sample(g_sampler, uv).r, 0.05f, 1.0f);
 			}
 
 			float3 V = normalize(cameraPos - input.worldPos);
@@ -2205,6 +2205,8 @@ void renderFrame()
 			matConsts.hasRoughTex  = (!batch.roughTex.empty() && batch.roughTex != "none")  ? 1.0f : 0.0f;
 			matConsts.hasAoTex     = (!batch.aoTex.empty() && batch.aoTex != "none")        ? 1.0f : 0.0f;
 			matConsts.receiveShadows = batch.receiveShadows ? 1.0f : 0.0f;
+			matConsts.uvScale[0] = batch.uvScale.x != 0.0f ? batch.uvScale.x : 1.0f;
+			matConsts.uvScale[1] = batch.uvScale.y != 0.0f ? batch.uvScale.y : 1.0f;
 
 			g_commandList->SetGraphicsRoot32BitConstants(1, 20, &matConsts, 0);
 

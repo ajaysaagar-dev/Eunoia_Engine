@@ -101,6 +101,7 @@ public:
             file << "        \"twoSided\": " << BoolStr(obj.twoSided) << ",\n";
             file << "        \"castShadows\": " << BoolStr(obj.castShadows) << ",\n";
             file << "        \"receiveShadows\": " << BoolStr(obj.receiveShadows) << ",\n";
+            file << "        \"uvScale\": [" << obj.uvScale.x << ", " << obj.uvScale.y << "],\n";
             file << "        \"textures\": {\n";
             file << "          \"baseColor\": " << QuoteStr(obj.baseColorTexture) << ",\n";
             file << "          \"normal\": " << QuoteStr(obj.normalTexture) << ",\n";
@@ -697,6 +698,17 @@ private:
                 p = matBlock.find("\"twoSided\""); if (p != std::string::npos) obj.twoSided = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"castShadows\""); if (p != std::string::npos) obj.castShadows = ParseBoolAt(matBlock, p, true);
                 p = matBlock.find("\"receiveShadows\""); if (p != std::string::npos) obj.receiveShadows = ParseBoolAt(matBlock, p, true);
+                p = matBlock.find("\"uvScale\"");
+                if (p != std::string::npos) {
+                    size_t lb = matBlock.find('[', p);
+                    size_t rb = matBlock.find(']', lb);
+                    if (lb != std::string::npos && rb != std::string::npos) {
+                        std::string arr = matBlock.substr(lb + 1, rb - lb - 1);
+                        std::stringstream ss(arr);
+                        char comma;
+                        ss >> obj.uvScale.x >> comma >> obj.uvScale.y;
+                    }
+                }
 
                 // Textures sub-block
                 size_t texPos = matBlock.find("\"textures\"");

@@ -244,6 +244,7 @@ struct GameObject {
     bool twoSided = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    glm::vec2 uvScale{1.0f, 1.0f};
 
     bool visible = true;
     bool autoRotate = false;
@@ -313,6 +314,7 @@ struct GameObject {
         twoSided = other.twoSided;
         castShadows = other.castShadows;
         receiveShadows = other.receiveShadows;
+        uvScale = other.uvScale;
         visible = other.visible;
         autoRotate = other.autoRotate;
         autoRotateSpeed = other.autoRotateSpeed;

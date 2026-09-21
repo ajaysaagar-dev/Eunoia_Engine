@@ -922,6 +922,7 @@ struct RenderBatch {
     bool isUnlit = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    glm::vec2 uvScale{1.0f, 1.0f};
 };
 
     void BuildSceneMesh(
@@ -1008,6 +1009,7 @@ struct RenderBatch {
             b.isUnlit = (obj.shadingModel == 1);
             b.castShadows = obj.castShadows;
             b.receiveShadows = obj.receiveShadows;
+            b.uvScale = obj.uvScale;
             outBatches.push_back(b);
         }
 
