@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include "Geometry.h"
+#include "EunoiaBehaviour.h"
 
 enum class LightType {
     Directional,
@@ -265,6 +266,109 @@ struct GameObject {
     PrimitiveParams params;
 
     PrimitiveMesh mesh;
+
+    // Attached Behaviours (dev.md Section 1, 2)
+    std::vector<std::shared_ptr<EunoiaBehaviour>> behaviours;
+
+    GameObject() = default;
+
+    GameObject(const GameObject& other) {
+        CopyFrom(other);
+    }
+
+    GameObject& operator=(const GameObject& other) {
+        if (this != &other) {
+            CopyFrom(other);
+        }
+        return *this;
+    }
+
+    GameObject(GameObject&&) noexcept = default;
+    GameObject& operator=(GameObject&&) noexcept = default;
+
+    void CopyFrom(const GameObject& other) {
+        id = other.id;
+        name = other.name;
+        type = other.type;
+        mobility = other.mobility;
+        position = other.position;
+        rotation = other.rotation;
+        scale = other.scale;
+        color = other.color;
+        baseColorTexture = other.baseColorTexture;
+        normalTexture = other.normalTexture;
+        roughnessTexture = other.roughnessTexture;
+        metallicTexture = other.metallicTexture;
+        aoTexture = other.aoTexture;
+        emissionTexture = other.emissionTexture;
+        materialName = other.materialName;
+        metallic = other.metallic;
+        roughness = other.roughness;
+        normalStrength = other.normalStrength;
+        specular = other.specular;
+        emissiveColor = other.emissiveColor;
+        emissiveIntensity = other.emissiveIntensity;
+        shadingModel = other.shadingModel;
+        blendMode = other.blendMode;
+        twoSided = other.twoSided;
+        castShadows = other.castShadows;
+        receiveShadows = other.receiveShadows;
+        visible = other.visible;
+        autoRotate = other.autoRotate;
+        autoRotateSpeed = other.autoRotateSpeed;
+        meshFilePath = other.meshFilePath;
+        isImportedMesh = other.isImportedMesh;
+        submeshIndex = other.submeshIndex;
+        parentId = other.parentId;
+        childIds = other.childIds;
+        isLight = other.isLight;
+        lightId = other.lightId;
+        light = other.light;
+        params = other.params;
+        mesh = other.mesh;
+
+        behaviours.clear();
+        for (const auto& b : other.behaviours) {
+            if (b) {
+                auto clone = b->Clone();
+                clone->SetOwner(this);
+                behaviours.push_back(std::move(clone));
+            }
+        }
+    }
+
+    void AddBehaviour(std::shared_ptr<EunoiaBehaviour> b) {
+        if (!b) return;
+        b->SetOwner(this);
+        behaviours.push_back(b);
+        b->OnCreate();
+    }
+
+    bool RemoveBehaviour(size_t index) {
+        if (index >= behaviours.size()) return false;
+        if (behaviours[index]) {
+            behaviours[index]->OnDisable();
+            behaviours[index]->OnDestroy();
+        }
+        behaviours.erase(behaviours.begin() + index);
+        return true;
+    }
+
+    bool ReorderBehaviour(size_t fromIdx, size_t toIdx) {
+        if (fromIdx >= behaviours.size() || toIdx >= behaviours.size() || fromIdx == toIdx) return false;
+        std::swap(behaviours[fromIdx], behaviours[toIdx]);
+        return true;
+    }
+
+    template<typename T>
+    T* GetBehaviour() {
+        for (auto& b : behaviours) {
+            if (auto casted = dynamic_cast<T*>(b.get())) {
+                return casted;
+            }
+        }
+        return nullptr;
+    }
 
     GameObject(int objId, const std::string& objName, PrimitiveType objType, glm::vec3 pos, glm::vec3 col = {0.55f, 0.55f, 0.55f})
         : id(objId), name(objName), type(objType), position(pos), color(col) {

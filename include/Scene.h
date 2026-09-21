@@ -652,6 +652,7 @@ public:
         auto it = std::remove_if(objects.begin(), objects.end(), [id](const GameObject& o) { return o.id == id; });
         if (it != objects.end()) {
             objects.erase(it, objects.end());
+            OnObjectRemoved(id);
             if (selectedId == id) {
                 selectedId = objects.empty() ? -1 : objects.front().id;
             }
@@ -770,8 +771,131 @@ public:
         selectedId = -1;
     }
 
+    // Play Mode State & Runtime Lifecycle (dev.md Section 30-36)
+    bool isPlayMode = false;
+    float fixedTimeAccumulator = 0.0f;
+    std::vector<GameObject> playModePreObjects;
+    int playModePreSelectedId = -1;
+
+    void StartPlayMode() {
+        if (isPlayMode) return;
+
+        // Deep copy editor scene actors to restore cleanly on Stop
+        playModePreObjects = objects;
+        playModePreSelectedId = selectedId;
+        isPlayMode = true;
+        fixedTimeAccumulator = 0.0f;
+
+        ResolveAllBehaviourReferences();
+
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (!b) continue;
+                b->SetScene(this);
+                b->SetOwner(&obj);
+                b->OnCreate();
+                if (b->IsEnabled()) {
+                    b->OnEnable();
+                    if (!b->HasStarted()) {
+                        b->Start();
+                        b->SetStarted(true);
+                    }
+                }
+            }
+        }
+        AddEngineLog("LogPlayLevel", "PIE: Play Mode Started (All Behaviours Initialized)", 2);
+    }
+
+    void StopPlayMode() {
+        if (!isPlayMode) return;
+
+        // Cleanup runtime state
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (!b) continue;
+                if (b->IsEnabled()) {
+                    b->OnDisable();
+                }
+                b->OnDestroy();
+                b->SetStarted(false);
+            }
+        }
+
+        isPlayMode = false;
+
+        // Restore unmodified editor scene
+        objects = std::move(playModePreObjects);
+        playModePreObjects.clear();
+        selectedId = playModePreSelectedId;
+
+        ResolveAllBehaviourReferences();
+        SyncLightPositionsFromActors();
+
+        AddEngineLog("LogPlayLevel", "PIE: Play Mode Stopped. Restored Editor Mode.", 1);
+    }
+
+    void ResolveAllBehaviourReferences() {
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (b) {
+                    b->SetScene(this);
+                    b->SetOwner(&obj);
+                    b->ResolveReferences(*this);
+                }
+            }
+        }
+    }
+
+    void OnObjectRemoved(int removedId) {
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (!b) continue;
+                for (auto& prop : b->GetProperties()) {
+                    if (prop.type == BehaviourPropertyType::ObjectRef && prop.targetId == removedId) {
+                        prop.targetId = -1;
+                        prop.isMissing = true;
+                        if (prop.dataPtr) {
+                            *reinterpret_cast<void**>(prop.dataPtr) = nullptr;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     void Update(float dt) {
         SyncLightPositionsFromActors();
+
+        if (isPlayMode) {
+            // 1. FixedUpdate
+            fixedTimeAccumulator += dt;
+            const float fixedStep = 1.0f / 60.0f;
+            while (fixedTimeAccumulator >= fixedStep) {
+                for (auto& obj : objects) {
+                    for (auto& b : obj.behaviours) {
+                        if (b && b->IsEnabled()) b->FixedUpdate(fixedStep);
+                    }
+                }
+                fixedTimeAccumulator -= fixedStep;
+            }
+
+            // 2. Update
+            for (auto& obj : objects) {
+                for (auto& b : obj.behaviours) {
+                    if (b && b->IsEnabled()) b->Update(dt);
+                }
+                obj.Update(dt);
+            }
+
+            // 3. LateUpdate
+            for (auto& obj : objects) {
+                for (auto& b : obj.behaviours) {
+                    if (b && b->IsEnabled()) b->LateUpdate(dt);
+                }
+            }
+            return;
+        }
+
         if (!playAnimations) return;
         for (auto& obj : objects) {
             if (obj.id == selectedId && isInteracting) continue;

@@ -1,5 +1,6 @@
 #pragma once
 #include "Scene.h"
+#include "BehaviourRegistry.h"
 #include <string>
 #include <fstream>
 #include <sstream>
@@ -171,8 +172,51 @@ public:
             file << "      \"lightVolumetric\": " << BoolStr(obj.light.volumetric) << ",\n";
             file << "      \"lightVolScattering\": " << obj.light.volumetricScattering << ",\n";
             file << "      \"lightVolIntensity\": " << obj.light.volumetricIntensity << ",\n";
-            file << "      \"lightLayer\": " << obj.light.lightLayer << "\n";
+            file << "      \"lightLayer\": " << obj.light.lightLayer << ",\n";
 
+            // Attached Behaviours (dev.md Section 14)
+            file << "      \"behaviours\": [\n";
+            for (size_t bi = 0; bi < obj.behaviours.size(); ++bi) {
+                const auto& b = obj.behaviours[bi];
+                if (!b) continue;
+                file << "        {\n";
+                file << "          \"className\": " << QuoteStr(b->GetClassName()) << ",\n";
+                file << "          \"enabled\": " << BoolStr(b->IsEnabled()) << ",\n";
+                file << "          \"properties\": [\n";
+                const auto& props = b->GetProperties();
+                for (size_t pi = 0; pi < props.size(); ++pi) {
+                    const auto& p = props[pi];
+                    file << "            {\n";
+                    file << "              \"name\": " << QuoteStr(p.name) << ",\n";
+                    file << "              \"type\": " << (int)p.type << ",\n";
+                    if (p.type == BehaviourPropertyType::Bool && p.dataPtr) {
+                        file << "              \"value\": " << BoolStr(*reinterpret_cast<bool*>(p.dataPtr)) << "\n";
+                    } else if (p.type == BehaviourPropertyType::Int && p.dataPtr) {
+                        file << "              \"value\": " << *reinterpret_cast<int*>(p.dataPtr) << "\n";
+                    } else if (p.type == BehaviourPropertyType::Float && p.dataPtr) {
+                        file << "              \"value\": " << *reinterpret_cast<float*>(p.dataPtr) << "\n";
+                    } else if (p.type == BehaviourPropertyType::Double && p.dataPtr) {
+                        file << "              \"value\": " << *reinterpret_cast<double*>(p.dataPtr) << "\n";
+                    } else if (p.type == BehaviourPropertyType::String && p.dataPtr) {
+                        file << "              \"value\": " << QuoteStr(*reinterpret_cast<std::string*>(p.dataPtr)) << "\n";
+                    } else if (p.type == BehaviourPropertyType::Vec2 && p.dataPtr) {
+                        glm::vec2 v = *reinterpret_cast<glm::vec2*>(p.dataPtr);
+                        file << "              \"value\": [" << v.x << ", " << v.y << "]\n";
+                    } else if ((p.type == BehaviourPropertyType::Vec3 || p.type == BehaviourPropertyType::Color3) && p.dataPtr) {
+                        glm::vec3 v = *reinterpret_cast<glm::vec3*>(p.dataPtr);
+                        file << "              \"value\": [" << v.x << ", " << v.y << ", " << v.z << "]\n";
+                    } else if (p.type == BehaviourPropertyType::ObjectRef) {
+                        file << "              \"targetId\": " << p.targetId << ",\n";
+                        file << "              \"refType\": " << (int)p.refType << "\n";
+                    } else {
+                        file << "              \"value\": 0\n";
+                    }
+                    file << "            }" << (pi + 1 < props.size() ? "," : "") << "\n";
+                }
+                file << "          ]\n";
+                file << "        }" << (bi + 1 < obj.behaviours.size() ? "," : "") << "\n";
+            }
+            file << "      ]\n";
             file << "    }" << (i + 1 < scene.objects.size() ? "," : "") << "\n";
         }
         file << "  ],\n";
@@ -733,6 +777,74 @@ private:
             p = actorBlock.find("\"lightVolIntensity\""); if (p != std::string::npos) obj.light.volumetricIntensity = ParseFloatAt(actorBlock, p, 1.0f);
             p = actorBlock.find("\"lightLayer\""); if (p != std::string::npos) obj.light.lightLayer = (uint32_t)ParseIntAt(actorBlock, p, 1);
 
+            // Parse Attached Behaviours (dev.md Section 14)
+            size_t behPos = actorBlock.find("\"behaviours\"");
+            if (behPos != std::string::npos) {
+                size_t bArrayStart = actorBlock.find('[', behPos);
+                size_t bArrayEnd = (bArrayStart != std::string::npos) ? FindMatchingBracket(actorBlock, bArrayStart) : std::string::npos;
+                if (bArrayStart != std::string::npos && bArrayEnd != std::string::npos) {
+                    std::string behArray = actorBlock.substr(bArrayStart, bArrayEnd - bArrayStart + 1);
+                    size_t bSearchPos = 0;
+                    while (true) {
+                        size_t bObjStart = behArray.find('{', bSearchPos);
+                        if (bObjStart == std::string::npos) break;
+                        size_t bObjEnd = FindMatchingBrace(behArray, bObjStart);
+                        if (bObjEnd == std::string::npos) break;
+
+                        std::string bBlock = behArray.substr(bObjStart, bObjEnd - bObjStart + 1);
+                        size_t cnPos = bBlock.find("\"className\"");
+                        std::string className = (cnPos != std::string::npos) ? ParseStringAt(bBlock, cnPos, "") : "";
+                        if (!className.empty()) {
+                            auto bInst = BehaviourRegistry::Get().Create(className);
+                            if (bInst) {
+                                size_t enPos = bBlock.find("\"enabled\"");
+                                if (enPos != std::string::npos) {
+                                    bInst->SetEnabled(ParseBoolAt(bBlock, enPos, true));
+                                }
+
+                                for (auto& prop : bInst->GetProperties()) {
+                                    size_t propSearch = bBlock.find("\"" + prop.name + "\"");
+                                    if (propSearch != std::string::npos) {
+                                        size_t itemStart = bBlock.rfind('{', propSearch);
+                                        size_t itemEnd = bBlock.find('}', propSearch);
+                                        if (itemStart != std::string::npos && itemEnd != std::string::npos) {
+                                            std::string pItem = bBlock.substr(itemStart, itemEnd - itemStart + 1);
+                                            if (prop.type == BehaviourPropertyType::Bool && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<bool*>(prop.dataPtr) = ParseBoolAt(pItem, vp, *reinterpret_cast<bool*>(prop.dataPtr));
+                                            } else if (prop.type == BehaviourPropertyType::Int && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<int*>(prop.dataPtr) = ParseIntAt(pItem, vp, *reinterpret_cast<int*>(prop.dataPtr));
+                                            } else if (prop.type == BehaviourPropertyType::Float && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<float*>(prop.dataPtr) = ParseFloatAt(pItem, vp, *reinterpret_cast<float*>(prop.dataPtr));
+                                            } else if (prop.type == BehaviourPropertyType::Double && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<double*>(prop.dataPtr) = (double)ParseFloatAt(pItem, vp, (float)*reinterpret_cast<double*>(prop.dataPtr));
+                                            } else if (prop.type == BehaviourPropertyType::String && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<std::string*>(prop.dataPtr) = ParseStringAt(pItem, vp, *reinterpret_cast<std::string*>(prop.dataPtr));
+                                            } else if (prop.type == BehaviourPropertyType::Vec3 && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<glm::vec3*>(prop.dataPtr) = ParseVec3(pItem, vp);
+                                            } else if (prop.type == BehaviourPropertyType::Color3 && prop.dataPtr) {
+                                                size_t vp = pItem.find("\"value\"");
+                                                if (vp != std::string::npos) *reinterpret_cast<glm::vec3*>(prop.dataPtr) = ParseVec3(pItem, vp);
+                                            } else if (prop.type == BehaviourPropertyType::ObjectRef) {
+                                                size_t tidPos = pItem.find("\"targetId\"");
+                                                if (tidPos != std::string::npos) prop.targetId = ParseIntAt(pItem, tidPos, -1);
+                                            }
+                                        }
+                                    }
+                                }
+                                obj.AddBehaviour(std::move(bInst));
+                            }
+                        }
+                        bSearchPos = bObjEnd + 1;
+                    }
+                }
+            }
+
             // Rebuild mesh geometry with loaded params for standard primitives
             if (!obj.isImportedMesh && !obj.isLight && !IsLightPrimitive(obj.type) && obj.type != PrimitiveType::Empty) {
                 obj.RebuildMesh();
@@ -871,6 +983,7 @@ private:
             }
         }
         scene.SyncLightActors();
+        scene.ResolveAllBehaviourReferences();
     }
 
     // ---- Brace/Bracket Matching ----
