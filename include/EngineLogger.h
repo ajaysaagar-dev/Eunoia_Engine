@@ -118,3 +118,7 @@ private:
     std::string m_lastError;
     std::mutex m_mutex;
 };
+
+// Global engine logging bridge (implemented in EngineUI.cpp)
+void AddEngineLog(const std::string& category, const std::string& message, int level = 0);
+

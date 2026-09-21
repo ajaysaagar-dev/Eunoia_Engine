@@ -15,7 +15,7 @@
 #include "MeshImporter.h"
 #include <filesystem>
 
-void AddEngineLog(const std::string& category, const std::string& message, int level = 0);
+void AddEngineLog(const std::string& category, const std::string& message, int level);
 
 struct PointLight {
     int id = 0;
