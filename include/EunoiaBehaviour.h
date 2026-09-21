@@ -207,13 +207,48 @@ public:
     virtual void OnDisable() {}
     virtual void OnDestroy() {}
 
-    // Owner / Entity access (dev.md Section 1)
+    // Owner / Entity access (dev.md Section 34)
     GameObject* GetOwner() const { return m_owner; }
     GameObject* GetEntity() const { return m_owner; }
     void SetOwner(GameObject* owner) { m_owner = owner; }
 
     Scene* GetScene() const { return m_scene; }
     void SetScene(Scene* scene) { m_scene = scene; }
+
+    // -------------------------------------------------------------------------
+    // GetBehaviour<T>() / HasBehaviour<T>() — access sibling behaviours on the
+    // same owner (dev.md Section 62, 63)
+    // -------------------------------------------------------------------------
+    template<typename T>
+    T* GetBehaviour() const {
+        if (!m_owner) return nullptr;
+        return m_owner->template GetBehaviour<T>();
+    }
+
+    template<typename T>
+    bool HasBehaviour() const {
+        return GetBehaviour<T>() != nullptr;
+    }
+
+    // -------------------------------------------------------------------------
+    // GetTransform() — returns BehaviourTransform reference (dev.md Section 34)
+    // -------------------------------------------------------------------------
+    BehaviourTransform& GetTransform() { return Transform; }
+    const BehaviourTransform& GetTransform() const { return Transform; }
+
+    // -------------------------------------------------------------------------
+    // GetComponent<T>() — typed component access on the owner (dev.md Section 35)
+    // Specialisations for LightComponent, PrimitiveMesh, OrbitCamera defined
+    // after the class.
+    // -------------------------------------------------------------------------
+    template<typename T>
+    T* GetComponent() const { return nullptr; }
+
+    // -------------------------------------------------------------------------
+    // SpawnGameObject / DestroyGameObject — runtime object creation (dev.md §45)
+    // -------------------------------------------------------------------------
+    GameObject* SpawnGameObject(const std::string& name, const glm::vec3& position = glm::vec3(0.0f));
+    void        DestroyGameObject(int objectId);
 
     // Enabled state (dev.md Section 17)
     bool IsEnabled() const { return m_enabled; }
@@ -316,3 +351,10 @@ protected:
     friend struct RespectiveObjectAccessor;
     friend struct BehaviourTransformProperty;
 };
+
+// ============================================================================
+// GetComponent<T> Specialisations (dev.md Section 35)
+// ============================================================================
+template<> LightComponent* EunoiaBehaviour::GetComponent<LightComponent>() const;
+template<> PrimitiveMesh*  EunoiaBehaviour::GetComponent<PrimitiveMesh>() const;
+

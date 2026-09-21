@@ -402,3 +402,42 @@ void DynamicScriptBehaviour::Start() {
 void DynamicScriptBehaviour::Update(float deltaTime) {
     // Custom script update logic
 }
+
+// ============================================================================
+// GetComponent<T> Specialisations (dev.md Section 35)
+// Implementations live here to avoid circular includes between
+// EunoiaBehaviour.h ↔ GameObject.h.
+// ============================================================================
+
+template<>
+LightComponent* EunoiaBehaviour::GetComponent<LightComponent>() const {
+    if (!m_owner || !m_owner->isLight) return nullptr;
+    return &(m_owner->light);
+}
+
+template<>
+PrimitiveMesh* EunoiaBehaviour::GetComponent<PrimitiveMesh>() const {
+    if (!m_owner || m_owner->isLight) return nullptr;
+    return &(m_owner->mesh);
+}
+
+// ============================================================================
+// SpawnGameObject / DestroyGameObject implementations (dev.md Section 45)
+// ============================================================================
+
+GameObject* EunoiaBehaviour::SpawnGameObject(const std::string& name, const glm::vec3& position) {
+    if (!m_scene) {
+        AddEngineLog("LogBehaviour", "[Behaviour] SpawnGameObject: no active scene - call only during Play Mode", 1);
+        return nullptr;
+    }
+    GameObject& obj = m_scene->AddObject(PrimitiveType::Empty, position, glm::vec3(0.55f));
+    obj.name = name;
+    AddEngineLog("LogBehaviour", "[Behaviour] SpawnGameObject: created '" + name + "' (ID " + std::to_string(obj.id) + ")", 0);
+    return &obj;
+}
+
+void EunoiaBehaviour::DestroyGameObject(int objectId) {
+    if (!m_scene) return;
+    m_scene->RemoveObject(objectId);
+    AddEngineLog("LogBehaviour", "[Behaviour] DestroyGameObject: removed object ID " + std::to_string(objectId), 0);
+}
