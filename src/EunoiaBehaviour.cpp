@@ -43,6 +43,107 @@ OrbitCamera* RespectiveObjectAccessor::Camera(void* objRef) const {
 }
 
 // ============================================================================
+// BehaviourTransformProperty Implementations
+// ============================================================================
+
+glm::vec3 BehaviourTransformProperty::LocalSpace() const {
+    if (!behaviour) return glm::vec3(0.0f);
+    GameObject* owner = behaviour->GetOwner();
+    if (!owner) return glm::vec3(0.0f);
+    switch (type) {
+        case Type::Location: return owner->position;
+        case Type::Rotation: return owner->rotation;
+        case Type::Scale:    return owner->scale;
+    }
+    return glm::vec3(0.0f);
+}
+
+void BehaviourTransformProperty::LocalSpace(const glm::vec3& v) {
+    if (!behaviour) return;
+    GameObject* owner = behaviour->GetOwner();
+    if (!owner) return;
+    switch (type) {
+        case Type::Location: owner->position = v; break;
+        case Type::Rotation: owner->rotation = v; break;
+        case Type::Scale:    owner->scale = v; break;
+    }
+}
+
+glm::vec3 BehaviourTransformProperty::WorldSpace() const {
+    if (!behaviour) return glm::vec3(0.0f);
+    GameObject* owner = behaviour->GetOwner();
+    if (!owner) return glm::vec3(0.0f);
+    Scene* scene = behaviour->GetScene();
+    if (!scene || owner->parentId == -1) {
+        return LocalSpace();
+    }
+    glm::mat4 worldMat = scene->GetWorldMatrix(*owner);
+    switch (type) {
+        case Type::Location:
+            return glm::vec3(worldMat[3]);
+        case Type::Rotation: {
+            glm::vec3 c0(worldMat[0]), c1(worldMat[1]), c2(worldMat[2]);
+            float sx = glm::length(c0);
+            float sy = glm::length(c1);
+            float sz = glm::length(c2);
+            if (sx > 1e-6f && sy > 1e-6f && sz > 1e-6f) {
+                glm::mat3 rotMat(c0 / sx, c1 / sy, c2 / sz);
+                float pitch = glm::degrees(std::asin(glm::clamp(-rotMat[1][2], -1.0f, 1.0f)));
+                float yaw = glm::degrees(std::atan2(rotMat[0][2], rotMat[2][2]));
+                float roll = glm::degrees(std::atan2(rotMat[1][0], rotMat[1][1]));
+                return glm::vec3(pitch, yaw, roll);
+            }
+            return owner->rotation;
+        }
+        case Type::Scale: {
+            return glm::vec3(glm::length(glm::vec3(worldMat[0])),
+                             glm::length(glm::vec3(worldMat[1])),
+                             glm::length(glm::vec3(worldMat[2])));
+        }
+    }
+    return LocalSpace();
+}
+
+void BehaviourTransformProperty::WorldSpace(const glm::vec3& v) {
+    if (!behaviour) return;
+    GameObject* owner = behaviour->GetOwner();
+    if (!owner) return;
+    Scene* scene = behaviour->GetScene();
+    if (!scene || owner->parentId == -1) {
+        LocalSpace(v);
+        return;
+    }
+    const GameObject* parent = scene->FindObjectConst(owner->parentId);
+    if (!parent) {
+        LocalSpace(v);
+        return;
+    }
+    glm::mat4 pMat = scene->GetWorldMatrix(*parent);
+    glm::mat4 invP = glm::inverse(pMat);
+    switch (type) {
+        case Type::Location: {
+            owner->position = glm::vec3(invP * glm::vec4(v, 1.0f));
+            break;
+        }
+        case Type::Rotation: {
+            owner->rotation = v - parent->rotation;
+            break;
+        }
+        case Type::Scale: {
+            glm::vec3 pScale(glm::length(glm::vec3(pMat[0])),
+                             glm::length(glm::vec3(pMat[1])),
+                             glm::length(glm::vec3(pMat[2])));
+            if (pScale.x > 1e-6f && pScale.y > 1e-6f && pScale.z > 1e-6f) {
+                owner->scale = v / pScale;
+            } else {
+                owner->scale = v;
+            }
+            break;
+        }
+    }
+}
+
+// ============================================================================
 // EunoiaBehaviour Property Registration Implementations
 // ============================================================================
 
@@ -292,4 +393,12 @@ void EnemyController::Update(float deltaTime) {
             m_owner->rotation.y = targetYaw;
         }
     }
+}
+
+void DynamicScriptBehaviour::Start() {
+    AddEngineLog("LogBehaviour", m_className + "::Start called on " + (GetOwner() ? GetOwner()->name : "Unknown"), 0);
+}
+
+void DynamicScriptBehaviour::Update(float deltaTime) {
+    // Custom script update logic
 }

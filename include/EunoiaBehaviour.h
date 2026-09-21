@@ -99,6 +99,93 @@ struct RespectiveObjectAccessor {
     OrbitCamera*    Camera(void* objRef) const;
 };
 
+// ============================================================================
+// BehaviourTransformProperty & BehaviourTransform
+// Exposes Location, Position, Rotation, and Scale with capitalized keywords:
+// .LocalSpace(vector3) and .WorldSpace(vector3)
+// ============================================================================
+struct BehaviourTransformProperty {
+    enum class Type { Location, Rotation, Scale };
+    EunoiaBehaviour* behaviour = nullptr;
+    Type type = Type::Location;
+
+    BehaviourTransformProperty() = default;
+    BehaviourTransformProperty(EunoiaBehaviour* b, Type t) : behaviour(b), type(t) {}
+
+    // Capitalized keywords as requested:
+    glm::vec3 LocalSpace() const;
+    void LocalSpace(const glm::vec3& v);
+
+    glm::vec3 WorldSpace() const;
+    void WorldSpace(const glm::vec3& v);
+
+    // Aliases & getters/setters:
+    glm::vec3 GetLocalSpace() const { return LocalSpace(); }
+    void SetLocalSpace(const glm::vec3& v) { LocalSpace(v); }
+    glm::vec3 GetWorldSpace() const { return WorldSpace(); }
+    void SetWorldSpace(const glm::vec3& v) { WorldSpace(v); }
+
+    // Lowercase / phonetic aliases:
+    glm::vec3 locaspace() const { return LocalSpace(); }
+    void locaspace(const glm::vec3& v) { LocalSpace(v); }
+    glm::vec3 localspace() const { return LocalSpace(); }
+    void localspace(const glm::vec3& v) { LocalSpace(v); }
+    glm::vec3 worldspace() const { return WorldSpace(); }
+    void worldspace(const glm::vec3& v) { WorldSpace(v); }
+
+    // Direct arithmetic & vector casting:
+    operator glm::vec3() const { return LocalSpace(); }
+    BehaviourTransformProperty& operator=(const glm::vec3& v) { LocalSpace(v); return *this; }
+    BehaviourTransformProperty& operator+=(const glm::vec3& v) { LocalSpace(LocalSpace() + v); return *this; }
+    BehaviourTransformProperty& operator-=(const glm::vec3& v) { LocalSpace(LocalSpace() - v); return *this; }
+    BehaviourTransformProperty& operator*=(float s) { LocalSpace(LocalSpace() * s); return *this; }
+    BehaviourTransformProperty& operator/=(float s) { LocalSpace(LocalSpace() / s); return *this; }
+
+    float x() const { return LocalSpace().x; }
+    float y() const { return LocalSpace().y; }
+    float z() const { return LocalSpace().z; }
+    void x(float val) { glm::vec3 v = LocalSpace(); v.x = val; LocalSpace(v); }
+    void y(float val) { glm::vec3 v = LocalSpace(); v.y = val; LocalSpace(v); }
+    void z(float val) { glm::vec3 v = LocalSpace(); v.z = val; LocalSpace(v); }
+};
+
+struct BehaviourTransform {
+    BehaviourTransformProperty Location;
+    BehaviourTransformProperty Position;
+    BehaviourTransformProperty Rotation;
+    BehaviourTransformProperty Scale;
+
+    BehaviourTransformProperty& location = Location;
+    BehaviourTransformProperty& position = Position;
+    BehaviourTransformProperty& rotation = Rotation;
+    BehaviourTransformProperty& scale = Scale;
+
+    BehaviourTransform() = default;
+
+    BehaviourTransform(const BehaviourTransform& other)
+        : Location(other.Location),
+          Position(other.Position),
+          Rotation(other.Rotation),
+          Scale(other.Scale) {}
+
+    BehaviourTransform& operator=(const BehaviourTransform& other) {
+        if (this != &other) {
+            Location = other.Location;
+            Position = other.Position;
+            Rotation = other.Rotation;
+            Scale = other.Scale;
+        }
+        return *this;
+    }
+
+    void Init(EunoiaBehaviour* b) {
+        Location = BehaviourTransformProperty(b, BehaviourTransformProperty::Type::Location);
+        Position = BehaviourTransformProperty(b, BehaviourTransformProperty::Type::Location);
+        Rotation = BehaviourTransformProperty(b, BehaviourTransformProperty::Type::Rotation);
+        Scale = BehaviourTransformProperty(b, BehaviourTransformProperty::Type::Scale);
+    }
+};
+
 #ifdef GetClassName
 #undef GetClassName
 #endif
@@ -178,19 +265,44 @@ public:
     // RespectiveObject Accessor functor (dev.md Section 15)
     RespectiveObjectAccessor GetRespectiveObject;
 
+    // Transform accessors (Capitalized keywords: Transform.Location, Transform.Position, Transform.Rotation, Transform.Scale)
+    BehaviourTransform Transform;
+    BehaviourTransform& transform = Transform;
+
 protected:
     EunoiaBehaviour() {
         GetRespectiveObject.behaviour = this;
+        Transform.Init(this);
     }
 
     EunoiaBehaviour(const EunoiaBehaviour& other)
-        : m_owner(other.m_owner),
+        : Transform(other.Transform),
+          transform(Transform),
+          m_owner(other.m_owner),
           m_scene(other.m_scene),
           m_enabled(other.m_enabled),
           m_hasStarted(other.m_hasStarted),
           m_className(other.m_className),
-          m_displayName(other.m_displayName) {
+          m_displayName(other.m_displayName),
+          m_properties(other.m_properties) {
         GetRespectiveObject.behaviour = this;
+        Transform.Init(this);
+    }
+
+    EunoiaBehaviour& operator=(const EunoiaBehaviour& other) {
+        if (this != &other) {
+            m_owner = other.m_owner;
+            m_scene = other.m_scene;
+            m_enabled = other.m_enabled;
+            m_hasStarted = other.m_hasStarted;
+            m_className = other.m_className;
+            m_displayName = other.m_displayName;
+            m_properties = other.m_properties;
+            GetRespectiveObject.behaviour = this;
+            Transform = other.Transform;
+            Transform.Init(this);
+        }
+        return *this;
     }
 
     GameObject* m_owner = nullptr;
@@ -202,4 +314,5 @@ protected:
     std::vector<BehaviourProperty> m_properties;
 
     friend struct RespectiveObjectAccessor;
+    friend struct BehaviourTransformProperty;
 };
