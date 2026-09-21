@@ -2023,6 +2023,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                                     obj->metallicTexture = ma.metallicTexture;
                                     obj->aoTexture = ma.aoTexture;
                                     obj->emissionTexture = ma.emissionTexture;
+                                    obj->uvScale = ma.uvScale;
                                     AddLog("LogMaterial", "Assigned material '" + m.name + "' (" + m.relPath + ") to Actor '" + obj->name + "'", 2);
                                 }
                             }
@@ -2081,6 +2082,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                                         obj->metallicTexture = ma.metallicTexture;
                                         obj->aoTexture = ma.aoTexture;
                                         obj->emissionTexture = ma.emissionTexture;
+                                        obj->uvScale = ma.uvScale;
                                         AddLog("LogMaterial", "Assigned material '" + m.name + "' (" + m.relPath + ") to Actor '" + obj->name + "'", 2);
                                     }
                                 }
@@ -2129,6 +2131,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                             obj->metallicTexture = ma.metallicTexture;
                             obj->aoTexture = ma.aoTexture;
                             obj->emissionTexture = ma.emissionTexture;
+                            obj->uvScale = ma.uvScale;
                             AddLog("LogMaterial", "Assigned Material '" + ma.name + "' via Drag & Drop", 2);
                         }
                     }
@@ -2168,6 +2171,16 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::SetTooltip("View Material in Asset Reference Viewer (dev.md Section 33)");
             }
 
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "Actor UV Tiling (UV Scale):");
+            ImGui::DragFloat2("UV Scale##ActorUV", &obj->uvScale.x, 0.05f, 0.001f, 100.0f, "%.2f");
+            ImGui::DragFloat("Tiling X (U)##ActorUVX", &obj->uvScale.x, 0.05f, 0.001f, 100.0f, "%.2f");
+            ImGui::DragFloat("Tiling Y (V)##ActorUVY", &obj->uvScale.y, 0.05f, 0.001f, 100.0f, "%.2f");
+            ImGui::SameLine();
+            if (ImGui::Button("Reset##ActorUVReset")) {
+                obj->uvScale = glm::vec2(1.0f, 1.0f);
+            }
             ImGui::Spacing();
             if (ImGui::Button("🎨 Open in Material Editor", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
                 std::string targetPath = "";
@@ -2433,6 +2446,10 @@ bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) 
         else if (key == "receiveShadows") {
             outMat.receiveShadows = (val == "1" || val == "true");
         }
+        else if (key == "uvScale" || key == "uvscale" || key == "tiling") {
+            std::stringstream ss(val);
+            ss >> outMat.uvScale.x >> outMat.uvScale.y;
+        }
         else if (key == "baseColorAssetId") outMat.baseColorAssetId = AssetID::FromString(val);
         else if (key == "normalAssetId") outMat.normalAssetId = AssetID::FromString(val);
         else if (key == "roughnessAssetId") outMat.roughnessAssetId = AssetID::FromString(val);
@@ -2496,6 +2513,7 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
     file << "twoSided: " << (mat.twoSided ? 1 : 0) << "\n";
     file << "castShadows: " << (mat.castShadows ? 1 : 0) << "\n";
     file << "receiveShadows: " << (mat.receiveShadows ? 1 : 0) << "\n";
+    file << "uvScale: " << mat.uvScale.x << " " << mat.uvScale.y << "\n";
     if (mat.baseColorAssetId.IsValid()) file << "baseColorAssetId: " << mat.baseColorAssetId.ToString() << "\n";
     file << "baseColorTexture: " << mat.baseColorTexture << "\n";
     if (mat.normalAssetId.IsValid()) file << "normalAssetId: " << mat.normalAssetId.ToString() << "\n";
@@ -2566,6 +2584,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                         obj.metallicTexture = activeMaterial.metallicTexture;
                         obj.aoTexture = activeMaterial.aoTexture;
                         obj.emissionTexture = activeMaterial.emissionTexture;
+                        obj.uvScale = activeMaterial.uvScale;
                         updatedCount++;
                     }
                 }
@@ -2589,6 +2608,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     sel->metallicTexture = activeMaterial.metallicTexture;
                     sel->aoTexture = activeMaterial.aoTexture;
                     sel->emissionTexture = activeMaterial.emissionTexture;
+                    sel->uvScale = activeMaterial.uvScale;
                 }
                 AddLog("LogMaterial", "Saved Material to " + activeMaterial.filePath + " (Reflected in " + std::to_string(updatedCount) + " actors in viewport)", 2);
             }
@@ -2616,6 +2636,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                 sel->metallicTexture = activeMaterial.metallicTexture;
                 sel->aoTexture = activeMaterial.aoTexture;
                 sel->emissionTexture = activeMaterial.emissionTexture;
+                sel->uvScale = activeMaterial.uvScale;
                 AddLog("LogMaterial", "Applied material '" + activeMaterial.name + "' to Actor '" + sel->name + "'", 2);
             } else {
                 AddLog("LogMaterial", "No Actor currently selected to apply material.", 1);
@@ -2841,6 +2862,22 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (ImGui::SliderFloat("Emission Power", &activeMaterial.emissiveIntensity, 0.0f, 30.0f, "%.2f")) {
                 materialDirty = true;
             }
+            ImGui::Separator();
+            ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "UV Tiling (UV Scale):");
+            if (ImGui::DragFloat2("UV Scale (X, Y)", &activeMaterial.uvScale.x, 0.05f, 0.001f, 100.0f, "%.2f")) {
+                materialDirty = true;
+            }
+            if (ImGui::DragFloat("Tiling X (U)", &activeMaterial.uvScale.x, 0.05f, 0.001f, 100.0f, "%.2f")) {
+                materialDirty = true;
+            }
+            if (ImGui::DragFloat("Tiling Y (V)", &activeMaterial.uvScale.y, 0.05f, 0.001f, 100.0f, "%.2f")) {
+                materialDirty = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset (1, 1)##MatUVReset")) {
+                activeMaterial.uvScale = glm::vec2(1.0f, 1.0f);
+                materialDirty = true;
+            }
             ImGui::Spacing();
         }
 
@@ -2895,6 +2932,7 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     obj.metallicTexture = activeMaterial.metallicTexture;
                     obj.aoTexture = activeMaterial.aoTexture;
                     obj.emissionTexture = activeMaterial.emissionTexture;
+                    obj.uvScale = activeMaterial.uvScale;
                 }
             }
         }
@@ -3502,6 +3540,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                             sel->metallicTexture = ma.metallicTexture;
                                             sel->aoTexture = ma.aoTexture;
                                             sel->emissionTexture = ma.emissionTexture;
+                                            sel->uvScale = ma.uvScale;
                                             AddLog("LogMaterial", "Applied material '" + ma.name + "' to Actor '" + sel->name + "'", 2);
                                         }
                                     }

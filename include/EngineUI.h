@@ -52,6 +52,9 @@ struct MaterialAsset {
     glm::vec3 emissiveColor{0.0f, 0.0f, 0.0f};
     float emissiveIntensity = 0.0f; // Emission Power
 
+    // UV Tiling / Scale (default 1.0, 1.0)
+    glm::vec2 uvScale{1.0f, 1.0f};
+
     // Settings (from dev.md)
     int shadingModel = 0; // 0=PBR (Default Lit), 1=Unlit, 2=Subsurface
     int blendMode = 0;    // 0=Opaque, 1=Masked, 2=Translucent
