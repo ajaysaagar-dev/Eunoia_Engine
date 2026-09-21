@@ -1,0 +1,38 @@
+{
+    "configurations": [
+        {
+            "name": "Eunoia-Engine",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/include",
+                "${workspaceFolder}/EngineCore/include",
+                "${workspaceFolder}/EnginePlatform/include",
+                "${workspaceFolder}/EngineRHI/include",
+                "${workspaceFolder}/EngineRenderer/include",
+                "${workspaceFolder}/EngineScene/include",
+                "${workspaceFolder}/EngineAssets/include",
+                "${workspaceFolder}/Editor/include",
+                "${workspaceFolder}/deps/tinyobj",
+                "${workspaceFolder}/deps/cgltf",
+                "${workspaceFolder}/deps/ufbx",
+                "${workspaceFolder}/deps/imgui",
+                "${workspaceFolder}/deps/imgui/backends",
+                "${workspaceFolder}/deps/glfw-3.5.1.bin.WIN64/include",
+                "${workspaceFolder}/deps/glm",
+                "${workspaceFolder}/Content/**"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "WIN32_LEAN_AND_MEAN",
+                "NOMINMAX"
+            ],
+            "compilerPath": "${workspaceFolder}/tools/w64devkit/bin/g++.exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-gcc-x64"
+        }
+    ],
+    "version": 4
+}
