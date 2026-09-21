@@ -36,6 +36,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui...
     "%PROJECT_DIR%\src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Cube.cpp" ^
     "%PROJECT_DIR%\src\EngineUI.cpp" ^
+    "%PROJECT_DIR%\src\EunoiaBehaviour.cpp" ^
     "%PROJECT_DIR%\src\TextureManager.cpp" ^
     "%PROJECT_DIR%\src\AssetRegistry.cpp" ^
     "%PROJECT_DIR%\src\AssetManager.cpp" ^

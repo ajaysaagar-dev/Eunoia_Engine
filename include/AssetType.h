@@ -17,6 +17,7 @@ enum class AssetType {
     Font,
     Particle,
     Script,
+    Behaviour,
     Data
 };
 
@@ -34,6 +35,7 @@ inline const char* AssetTypeToString(AssetType type) {
         case AssetType::Font:         return "Font";
         case AssetType::Particle:     return "Particle";
         case AssetType::Script:       return "Script";
+        case AssetType::Behaviour:    return "Behaviour";
         case AssetType::Data:         return "Data";
         default:                      return "Unknown";
     }
@@ -54,6 +56,7 @@ inline AssetType StringToAssetType(const std::string& str) {
     if (s == "font")         return AssetType::Font;
     if (s == "particle")     return AssetType::Particle;
     if (s == "script")       return AssetType::Script;
+    if (s == "behaviour")    return AssetType::Behaviour;
     if (s == "data")         return AssetType::Data;
     return AssetType::Unknown;
 }
@@ -87,6 +90,9 @@ inline AssetType DetectAssetTypeFromExtension(const std::string& ext) {
     if (e == "ttf" || e == "otf") {
         return AssetType::Font;
     }
+    if (e == "behaviour" || e == "cpp" || e == "h") {
+        return AssetType::Behaviour;
+    }
     return AssetType::Unknown;
 }
 
@@ -104,6 +110,7 @@ inline const char* GetAssetTypeIcon(AssetType type) {
         case AssetType::Font:         return "🔤";
         case AssetType::Particle:     return "✨";
         case AssetType::Script:       return "📜";
+        case AssetType::Behaviour:    return "🧩";
         case AssetType::Data:         return "📊";
         default:                      return "📄";
     }

@@ -105,6 +105,7 @@ target_link_libraries(EngineRenderer INTERFACE EngineRHI EngineScene EngineCore)
 set(EDITOR_SOURCES
     ${EUNOIA_ROOT}/Cube.cpp
     ${EUNOIA_ROOT}/src/EngineUI.cpp
+    ${EUNOIA_ROOT}/src/EunoiaBehaviour.cpp
     ${EUNOIA_ROOT}/src/TextureManager.cpp
     # ImGui
     ${EUNOIA_DEPS}/imgui/imgui.cpp
