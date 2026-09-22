@@ -541,65 +541,142 @@ static void DumpDREDInformation()
 	EngineLogger::Get().LogError("DirectX12", 0x887A0006, "DXGI_ERROR_DEVICE_HUNG / GPU Page Fault", logStream.str());
 }
 
+static std::vector<ID3D12Resource*> g_deferredReleases;
+
+void SafeDeferredRelease(ID3D12Resource*& pRes)
+{
+	if (pRes)
+	{
+		g_deferredReleases.push_back(pRes);
+		pRes = nullptr;
+	}
+}
+
+void FlushDeferredReleases()
+{
+	if (g_deferredReleases.empty()) return;
+	for (auto* res : g_deferredReleases)
+	{
+		if (res)
+		{
+			res->Release();
+		}
+	}
+	g_deferredReleases.clear();
+}
+
 bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle, DWORD timeoutMs = 5000, const char* context = "GPU Fence")
 {
 	if (!fence || !eventHandle || g_deviceLost) return false;
 
 	if (fence->GetCompletedValue() >= targetValue) return true;
 
+	ResetEvent(eventHandle);
 	fence->SetEventOnCompletion(targetValue, eventHandle);
-	DWORD waitRes = WaitForSingleObject(eventHandle, timeoutMs);
 
-	if (waitRes == WAIT_TIMEOUT)
+	while (fence->GetCompletedValue() < targetValue)
 	{
-		std::cerr << "[RECOVERY] Engine detected stall at " << context << " (target fence: " << targetValue
-		          << ", completed: " << fence->GetCompletedValue() << ", timeout: " << timeoutMs << "ms)!\n";
+		DWORD waitRes = WaitForSingleObject(eventHandle, timeoutMs);
 
-		HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
-		if (FAILED(removedReason))
+		if (waitRes == WAIT_OBJECT_0)
 		{
-			g_deviceLost = true;
-			std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
-			DumpDREDInformation();
-			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
+			if (fence->GetCompletedValue() >= targetValue)
+			{
+				return true;
+			}
+		}
+		else if (waitRes == WAIT_TIMEOUT)
+		{
+			std::cerr << "[RECOVERY] Engine detected stall at " << context << " (target fence: " << targetValue
+			          << ", completed: " << fence->GetCompletedValue() << ", timeout: " << timeoutMs << "ms)!\n";
+
+			HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+			if (FAILED(removedReason))
+			{
+				g_deviceLost = true;
+				std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
+				DumpDREDInformation();
+				g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
+				return false;
+			}
+
+			// Try a secondary wait of 3000ms before giving up
+			DWORD waitRetry = WaitForSingleObject(eventHandle, 3000);
+			if (waitRetry == WAIT_OBJECT_0 && fence->GetCompletedValue() >= targetValue)
+			{
+				return true;
+			}
+
+			removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+			if (FAILED(removedReason))
+			{
+				g_deviceLost = true;
+				std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
+				DumpDREDInformation();
+				g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
+			}
+			else
+			{
+				g_engineUI.AddLog("LogRecovery", std::string("Engine wait timeout at ") + context + ". GPU is taking longer than expected.", 1);
+			}
+
 			return false;
-		}
-
-		// Try a secondary wait of 3000ms before giving up
-		DWORD waitRetry = WaitForSingleObject(eventHandle, 3000);
-		if (waitRetry == WAIT_OBJECT_0 || fence->GetCompletedValue() >= targetValue)
-		{
-			return true;
-		}
-
-		removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
-		if (FAILED(removedReason))
-		{
-			g_deviceLost = true;
-			std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
-			DumpDREDInformation();
-			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
 		}
 		else
 		{
-			g_engineUI.AddLog("LogRecovery", std::string("Engine wait timeout at ") + context + ". GPU is taking longer than expected.", 1);
+			break;
 		}
-
-		return false;
 	}
 
-	return true;
+	return fence->GetCompletedValue() >= targetValue;
 }
 
 void WaitForGpuIdle()
 {
-	if (!g_commandQueue || !g_fence || !g_fenceEvent || g_deviceLost) return;
-	g_globalFenceValue++;
-	g_commandQueue->Signal(g_fence, g_globalFenceValue);
-	SafeWaitForFence(g_fence, g_globalFenceValue, g_fenceEvent, 5000, "WaitForGpuIdle");
+	if (!g_commandQueue || !g_fence || g_deviceLost) return;
+
+	const UINT64 fenceToWait = ++g_globalFenceValue;
+	HRESULT hr = g_commandQueue->Signal(g_fence, fenceToWait);
+	if (FAILED(hr)) return;
+
+	if (g_fence->GetCompletedValue() < fenceToWait)
+	{
+		HANDLE tempEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (tempEvent)
+		{
+			hr = g_fence->SetEventOnCompletion(fenceToWait, tempEvent);
+			if (SUCCEEDED(hr))
+			{
+				while (g_fence->GetCompletedValue() < fenceToWait)
+				{
+					DWORD res = WaitForSingleObject(tempEvent, 5000);
+					if (res == WAIT_OBJECT_0)
+					{
+						break;
+					}
+					else if (res == WAIT_TIMEOUT)
+					{
+						HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+						if (FAILED(removedReason))
+						{
+							g_deviceLost = true;
+							DumpDREDInformation();
+							break;
+						}
+					}
+					else
+					{
+						break;
+					}
+				}
+			}
+			CloseHandle(tempEvent);
+		}
+	}
+
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
-		g_fenceValues[i] = g_globalFenceValue;
+		g_fenceValues[i] = fenceToWait;
 	}
 }
 
@@ -911,8 +988,10 @@ int createDepthStencilView(int width, int height)
 	return EXIT_SUCCESS;
 }
 
-int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1024)
+int createDirectionalShadowResource(UINT dirRes = 2048)
 {
+	if (!g_d3dDevice) return EXIT_FAILURE;
+
 	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
 		if (r < 256) r = 256;
 		if (r > 4096) r = 4096;
@@ -923,18 +1002,11 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 		return 4096;
 	};
 	dirRes = SnapRes(dirRes, 2048);
-	ptRes = SnapRes(ptRes, 512);
-	spotRes = SnapRes(spotRes, 1024);
+
+	// Defer release of prior buffer
+	SafeDeferredRelease(g_shadowDepthBuffer);
 
 	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
-
-	// 1. Directional Shadow Map (Texture2D)
-	if (g_shadowDepthBuffer)
-	{
-		g_shadowDepthBuffer->Release();
-		g_shadowDepthBuffer = nullptr;
-	}
-
 	D3D12_RESOURCE_DESC depthDesc = {};
 	depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	depthDesc.Alignment = 0;
@@ -997,16 +1069,27 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 	g_d3dDevice->CreateShaderResourceView(g_shadowDepthBuffer, &srvDesc, g_shadowSrvCpuHandle);
 
 	g_currentDirShadowRes = dirRes;
+	return EXIT_SUCCESS;
+}
 
-	// ------------------------------------------------------------------------
-	// 2. Point Light Shadow Cubemap Array Texture (ptRes x ptRes, 4 lights * 6 faces = 24 slices)
-	// ------------------------------------------------------------------------
-	if (g_pointShadowDepthBuffer)
-	{
-		g_pointShadowDepthBuffer->Release();
-		g_pointShadowDepthBuffer = nullptr;
-	}
+int createPointShadowResource(UINT ptRes = 512)
+{
+	if (!g_d3dDevice) return EXIT_FAILURE;
 
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	ptRes = SnapRes(ptRes, 512);
+
+	SafeDeferredRelease(g_pointShadowDepthBuffer);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC ptDepthDesc = {};
 	ptDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	ptDepthDesc.Alignment = 0;
@@ -1025,7 +1108,7 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 	ptDepthClear.DepthStencil.Depth = 1.0f;
 	ptDepthClear.DepthStencil.Stencil = 0;
 
-	hr = g_d3dDevice->CreateCommittedResource(
+	HRESULT hr = g_d3dDevice->CreateCommittedResource(
 		&heapProps,
 		D3D12_HEAP_FLAG_NONE,
 		&ptDepthDesc,
@@ -1077,16 +1160,27 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 	g_d3dDevice->CreateShaderResourceView(g_pointShadowDepthBuffer, &ptSrvDesc, g_pointShadowSrvCpuHandle);
 
 	g_currentPointShadowRes = ptRes;
+	return EXIT_SUCCESS;
+}
 
-	// ------------------------------------------------------------------------
-	// 3. Spot / Area Light Shadow 2D Array Texture (spotRes x spotRes, 4 slices)
-	// ------------------------------------------------------------------------
-	if (g_spotShadowDepthBuffer)
-	{
-		g_spotShadowDepthBuffer->Release();
-		g_spotShadowDepthBuffer = nullptr;
-	}
+int createSpotShadowResource(UINT spotRes = 1024)
+{
+	if (!g_d3dDevice) return EXIT_FAILURE;
 
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	spotRes = SnapRes(spotRes, 1024);
+
+	SafeDeferredRelease(g_spotShadowDepthBuffer);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC spotDepthDesc = {};
 	spotDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	spotDepthDesc.Alignment = 0;
@@ -1105,7 +1199,7 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 	spotDepthClear.DepthStencil.Depth = 1.0f;
 	spotDepthClear.DepthStencil.Stencil = 0;
 
-	hr = g_d3dDevice->CreateCommittedResource(
+	HRESULT hr = g_d3dDevice->CreateCommittedResource(
 		&heapProps,
 		D3D12_HEAP_FLAG_NONE,
 		&spotDepthDesc,
@@ -1157,10 +1251,16 @@ int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1
 	g_d3dDevice->CreateShaderResourceView(g_spotShadowDepthBuffer, &spotSrvDesc, g_spotShadowSrvCpuHandle);
 
 	g_currentSpotShadowRes = spotRes;
+	return EXIT_SUCCESS;
+}
 
-	// ------------------------------------------------------------------------
+int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1024)
+{
+	createDirectionalShadowResource(dirRes);
+	createPointShadowResource(ptRes);
+	createSpotShadowResource(spotRes);
+
 	// 4. Shadow Constant Buffer (upload heap: slot 0 for directional, slots 1..24 for point lights, slots 25..28 for spot lights)
-	// ------------------------------------------------------------------------
 	if (!g_shadowConstantBuffer)
 	{
 		UINT64 shadowCbSize = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + MAX_SHADOW_SPOT_LIGHTS) * 256;
@@ -1193,13 +1293,18 @@ void EnsureShadowBuffers(UINT reqDirRes, UINT reqPtRes, UINT reqSpotRes)
 	reqPtRes = SnapRes(reqPtRes, 512);
 	reqSpotRes = SnapRes(reqSpotRes, 1024);
 
-	if (reqDirRes != g_currentDirShadowRes ||
-		reqPtRes != g_currentPointShadowRes ||
-		reqSpotRes != g_currentSpotShadowRes ||
-		!g_shadowDepthBuffer || !g_pointShadowDepthBuffer || !g_spotShadowDepthBuffer)
+	bool needDir  = (!g_shadowDepthBuffer || reqDirRes != g_currentDirShadowRes);
+	bool needPt   = (!g_pointShadowDepthBuffer || reqPtRes != g_currentPointShadowRes);
+	bool needSpot = (!g_spotShadowDepthBuffer || reqSpotRes != g_currentSpotShadowRes);
+
+	if (needDir || needPt || needSpot)
 	{
 		WaitForGpuIdle();
-		createShadowResources(reqDirRes, reqPtRes, reqSpotRes);
+		FlushDeferredReleases();
+
+		if (needDir)  createDirectionalShadowResource(reqDirRes);
+		if (needPt)   createPointShadowResource(reqPtRes);
+		if (needSpot) createSpotShadowResource(reqSpotRes);
 	}
 }
 
@@ -2294,8 +2399,8 @@ void updateConstantBuffer()
 
 	// Dynamically ensure shadow buffer allocations match highest requested resolutions per light category
 	UINT reqDirRes = (UINT)g_scene.shadowResolution;
-	UINT reqPtRes = 512;
-	UINT reqSpotRes = 1024;
+	UINT reqPtRes = 0;
+	UINT reqSpotRes = 0;
 	for (const auto& pl : g_scene.pointLights)
 	{
 		if (!pl.enabled || !pl.castShadows) continue;
@@ -2308,6 +2413,8 @@ void updateConstantBuffer()
 			if ((UINT)pl.shadowResolution > reqSpotRes) reqSpotRes = (UINT)pl.shadowResolution;
 		}
 	}
+	if (reqPtRes == 0) reqPtRes = 512;
+	if (reqSpotRes == 0) reqSpotRes = 1024;
 	EnsureShadowBuffers(reqDirRes, reqPtRes, reqSpotRes);
 
 	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
@@ -2854,7 +2961,6 @@ void renderFrame()
 	// Wait if the next backbuffer is still in-flight
 	if (g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
 	{
-		g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
 		SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "renderFrame frame fence");
 	}
 }
@@ -2862,6 +2968,7 @@ void renderFrame()
 void cleanUpD3D12()
 {
 	WaitForGpuIdle();
+	FlushDeferredReleases();
 
 	ImGui_ImplDX12_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
@@ -3252,6 +3359,7 @@ bool RecoverD3D12Device(HWND hwnd)
 	EngineLogger::Get().LogAction("DEVICE_RECOVERY_START", "DirectX12", "Attempting full D3D12 device recreation.");
 
 	// 1. Release all mapped buffers and hardware resources
+	FlushDeferredReleases();
 	if (g_vertexBuffer) { g_vertexBuffer->Unmap(0, nullptr); g_vertexBuffer->Release(); g_vertexBuffer = nullptr; }
 	if (g_indexBuffer) { g_indexBuffer->Unmap(0, nullptr); g_indexBuffer->Release(); g_indexBuffer = nullptr; }
 	if (g_constantBuffer) { g_constantBuffer->Unmap(0, nullptr); g_constantBuffer->Release(); g_constantBuffer = nullptr; }
@@ -3696,7 +3804,6 @@ int main()
 				// Synchronize: wait for the frame that previously used this backbuffer / upload buffers to finish on GPU
 				if (g_fence && g_fenceValues[g_frameIndex] > 0 && g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
 				{
-					g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
 					SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "Frame start buffer sync");
 				}
 
