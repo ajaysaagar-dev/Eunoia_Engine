@@ -294,6 +294,7 @@ public:
     uint64_t areaLightIconGpuHandle = 0;
     uint64_t skyLightIconGpuHandle = 0;
     uint64_t cameraIconGpuHandle = 0;
+    uint64_t engineIconGpuHandle = 0;
 
     uint64_t GetLightIconGpuHandle(LightType type) const {
         switch (type) {

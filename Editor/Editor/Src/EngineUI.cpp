@@ -349,6 +349,21 @@ std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
     glfwMakeContextCurrent(browserWindow);
     glfwSwapInterval(1); // VSync on
 
+#ifdef _WIN32
+    HWND browserHwnd = glfwGetWin32Window(browserWindow);
+    if (browserHwnd) {
+        HICON hIconBig = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+        HICON hIconSmall = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+        if (!hIconBig) hIconBig = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1));
+        if (!hIconSmall) {
+            hIconSmall = (HICON)LoadImageA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1), IMAGE_ICON, 16, 16, 0);
+            if (!hIconSmall) hIconSmall = hIconBig;
+        }
+        if (hIconBig) SendMessageA(browserHwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+        if (hIconSmall) SendMessageA(browserHwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+    }
+#endif
+
     // Center the window on the primary monitor
     GLFWmonitor* monitor = glfwGetPrimaryMonitor();
     if (monitor) {
@@ -1897,6 +1912,10 @@ void EngineUI::RenderCustomTitleBar(Scene& scene, bool& outShouldExit) {
         ImGui::SetCursorPosY(5.0f);
 
         // 1. Engine Logo & Brand Badge
+        if (engineIconGpuHandle) {
+            ImGui::Image((ImTextureID)engineIconGpuHandle, ImVec2(18.0f, 18.0f));
+            ImGui::SameLine(0.0f, 6.0f);
+        }
         ImGui::TextColored(ImVec4(0.12f, 0.72f, 1.00f, 1.0f), "[Eunoia]");
         ImGui::SameLine();
         ImGui::TextDisabled("|");

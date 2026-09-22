@@ -3548,6 +3548,8 @@ bool RecoverD3D12Device(HWND hwnd)
 
 	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
+	DX12GpuTexture engineIcon = GetOrLoadGPUTexture("Resources/Icons/eunoia.png", g_fallbackWhite);
+	g_engineUI.engineIconGpuHandle = engineIcon.gpuHandle.ptr;
 
 	// 5. Pre-upload textures & rebuild scene geometry
 	PreRenderUploadTextures();
@@ -3702,6 +3704,25 @@ int main()
 	SetupCustomWindowFrame(hwnd);
 	g_engineUI.SetWindow(g_window);
 
+#ifdef _WIN32
+	// Set window icon (both large for Taskbar/Alt-Tab and small for title bar / system menu)
+	HICON hIconBig = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+	HICON hIconSmall = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+	if (!hIconBig) {
+		hIconBig = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1));
+	}
+	if (!hIconSmall) {
+		hIconSmall = (HICON)LoadImageA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1), IMAGE_ICON, 16, 16, 0);
+		if (!hIconSmall) hIconSmall = hIconBig;
+	}
+	if (hIconBig) {
+		SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+	}
+	if (hIconSmall) {
+		SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+	}
+#endif
+
 	ShowWindow(hwnd, SW_SHOW);
 	UpdateWindow(hwnd);
 
@@ -3811,6 +3832,8 @@ int main()
 
 	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
+	DX12GpuTexture engineIcon = GetOrLoadGPUTexture("Resources/Icons/eunoia.png", g_fallbackWhite);
+	g_engineUI.engineIconGpuHandle = engineIcon.gpuHandle.ptr;
 	InputSystem::Get().SetupDefaultActions();
 
 	// Initialize EngineUI with the project selected from the standalone Project Browser window

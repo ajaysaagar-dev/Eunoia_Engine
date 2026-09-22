@@ -1,0 +1,4 @@
+// Eunoia Engine Application Resource Script
+// Defines the Windows executable icon and metadata
+
+1 ICON "Resources/Icons/eunoia.ico"

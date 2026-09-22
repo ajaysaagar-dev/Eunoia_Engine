@@ -31,7 +31,27 @@ if not exist "%COMPILER%" (
         set "COMPILER=g++"
     ) else (
         echo [ERROR] C++ compiler not found!
-        exit /b 1
+    )
+)
+
+set "WINDRES=%PROJECT_DIR%\tools\w64devkit\bin\windres.exe"
+if not exist "%WINDRES%" (
+    where windres >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "WINDRES=windres"
+    ) else (
+        set "WINDRES="
+    )
+)
+
+set "RES_OBJ="
+if defined WINDRES (
+    if exist "%WINDRES%" (
+        echo [INFO] Compiling Windows application icon resource...
+        "%WINDRES%" -I"%PROJECT_DIR%" -i "%PROJECT_DIR%\Editor\Editor\Src\Eunoia.rc" -O coff -o "%INTERMEDIATES_DIR%\Eunoia.res.o"
+        if exist "%INTERMEDIATES_DIR%\Eunoia.res.o" (
+            set "RES_OBJ=%INTERMEDIATES_DIR%\Eunoia.res.o"
+        )
     )
 )
 
@@ -86,6 +106,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
     -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 -ldwmapi ^
+    !RES_OBJ! ^
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (
@@ -163,6 +184,7 @@ echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
     "%PROJECT_DIR%\Runtime\Src\Main.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
     -lglfw3 -lgdi32 -lole32 -lshell32 ^
+    !RES_OBJ! ^
     -o "%GAME_BUILD_DIR%\test.exe"
 
 if !ERRORLEVEL! equ 0 (
