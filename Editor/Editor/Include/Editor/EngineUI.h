@@ -229,6 +229,11 @@ public:
     // Initialize EngineUI with a pre-selected project path (called after standalone project browser)
     void InitWithProject(const std::filesystem::path& projectPath, Scene& scene, OrbitCamera& camera);
 
+    // Dynamic layout splitters and Configs.Editor.econfigs management
+    void LoadEditorConfig();
+    void SaveEditorConfig();
+    void RenderLayoutSplitters();
+
     // Standalone Project Browser window (runs before editor, returns selected project path or empty)
     static std::filesystem::path RunStandaloneProjectBrowser();
 

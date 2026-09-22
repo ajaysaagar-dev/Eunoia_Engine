@@ -202,12 +202,73 @@ void EngineUI::InitWithProject(const std::filesystem::path& projectPath, Scene& 
         currentContentPath = contentRootPath;
         TextureManager::Get().SetProjectRoot(contentRootPath);
         AssetManager::Get().Initialize(contentRootPath);
+        LoadEditorConfig();
         return;
     }
 
     // Load the selected project
     LoadProject(projectPath, scene, camera);
     AddLog("LogWorld", "Project loaded from standalone browser: " + activeProjectName, 2);
+}
+
+void EngineUI::LoadEditorConfig() {
+    if (activeProjectRoot.empty()) return;
+    std::filesystem::path configPath = activeProjectRoot / "Configs.Editor.econfigs";
+    std::error_code ec;
+    if (!std::filesystem::exists(configPath, ec)) {
+        // If config doesn't exist yet, save current defaults to create it in the project root
+        SaveEditorConfig();
+        return;
+    }
+
+    std::ifstream file(configPath);
+    if (!file.is_open()) return;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t eqPos = line.find('=');
+        if (eqPos == std::string::npos) continue;
+
+        std::string key = line.substr(0, eqPos);
+        std::string val = line.substr(eqPos + 1);
+
+        auto Trim = [](std::string& s) {
+            s.erase(0, s.find_first_not_of(" \t\r\n"));
+            size_t last = s.find_last_not_of(" \t\r\n");
+            if (last != std::string::npos) s.erase(last + 1);
+        };
+        Trim(key);
+        Trim(val);
+
+        try {
+            float fVal = std::stof(val);
+            if (key == "LeftSidebarWidth" || key == "leftSidebarWidth") {
+                leftSidebarWidth = std::clamp(fVal, 180.0f, 800.0f);
+            } else if (key == "RightSidebarWidth" || key == "rightSidebarWidth") {
+                rightSidebarWidth = std::clamp(fVal, 200.0f, 900.0f);
+            } else if (key == "BottomDockHeight" || key == "bottomDockHeight" || key == "BottomContentHeight") {
+                bottomDockHeight = std::clamp(fVal, 100.0f, 800.0f);
+            }
+        } catch (...) {
+            // Ignore format errors
+        }
+    }
+}
+
+void EngineUI::SaveEditorConfig() {
+    if (activeProjectRoot.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(activeProjectRoot, ec)) return;
+
+    std::filesystem::path configPath = activeProjectRoot / "Configs.Editor.econfigs";
+    std::ofstream file(configPath);
+    if (!file.is_open()) return;
+
+    file << "[EditorLayout]\n";
+    file << "LeftSidebarWidth=" << leftSidebarWidth << "\n";
+    file << "RightSidebarWidth=" << rightSidebarWidth << "\n";
+    file << "BottomDockHeight=" << bottomDockHeight << "\n";
+    file.close();
 }
 
 // ================================================================================
@@ -732,6 +793,19 @@ std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
             SaveMaterialFile(defaultMatPath.string(), defaultMat);
         }
 
+        // 4. Initial Configs.Editor.econfigs in project root
+        std::filesystem::path cfgPath = root / "Configs.Editor.econfigs";
+        if (!std::filesystem::exists(cfgPath, ec)) {
+            std::ofstream cf(cfgPath);
+            if (cf.is_open()) {
+                cf << "[EditorLayout]\n";
+                cf << "LeftSidebarWidth=280.0\n";
+                cf << "RightSidebarWidth=320.0\n";
+                cf << "BottomDockHeight=260.0\n";
+                cf.close();
+            }
+        }
+
         // Update recent projects config
         {
             time_t now = time(nullptr);
@@ -1104,6 +1178,7 @@ bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, 
 
     activeProjectRoot = std::filesystem::absolute(projRoot);
     activeProjectName = activeProjectRoot.filename().string();
+    LoadEditorConfig();
 
     // The in-engine-editor content browser root is inside project's folder called Content!
     contentRootPath = activeProjectRoot / "Content";
@@ -1682,6 +1757,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         RenderContentBrowser(scene);
     }
 
+    // Dynamic splitters to resize Left Sidebar, Right Sidebar, and Bottom Content Browser
+    RenderLayoutSplitters();
+
     // 5. Central 3D Viewport Overlay & Drop Target
     if (showViewportOverlay) {
         RenderViewportOverlay(scene, camera, fps, frameTimeMs);
@@ -1860,6 +1938,14 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 ImGui::MenuItem("Details (Right Sidebar)", nullptr, &showDetails);
                 ImGui::MenuItem("Content Browser (Bottom Dock)", nullptr, &showBottomDrawer);
                 ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
+                ImGui::Separator();
+                if (ImGui::MenuItem("↺ Reset Layout to Default")) {
+                    leftSidebarWidth = 280.0f;
+                    rightSidebarWidth = 320.0f;
+                    bottomDockHeight = 260.0f;
+                    SaveEditorConfig();
+                    AddLog("LogEditor", "Reset editor layout to defaults (280 / 320 / 260)", 0);
+                }
                 ImGui::Separator();
                 ImGui::MenuItem("📜 Undo History (52 Steps)", nullptr, &showUndoHistory);
                 ImGui::MenuItem("🎨 Material Editor", nullptr, &showMaterialEditor);
@@ -5193,6 +5279,125 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
         }
     }
     ImGui::End();
+}
+
+void EngineUI::RenderLayoutSplitters() {
+    if (isImmersiveMode) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (!vp || vp->Size.x <= 10.0f || vp->Size.y <= 10.0f) return;
+
+    float margin = uiMargin;
+    float gap = uiGap;
+
+    float curBottomH = (showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f);
+    float bottomY = vp->Pos.y + vp->Size.y - curBottomH - margin;
+    float sidebarsY = vp->Pos.y + margin + topBarHeight + gap;
+    float sidebarsH = (curBottomH > 0.0f) ? (bottomY - gap - sidebarsY) : (vp->Pos.y + vp->Size.y - margin - sidebarsY);
+
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    bool mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    bool mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+
+    static bool s_dragLeft = false;
+    static bool s_dragRight = false;
+    static bool s_dragBottom = false;
+
+    // 1. Left Sidebar Splitter (adjusts leftSidebarWidth)
+    if (showOutliner) {
+        float splitX = vp->Pos.x + margin + leftSidebarWidth;
+        bool inLeftHit = (mousePos.x >= splitX - 5.0f && mousePos.x <= splitX + 5.0f &&
+                          mousePos.y >= sidebarsY && mousePos.y <= sidebarsY + sidebarsH);
+
+        if (!s_dragRight && !s_dragBottom) {
+            if (inLeftHit && mouseClicked) s_dragLeft = true;
+        }
+
+        if (s_dragLeft) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                float delta = ImGui::GetIO().MouseDelta.x;
+                if (delta != 0.0f) {
+                    float maxW = vp->Size.x - rightSidebarWidth - 250.0f;
+                    leftSidebarWidth = std::clamp(leftSidebarWidth + delta, 180.0f, std::max(200.0f, maxW));
+                }
+                drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragLeft = false;
+                SaveEditorConfig();
+            }
+        } else if (inLeftHit && !s_dragRight && !s_dragBottom) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
+
+    // 2. Right Sidebar Splitter (adjusts rightSidebarWidth)
+    if (showDetails) {
+        float splitX = vp->Pos.x + vp->Size.x - rightSidebarWidth - margin;
+        bool inRightHit = (mousePos.x >= splitX - 5.0f && mousePos.x <= splitX + 5.0f &&
+                           mousePos.y >= sidebarsY && mousePos.y <= sidebarsY + sidebarsH);
+
+        if (!s_dragLeft && !s_dragBottom) {
+            if (inRightHit && mouseClicked) s_dragRight = true;
+        }
+
+        if (s_dragRight) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                float delta = ImGui::GetIO().MouseDelta.x;
+                if (delta != 0.0f) {
+                    float maxW = vp->Size.x - leftSidebarWidth - 250.0f;
+                    rightSidebarWidth = std::clamp(rightSidebarWidth - delta, 200.0f, std::max(220.0f, maxW));
+                }
+                drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragRight = false;
+                SaveEditorConfig();
+            }
+        } else if (inRightHit && !s_dragLeft && !s_dragBottom) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
+
+    // 3. Bottom Content Browser Splitter (adjusts bottomDockHeight)
+    if (showBottomDrawer && bottomDrawerOpen) {
+        float splitY = bottomY;
+        float startX = vp->Pos.x + margin;
+        float endX = vp->Pos.x + vp->Size.x - margin;
+        bool inBottomHit = (mousePos.y >= splitY - 5.0f && mousePos.y <= splitY + 5.0f &&
+                            mousePos.x >= startX && mousePos.x <= endX);
+
+        if (!s_dragLeft && !s_dragRight) {
+            if (inBottomHit && mouseClicked) s_dragBottom = true;
+        }
+
+        if (s_dragBottom) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                float delta = ImGui::GetIO().MouseDelta.y;
+                if (delta != 0.0f) {
+                    float maxH = vp->Size.y - topBarHeight - 120.0f;
+                    bottomDockHeight = std::clamp(bottomDockHeight - delta, 100.0f, std::max(150.0f, maxH));
+                }
+                drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragBottom = false;
+                SaveEditorConfig();
+            }
+        } else if (inBottomHit && !s_dragLeft && !s_dragRight) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
 }
 
 void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidth, float viewportHeight) {
