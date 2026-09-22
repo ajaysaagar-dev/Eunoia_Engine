@@ -17,6 +17,13 @@ add_executable(AssetRegistryTest
 target_link_libraries(AssetRegistryTest PRIVATE EngineAssets EngineCore)
 add_test(NAME AssetRegistryTest COMMAND AssetRegistryTest)
 
+add_executable(ProjectSetupTest
+    EngineAssets/ProjectSetupTest.cpp
+)
+target_include_directories(ProjectSetupTest PRIVATE ${EUNOIA_DEPS}/json)
+target_link_libraries(ProjectSetupTest PRIVATE EngineAssets EngineCore)
+add_test(NAME ProjectSetupTest COMMAND ProjectSetupTest)
+
 # EngineScene Tests
 add_executable(SceneTest
     EngineScene/SceneTest.cpp

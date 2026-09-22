@@ -81,7 +81,32 @@ public:
     int bottomDrawerTab = 0;
     bool bottomDrawerOpen = true;
 
-    // Content Browser project root & navigation
+    // Project Management & Browser
+    struct ProjectEntry {
+        std::string name;
+        std::string rootPath;
+        std::string lastOpened;
+    };
+
+    bool showProjectBrowser = true;
+    int projectBrowserTab = 0; // 0 = Recent Projects, 1 = New Project
+    char newProjectNameBuf[64] = "MyProject";
+    char newProjectPathBuf[260] = "C:\\Projects\\Eunoia-Engine\\Projects";
+    char projectBrowserSearchBuf[64] = "";
+    int selectedProjectIndex = 0;
+
+    std::filesystem::path activeProjectRoot;
+    std::string activeProjectName = "";
+    std::vector<ProjectEntry> recentProjects;
+
+    void LoadRecentProjects();
+    void SaveRecentProjects();
+    bool CreateNewProject(const std::string& parentDir, const std::string& projName, Scene& scene, OrbitCamera& camera);
+    bool LoadProject(const std::filesystem::path& projRoot, Scene& scene, OrbitCamera& camera);
+    static std::string ShowSelectFolderDialog(void* owner = nullptr, const std::string& title = "Select Project Location");
+    static std::string ShowOpenProjectFileDialog();
+
+    // Content Browser project root & navigation (Root is in project's folder inside Content)
     std::filesystem::path contentRootPath;
     std::filesystem::path currentContentPath;
     char contentBrowserSearch[64] = "";
@@ -299,6 +324,7 @@ private:
     void RenderCookModal();
     void RenderHelpModal();
     void RenderLoadingModal();
+    void RenderProjectBrowser(Scene& scene, OrbitCamera& camera);
 
     // Custom UE5-style UI widgets
     bool DrawTransformPill(const char* label, float& value, const glm::vec4& color, float resetValue = 0.0f, float speed = 0.05f);

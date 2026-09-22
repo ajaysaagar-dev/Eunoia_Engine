@@ -9,13 +9,19 @@ set "OUTPUT_DIR=%BUILD_ROOT%\Engine"
 set "INTERMEDIATES_DIR=%BUILD_ROOT%\Intermediates"
 set "TESTS_BUILD_DIR=%BUILD_ROOT%\Tests"
 set "RUNTIME_BUILD_DIR=%BUILD_ROOT%\Runtime"
-set "GAME_BUILD_DIR=%PROJECT_DIR%\Projects\test\Build"
+if exist "%PROJECT_DIR%\..\Projects" (
+    set "PROJECTS_ROOT=%PROJECT_DIR%\..\Projects"
+) else (
+    set "PROJECTS_ROOT=%PROJECT_DIR%\Projects"
+)
+set "GAME_BUILD_DIR=%PROJECTS_ROOT%\test\Build"
 
 if not exist "%BUILD_ROOT%" mkdir "%BUILD_ROOT%"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if not exist "%INTERMEDIATES_DIR%" mkdir "%INTERMEDIATES_DIR%"
 if not exist "%TESTS_BUILD_DIR%" mkdir "%TESTS_BUILD_DIR%"
 if not exist "%RUNTIME_BUILD_DIR%" mkdir "%RUNTIME_BUILD_DIR%"
+if not exist "%PROJECTS_ROOT%" mkdir "%PROJECTS_ROOT%"
 if not exist "%GAME_BUILD_DIR%" mkdir "%GAME_BUILD_DIR%"
 
 set "COMPILER=%PROJECT_DIR%\tools\w64devkit\bin\g++.exe"
@@ -56,7 +62,6 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\Engine\EngineScene\Src\EunoiaBehaviour.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\Main.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\EngineUI.cpp" ^
-    "%PROJECT_DIR%\Projects\test\Behaviours\Behaviours\FPS_Player.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_draw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_tables.cpp" ^
@@ -65,7 +70,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_dx12.cpp" ^
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 ^
+    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 ^
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (
@@ -142,19 +147,19 @@ if !ERRORLEVEL! equ 0 (
     xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Resources" "%GAME_BUILD_DIR%\Resources\" >nul 2>&1
 
     :: Copy project cooked content, scenes, levels, registry, materials, models, and behaviours
-    if exist "%PROJECT_DIR%\Projects\test\Cooked" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Cooked" "%GAME_BUILD_DIR%\Cooked\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Scenes" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Scenes" "%GAME_BUILD_DIR%\Scenes\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Levels" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Levels" "%GAME_BUILD_DIR%\Levels\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Registry" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Registry" "%GAME_BUILD_DIR%\Registry\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Materials" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Materials" "%GAME_BUILD_DIR%\Materials\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Models" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Models" "%GAME_BUILD_DIR%\Models\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Behaviours" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Behaviours" "%GAME_BUILD_DIR%\Behaviours\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Cooked" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Cooked" "%GAME_BUILD_DIR%\Cooked\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Scenes" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Scenes" "%GAME_BUILD_DIR%\Scenes\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Levels" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Levels" "%GAME_BUILD_DIR%\Levels\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Registry" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Registry" "%GAME_BUILD_DIR%\Registry\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Materials" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Materials" "%GAME_BUILD_DIR%\Materials\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Models" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Models" "%GAME_BUILD_DIR%\Models\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Behaviours" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Behaviours" "%GAME_BUILD_DIR%\Behaviours\" >nul 2>&1
 
     :: Copy project root files (*.emat, *.assetmeta, *.json, *.cpp)
-    copy /y "%PROJECT_DIR%\Projects\test\*.emat" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.assetmeta" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.json" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.cpp" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.emat" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.assetmeta" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.json" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.cpp" "%GAME_BUILD_DIR%\" >nul 2>&1
 
     (
     echo @echo off

@@ -25,6 +25,8 @@
 #include <EnginePlatform/InputSystem.h>
 #include <EngineScene/ScreenPrint.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <nlohmann/json.hpp>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
     if (a.objects.size() != b.objects.size()) return true;
@@ -161,25 +163,52 @@ EngineUI::EngineUI() {
     g_pEngineUI = this;
     AddLog("LogInit", "Eunoia-Editor Initialized (DirectX 12)", 2);
     AddLog("LogD3D12", "Hardware Adapter: NVIDIA GeForce RTX 3060 Laptop GPU (Feature Level 12_1)", 0);
-    AddLog("LogWorld", "Default Level loaded with 5 initial Actors", 0);
+    AddLog("LogWorld", "Default Level loaded with initial Actors", 0);
 
-    // Set C:\Projects\Eunoia-Engine\Projects\test as root of project for Content Browser
-    std::filesystem::path targetRoot = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    // Setup default projects directory
+    std::filesystem::path defaultProjectsDir = "C:\\Projects\\Eunoia-Engine\\Projects";
     std::error_code ec;
-    if (!std::filesystem::exists(targetRoot, ec)) {
-        std::filesystem::create_directories(targetRoot, ec);
+    if (!std::filesystem::exists(defaultProjectsDir, ec)) {
+        std::filesystem::path altProjectsDir = std::filesystem::current_path() / "Projects";
+        if (std::filesystem::exists(altProjectsDir, ec)) {
+            defaultProjectsDir = altProjectsDir;
+        } else {
+            std::filesystem::create_directories(defaultProjectsDir, ec);
+        }
     }
-    contentRootPath = targetRoot;
-    currentContentPath = targetRoot;
+    strncpy(newProjectPathBuf, defaultProjectsDir.string().c_str(), sizeof(newProjectPathBuf) - 1);
+
+    // Load recent projects
+    LoadRecentProjects();
+
+    // Default startup state: Open Project Browser Dialog Window!
+    showProjectBrowser = true;
+
+    // Determine initial project
+    std::filesystem::path initialProject;
+    if (!recentProjects.empty()) {
+        initialProject = recentProjects[0].rootPath;
+        selectedProjectIndex = 0;
+    } else {
+        initialProject = defaultProjectsDir / "test";
+    }
+
+    activeProjectRoot = initialProject;
+    activeProjectName = initialProject.filename().string();
+    contentRootPath = activeProjectRoot / "Content";
+    if (!std::filesystem::exists(contentRootPath, ec)) {
+        std::filesystem::create_directories(contentRootPath, ec);
+    }
+    currentContentPath = contentRootPath;
     TextureManager::Get().SetProjectRoot(contentRootPath);
 
-    // Ensure Materials folder exists in project
+    // Ensure Materials folder exists inside Content
     std::filesystem::path materialsDir = contentRootPath / "Materials";
     if (!std::filesystem::exists(materialsDir, ec)) {
         std::filesystem::create_directories(materialsDir, ec);
     }
 
-    // Ensure Default_Material.emat exists in gray color
+    // Ensure Default_Material.emat exists in Content/Materials
     std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
     if (!std::filesystem::exists(defaultMatPath, ec)) {
         MaterialAsset defaultMat;
@@ -194,7 +223,7 @@ EngineUI::EngineUI() {
         SaveMaterialFile(defaultMatPath.string(), defaultMat);
     }
 
-    // Initialize Asset System (dev.md Section 7, 9)
+    // Initialize Asset System with Content as root
     AssetManager::Get().Initialize(contentRootPath);
     AddLog("LogAsset", "Asset Registry initialized: " + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets registered with stable AssetIDs", 2);
 }
@@ -307,6 +336,294 @@ bool EngineUI::OpenLevelFromPath(Scene& level, const std::string& filePath) {
     }
 }
 
+std::string EngineUI::ShowSelectFolderDialog(void* owner, const std::string& title) {
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    BROWSEINFOA bi = { 0 };
+    bi.hwndOwner = (HWND)owner;
+    bi.lpszTitle = title.c_str();
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    std::string result = "";
+    if (pidl != 0) {
+        char path[MAX_PATH];
+        if (SHGetPathFromIDListA(pidl, path)) {
+            result = std::string(path);
+        }
+        IMalloc* imalloc = nullptr;
+        if (SUCCEEDED(SHGetMalloc(&imalloc)) && imalloc) {
+            imalloc->Free(pidl);
+            imalloc->Release();
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
+    }
+    return result;
+}
+
+std::string EngineUI::ShowOpenProjectFileDialog() {
+    OPENFILENAMEA ofn;
+    char szFile[260] = {0};
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "Eunoia Project (*.eproject)\0*.eproject\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 1;
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->activeProjectRoot.empty()) ? g_pEngineUI->activeProjectRoot.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn) == TRUE) {
+        return std::string(ofn.lpstrFile);
+    }
+    return "";
+}
+
+static std::filesystem::path GetRecentProjectsConfigPath() {
+    char* appdata = getenv("LOCALAPPDATA");
+    if (appdata) {
+        std::filesystem::path p = std::filesystem::path(appdata) / "EunoiaEngine" / "RecentProjects.json";
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        return p;
+    }
+    return "RecentProjects.json";
+}
+
+void EngineUI::LoadRecentProjects() {
+    recentProjects.clear();
+    std::error_code ec;
+
+    // 1. Try reading from config file
+    std::filesystem::path cfgPath = GetRecentProjectsConfigPath();
+    if (std::filesystem::exists(cfgPath, ec)) {
+        std::ifstream f(cfgPath);
+        if (f.is_open()) {
+            try {
+                nlohmann::json j;
+                f >> j;
+                if (j.is_array()) {
+                    for (const auto& item : j) {
+                        if (item.contains("rootPath")) {
+                            ProjectEntry pe;
+                            pe.rootPath = item["rootPath"].get<std::string>();
+                            pe.name = item.value("name", std::filesystem::path(pe.rootPath).filename().string());
+                            pe.lastOpened = item.value("lastOpened", "");
+                            if (std::filesystem::exists(pe.rootPath, ec)) {
+                                recentProjects.push_back(pe);
+                            }
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // 2. Discover existing projects in known directories
+    std::vector<std::filesystem::path> searchDirs = {
+        "C:\\Projects\\Eunoia-Engine\\Projects",
+        std::filesystem::current_path() / "Projects",
+        std::filesystem::current_path().parent_path() / "Projects"
+    };
+
+    for (const auto& dir : searchDirs) {
+        if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_directory(ec)) {
+                std::filesystem::path pRoot = entry.path();
+                bool alreadyIn = false;
+                for (const auto& r : recentProjects) {
+                    if (std::filesystem::equivalent(std::filesystem::path(r.rootPath), pRoot, ec) || r.rootPath == pRoot.string()) {
+                        alreadyIn = true;
+                        break;
+                    }
+                }
+                if (!alreadyIn) {
+                    bool isProj = false;
+                    for (const auto& sub : std::filesystem::directory_iterator(pRoot, ec)) {
+                        if (sub.path().extension() == ".eproject" || sub.path().filename() == "Content" || sub.path().filename() == "Scenes" || sub.path().filename() == "Materials") {
+                            isProj = true;
+                            break;
+                        }
+                    }
+                    if (isProj) {
+                        ProjectEntry pe;
+                        pe.name = pRoot.filename().string();
+                        pe.rootPath = pRoot.string();
+                        pe.lastOpened = "Discovered on disk";
+                        recentProjects.push_back(pe);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void EngineUI::SaveRecentProjects() {
+    std::filesystem::path cfgPath = GetRecentProjectsConfigPath();
+    std::ofstream f(cfgPath);
+    if (!f.is_open()) return;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : recentProjects) {
+        nlohmann::json item;
+        item["name"] = p.name;
+        item["rootPath"] = p.rootPath;
+        item["lastOpened"] = p.lastOpened;
+        arr.push_back(item);
+    }
+    f << arr.dump(4);
+    f.close();
+}
+
+bool EngineUI::CreateNewProject(const std::string& parentDir, const std::string& projName, Scene& scene, OrbitCamera& camera) {
+    if (projName.empty()) {
+        AddLog("LogProject", "Failed to create project: Project name cannot be empty!", 3);
+        return false;
+    }
+    if (parentDir.empty()) {
+        AddLog("LogProject", "Failed to create project: Directory path cannot be empty!", 3);
+        return false;
+    }
+
+    std::filesystem::path root = std::filesystem::path(parentDir) / projName;
+    std::error_code ec;
+
+    // 1. Create project directories
+    // Content browser root is inside project folder called Content
+    std::filesystem::path contentDir = root / "Content";
+    std::filesystem::path materialsDir = contentDir / "Materials";
+    std::filesystem::path scenesDir = contentDir / "Scenes";
+    std::filesystem::path cookedDir = root / "Cooked";
+    std::filesystem::path buildDir = root / "Build";
+
+    std::filesystem::create_directories(contentDir, ec);
+    std::filesystem::create_directories(materialsDir, ec);
+    std::filesystem::create_directories(scenesDir, ec);
+    std::filesystem::create_directories(cookedDir, ec);
+    std::filesystem::create_directories(buildDir, ec);
+
+    // 2. Starter material in Content/Materials
+    std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
+    if (!std::filesystem::exists(defaultMatPath, ec)) {
+        MaterialAsset defaultMat;
+        defaultMat.name = "Default_Material";
+        defaultMat.filePath = defaultMatPath.string();
+        defaultMat.baseColor = glm::vec3(0.55f, 0.55f, 0.55f);
+        defaultMat.metallic = 0.0f;
+        defaultMat.roughness = 0.5f;
+        defaultMat.specular = 0.5f;
+        defaultMat.assetId = AssetID::CreateRandom();
+        defaultMat.virtualPath = "/Game/Materials/Default_Material";
+        SaveMaterialFile(defaultMatPath.string(), defaultMat);
+    }
+
+    // 3. Starter scene in Content/Scenes
+    std::filesystem::path starterScenePath = scenesDir / "Main.escene";
+    if (!std::filesystem::exists(starterScenePath, ec)) {
+        Scene starterScene;
+        starterScene.Clear();
+        starterScene.AddObject(PrimitiveType::Plane, {0.0f, 0.0f, 0.0f}, {0.35f, 0.65f, 0.45f});
+        starterScene.AddObject(PrimitiveType::Cube, {0.0f, 0.5f, 0.0f}, {0.85f, 0.35f, 0.25f});
+        SceneSerializer::SaveScene(starterScene, starterScenePath.string());
+    }
+
+    // 4. Project descriptor file <ProjectName>.eproject
+    std::filesystem::path projFile = root / (projName + ".eproject");
+    std::ofstream pf(projFile);
+    if (pf.is_open()) {
+        nlohmann::json j;
+        j["name"] = projName;
+        j["version"] = "1.0.0";
+        j["engineVersion"] = "0.1.0";
+        j["contentDirectory"] = "Content";
+        j["defaultScene"] = "Content/Scenes/Main.escene";
+        pf << j.dump(4);
+        pf.close();
+    }
+
+    AddLog("LogProject", "Created new empty project: " + projName + " at " + root.string(), 2);
+    return LoadProject(root, scene, camera);
+}
+
+bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, OrbitCamera& camera) {
+    std::error_code ec;
+    if (!std::filesystem::exists(projRoot, ec)) {
+        AddLog("LogProject", "Failed to open project: directory does not exist: " + projRoot.string(), 3);
+        return false;
+    }
+
+    activeProjectRoot = std::filesystem::absolute(projRoot);
+    activeProjectName = activeProjectRoot.filename().string();
+
+    // The in-engine-editor content browser root is inside project's folder called Content!
+    contentRootPath = activeProjectRoot / "Content";
+    if (!std::filesystem::exists(contentRootPath, ec)) {
+        std::filesystem::create_directories(contentRootPath, ec);
+    }
+    currentContentPath = contentRootPath;
+    currentVirtualDir = "/Game";
+    selectedContentItem = "";
+
+    // Re-initialize subsystems with new content root
+    TextureManager::Get().SetProjectRoot(contentRootPath);
+    AssetManager::Get().Initialize(contentRootPath);
+    AssetRegistry::Get().ScanDirectory(contentRootPath);
+
+    // Load project's initial scene
+    std::filesystem::path mainScene = contentRootPath / "Scenes" / "Main.escene";
+    if (std::filesystem::exists(mainScene, ec)) {
+        OpenLevelFromPath(scene, mainScene.string());
+    } else {
+        bool found = false;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(contentRootPath, std::filesystem::directory_options::skip_permission_denied, ec)) {
+            if (entry.is_regular_file(ec)) {
+                std::string ext = entry.path().extension().string();
+                if (ext == ".escene" || ext == ".elevel") {
+                    OpenLevelFromPath(scene, entry.path().string());
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            scene.LoadDefaultScene();
+            currentLevelFilePath = "";
+        }
+    }
+
+    camera.target = glm::vec3(0.0f, 0.5f, 0.0f);
+    camera.distance = 7.0f;
+    camera.yaw = 45.0f;
+    camera.pitch = 25.0f;
+
+    // Update recent projects history
+    time_t now = time(nullptr);
+    char timeBuf[64];
+    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M", localtime(&now));
+
+    for (auto it = recentProjects.begin(); it != recentProjects.end();) {
+        if (std::filesystem::equivalent(std::filesystem::path(it->rootPath), activeProjectRoot, ec) || it->rootPath == activeProjectRoot.string()) {
+            it = recentProjects.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    ProjectEntry pe;
+    pe.name = activeProjectName;
+    pe.rootPath = activeProjectRoot.string();
+    pe.lastOpened = timeBuf;
+    recentProjects.insert(recentProjects.begin(), pe);
+    SaveRecentProjects();
+
+    showProjectBrowser = false;
+    AddLog("LogProject", "Opened project '" + activeProjectName + "' [Content Root: " + contentRootPath.string() + "]", 2);
+
+    return true;
+}
+
 std::string EngineUI::ShowSaveFileDialog() {
     OPENFILENAMEA ofn;
     char szFile[260] = {0};
@@ -319,7 +636,8 @@ std::string EngineUI::ShowSaveFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     if (GetSaveFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -339,7 +657,8 @@ std::string EngineUI::ShowOpenFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -359,7 +678,8 @@ std::string EngineUI::ShowOpenMeshDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -879,6 +1199,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     // 10. Futuristic Loading Progress Modal (all loading situations)
     RenderLoadingModal();
 
+    // 11. Project Browser Dialog Window (Startup & On-Demand)
+    RenderProjectBrowser(scene, camera);
+
     s_justExitedPlayMode = false;
 }
 
@@ -903,6 +1226,15 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
 
             // Menu Bar Dropdowns
             if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("📁 Project Browser...", "Ctrl+Shift+P")) {
+                    showProjectBrowser = true;
+                    projectBrowserTab = 0;
+                }
+                if (ImGui::MenuItem("➕ New Project...")) {
+                    showProjectBrowser = true;
+                    projectBrowserTab = 1;
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("New Level", "Ctrl+N")) {
                     scene.Clear();
                     currentLevelFilePath = "";
@@ -5499,6 +5831,280 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
             obj->ReorderBehaviour((size_t)moveDownIdx, (size_t)(moveDownIdx + 1));
         }
     }
+}
+
+void EngineUI::RenderProjectBrowser(Scene& scene, OrbitCamera& camera) {
+    if (!showProjectBrowser) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    // 1. Dark semi-transparent backdrop
+    ImDrawList* bgDrawList = ImGui::GetForegroundDrawList();
+    bgDrawList->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), IM_COL32(8, 12, 18, 220));
+
+    // 2. Centered Window
+    float winW = 820.0f;
+    float winH = 540.0f;
+    ImVec2 centerPos(vp->Pos.x + (vp->Size.x - winW) * 0.5f, vp->Pos.y + (vp->Size.y - winH) * 0.5f);
+    ImGui::SetNextWindowPos(centerPos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.12f, 0.60f, 0.95f, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.12f, 0.16f, 0.98f));
+
+    bool open = true;
+    bool hasActiveProject = !activeProjectRoot.empty();
+
+    if (ImGui::Begin("📁 Project Browser###ProjectBrowserModal", hasActiveProject ? &open : nullptr, flags)) {
+        if (!open) {
+            showProjectBrowser = false;
+        }
+
+        // Title Header
+        ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "EUNOIA ENGINE");
+        ImGui::SameLine();
+        ImGui::TextDisabled("— Project Browser");
+        if (hasActiveProject) {
+            ImGui::SameLine(winW - 140.0f);
+            if (ImGui::SmallButton("✖ Return to Editor")) {
+                showProjectBrowser = false;
+            }
+        }
+
+        ImGui::TextWrapped("Select a previously created project, or configure and create a new empty game project.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Top Tabs: [ Recent Projects ] | [ New Project ]
+        if (projectBrowserTab == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        std::string recentTabLabel = "📂 Recent Projects (" + std::to_string(recentProjects.size()) + ")";
+        if (ImGui::Button(recentTabLabel.c_str(), ImVec2(180, 32))) {
+            projectBrowserTab = 0;
+        }
+        if (projectBrowserTab == 0) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        if (projectBrowserTab == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        if (ImGui::Button("➕ New Project", ImVec2(150, 32))) {
+            projectBrowserTab = 1;
+        }
+        if (projectBrowserTab == 1) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        if (ImGui::Button("📁 Browse for Project...", ImVec2(170, 32))) {
+            std::string selectedFolder = ShowSelectFolderDialog(nullptr, "Select Existing Project Folder");
+            if (!selectedFolder.empty()) {
+                LoadProject(selectedFolder, scene, camera);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (projectBrowserTab == 0) {
+            // =================================================================
+            // TAB 0: RECENT PROJECTS (PREVIOUSLY CREATED PROJECTS)
+            // =================================================================
+            ImGui::SetNextItemWidth(winW - 220.0f);
+            ImGui::InputTextWithHint("##ProjFilter", "🔍 Filter projects...", projectBrowserSearchBuf, sizeof(projectBrowserSearchBuf));
+            ImGui::SameLine();
+            if (ImGui::Button("🔄 Refresh List", ImVec2(140, 0))) {
+                LoadRecentProjects();
+            }
+
+            ImGui::Spacing();
+
+            // Projects List Child Window
+            ImGui::BeginChild("RecentProjectsScroll", ImVec2(0, winH - 240.0f), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            if (recentProjects.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("No recent projects found.");
+                ImGui::Text("Click 'New Project' above to create your first game project!");
+            } else {
+                for (size_t i = 0; i < recentProjects.size(); ++i) {
+                    const auto& p = recentProjects[i];
+
+                    // Filter search
+                    if (strlen(projectBrowserSearchBuf) > 0) {
+                        std::string searchLower = projectBrowserSearchBuf;
+                        std::string nameLower = p.name;
+                        for (auto& c : searchLower) c = tolower(c);
+                        for (auto& c : nameLower) c = tolower(c);
+                        if (nameLower.find(searchLower) == std::string::npos && p.rootPath.find(projectBrowserSearchBuf) == std::string::npos) {
+                            continue;
+                        }
+                    }
+
+                    ImGui::PushID((int)i);
+                    bool isSelected = (selectedProjectIndex == (int)i);
+
+                    if (isSelected) {
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.12f, 0.45f, 0.85f, 0.45f));
+                        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.16f, 0.52f, 0.95f, 0.65f));
+                    }
+
+                    ImGuiSelectableFlags sFlags = ImGuiSelectableFlags_AllowDoubleClick;
+                    if (ImGui::Selectable("##ProjectSelectable", isSelected, sFlags, ImVec2(0, 48))) {
+                        selectedProjectIndex = (int)i;
+                    }
+
+                    // DOUBLE CLICK TO OPEN PROJECT ("fblcik to open it")
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        LoadProject(p.rootPath, scene, camera);
+                    }
+
+                    if (isSelected) {
+                        ImGui::PopStyleColor(2);
+                    }
+
+                    // Render content inside card
+                    ImGui::SameLine(12.0f);
+                    ImGui::BeginGroup();
+                    ImGui::TextColored(ImVec4(0.20f, 0.80f, 1.00f, 1.0f), "🎮 %s", p.name.c_str());
+                    ImGui::TextDisabled("Root: %s  |  Content: %s/Content", p.rootPath.c_str(), p.rootPath.c_str());
+                    ImGui::EndGroup();
+
+                    if (!p.lastOpened.empty()) {
+                        ImGui::SameLine(winW - 220.0f);
+                        ImGui::TextDisabled("%s", p.lastOpened.c_str());
+                    }
+
+                    ImGui::Separator();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Bottom Actions for Tab 0
+            bool hasSelection = (selectedProjectIndex >= 0 && selectedProjectIndex < (int)recentProjects.size());
+            if (!hasSelection) ImGui::BeginDisabled();
+            if (ImGui::Button("🚀 Open Selected Project", ImVec2(200, 34))) {
+                if (hasSelection) {
+                    LoadProject(recentProjects[selectedProjectIndex].rootPath, scene, camera);
+                }
+            }
+            if (!hasSelection) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (!hasSelection) ImGui::BeginDisabled();
+            if (ImGui::Button("Remove From List", ImVec2(140, 34))) {
+                if (hasSelection) {
+                    recentProjects.erase(recentProjects.begin() + selectedProjectIndex);
+                    selectedProjectIndex = -1;
+                    SaveRecentProjects();
+                }
+            }
+            if (!hasSelection) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Double-click any project to open immediately)");
+
+            if (hasActiveProject) {
+                ImGui::SameLine(winW - 170.0f);
+                if (ImGui::Button("Cancel", ImVec2(120, 34))) {
+                    showProjectBrowser = false;
+                }
+            }
+        } else {
+            // =================================================================
+            // TAB 1: NEW PROJECT (CREATE PROJECT SETUP)
+            // =================================================================
+            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "Create New Game Project");
+            ImGui::TextDisabled("Set the project name and location. A new empty project structure with Content folder will be created.");
+            ImGui::Spacing();
+
+            // 1. Project Name
+            ImGui::Text("Project Name:");
+            ImGui::SetNextItemWidth(360.0f);
+            ImGui::InputText("##NewProjNameInput", newProjectNameBuf, sizeof(newProjectNameBuf));
+
+            ImGui::Spacing();
+
+            // 2. Project Location
+            ImGui::Text("Project Location (Parent Folder):");
+            ImGui::SetNextItemWidth(560.0f);
+            ImGui::InputText("##NewProjLocInput", newProjectPathBuf, sizeof(newProjectPathBuf));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse Folder...", ImVec2(140, 0))) {
+                std::string picked = ShowSelectFolderDialog(nullptr, "Select Folder for New Project");
+                if (!picked.empty()) {
+                    strncpy(newProjectPathBuf, picked.c_str(), sizeof(newProjectPathBuf) - 1);
+                }
+            }
+
+            ImGui::Spacing();
+
+            // 3. Computed Project Path & Content Structure Preview
+            std::filesystem::path targetProjectDir = std::filesystem::path(newProjectPathBuf) / newProjectNameBuf;
+            std::filesystem::path targetContentDir = targetProjectDir / "Content";
+            std::filesystem::path targetCookedDir  = targetProjectDir / "Cooked";
+            std::filesystem::path targetBuildDir   = targetProjectDir / "Build";
+
+            ImGui::BeginChild("NewProjPreview", ImVec2(0, 160), true);
+            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.25f, 1.0f), "Project Structure Summary:");
+            ImGui::BulletText("Project Directory: %s", targetProjectDir.string().c_str());
+            ImGui::BulletText("Content Root (Content Browser): %s", targetContentDir.string().c_str());
+            ImGui::BulletText("Cooked Assets Directory: %s", targetCookedDir.string().c_str());
+            ImGui::BulletText("Standalone Game Build Directory: %s", targetBuildDir.string().c_str());
+            ImGui::BulletText("Starter Template: Empty Project (Default Scene & Material included)");
+            ImGui::EndChild();
+
+            ImGui::Spacing();
+
+            // Validation status
+            std::error_code ec;
+            bool nameValid = strlen(newProjectNameBuf) > 0;
+            bool pathValid = strlen(newProjectPathBuf) > 0;
+            bool targetExists = std::filesystem::exists(targetProjectDir, ec);
+
+            if (!nameValid) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "⚠️ Please enter a project name.");
+            } else if (!pathValid) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "⚠️ Please select a valid project directory.");
+            } else if (targetExists) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "ℹ️ Folder already exists on disk. Will initialize/load project.");
+            } else {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "✅ Ready to create empty project in selected path.");
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool canCreate = nameValid && pathValid;
+            if (!canCreate) ImGui::BeginDisabled();
+            if (ImGui::Button("✨ Create Project", ImVec2(180, 36))) {
+                CreateNewProject(newProjectPathBuf, newProjectNameBuf, scene, camera);
+            }
+            if (!canCreate) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 36))) {
+                if (hasActiveProject) {
+                    showProjectBrowser = false;
+                } else {
+                    projectBrowserTab = 0;
+                }
+            }
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
 }
 
 

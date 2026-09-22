@@ -4,7 +4,6 @@ cmake_minimum_required(VERSION 3.15)
 set(EDITOR_SOURCES
     Src/Main.cpp
     Src/EngineUI.cpp
-    ${EUNOIA_ROOT}/Projects/test/Behaviours/Behaviours/FPS_Player.cpp
     # ImGui
     ${EUNOIA_DEPS}/imgui/imgui.cpp
     ${EUNOIA_DEPS}/imgui/imgui_draw.cpp
