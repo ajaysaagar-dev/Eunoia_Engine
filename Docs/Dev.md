@@ -110,3 +110,20 @@ WORK STEPS
 
 Ask before deleting anything or before making a call you're not
 confident about — don't guess on ambiguous ownership.
+
+============================================================
+REGRESSION NOTES
+============================================================
+
+### Directional Light Shadow Frustum & Contact Shadow Artifact Fix
+- **Issue**: A flat, hard-edged dark artifact appeared detached from the floor/geometry near objects, disconnected from the ground plane.
+- **Root Causes**:
+  1. **Hardcoded Shadow Frustum**: `updateConstantBuffer()` in `Main.cpp` previously hardcoded `sceneCenter = (0,0,0)`, `orthoHalfSize = 14.0f`, `nearPlane = 1.0f`, `farPlane = 40.0f`. Any geometry extending beyond the 28x28 unit box around the origin was clipped by the shadow frustum.
+  2. **Abrupt Out-of-Frustum Step**: In `CalculateShadow()`, coordinates outside NDC `[-1, 1]` or depth `[0, 1]` hit an early-return `1.0f`. This caused an instantaneous step change between shadowed (`1.0 - shadowStrength`) and unshadowed (`1.0f`), creating an unnatural razor-sharp dark boundary across geometry.
+  3. **Degenerate Normal Determinant**: In `Scene.h` `BuildSceneMesh()`, non-uniform or degenerate scaling previously had a fallback that collapsed normals.
+- **Fix Applied**:
+  1. **Dynamic Scene Bounds Fitting**: Added `Scene::GetSceneAABB()` to compute the world-space bounding box of all visible mesh geometry. `updateConstantBuffer()` now computes `sceneCenter`, `sceneRadius`, and sets `orthoHalfSize = sceneRadius * 1.25f + 2.0f`, `lightDistance = sceneRadius * 2.0f + 10.0f`, and `farPlane = lightDistance + sceneRadius * 2.0f + 10.0f`.
+  2. **Frustum Border Soft Edge Fading**: Added border distance smooth fading (`fade = min(borderDist * 10.0f, zBorderDist * 10.0f)`) in `CalculateShadow()` so points approaching the shadow frustum boundary fade smoothly to 1.0f instead of hard clipping.
+  3. **Debug Frustum Visualization**: Added `showLightFrustum` wireframe rendering of the 12 edges of the directional light frustum in world space, with a toggle under the Viewport "Show" menu and the Directional Light Inspector.
+  4. **Degenerate Normal Matrix Fallback**: Extracted orthonormal basis using Gram-Schmidt in `BuildSceneMesh()` when matrix determinant is near-zero.
+  5. **Empty Scene Default**: New levels and empty scenes initialize completely empty (no objects, no point lights, 0 light/ambient intensity).

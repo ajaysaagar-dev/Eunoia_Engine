@@ -2197,6 +2197,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         if (ImGui::BeginPopup("ShowPopup")) {
             if (ImGui::MenuItem("Grid", nullptr, scene.showGrid)) scene.showGrid = !scene.showGrid;
             if (ImGui::MenuItem("Transform Gizmo", nullptr, showGizmo)) showGizmo = !showGizmo;
+            if (ImGui::MenuItem("Light Frustum", nullptr, scene.showLightFrustum)) scene.showLightFrustum = !scene.showLightFrustum;
             if (ImGui::MenuItem("Game View [G]", nullptr, isGameView)) ToggleGameView(scene);
             if (ImGui::MenuItem("Immersive Viewport [F11]", nullptr, isImmersiveMode)) ToggleImmersiveMode();
             ImGui::EndPopup();
@@ -3179,6 +3180,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                             obj->light.shadowResolution = resVals[curResIdx];
                         }
                         ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 5.0f, 1000.0f, "%.1f m");
+                        if (obj->light.type == LightType::Directional) {
+                            ImGui::Checkbox("Show Light Frustum", &scene.showLightFrustum);
+                        }
                     }
                 }
 

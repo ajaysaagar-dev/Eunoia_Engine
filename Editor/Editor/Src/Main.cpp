@@ -1478,6 +1478,14 @@ int createShadersAndPipeline()
 			shadowUV.x = projCoords.x * 0.5f + 0.5f;
 			shadowUV.y = -projCoords.y * 0.5f + 0.5f;
 
+			// Smooth edge fading near frustum boundary to prevent hard shadow cutoff
+			float borderDist = min(min(shadowUV.x, 1.0f - shadowUV.x), min(shadowUV.y, 1.0f - shadowUV.y));
+			if (borderDist <= 0.0f) return 1.0f;
+			float fade = saturate(borderDist * 10.0f);
+
+			float zBorderDist = min(projCoords.z, 1.0f - projCoords.z);
+			fade = min(fade, saturate(zBorderDist * 10.0f));
+
 			float currentDepth = projCoords.z;
 
 			// Slope-scaled normal bias
@@ -1500,7 +1508,8 @@ int createShadersAndPipeline()
 			}
 			shadow /= 16.0f;
 
-			return lerp(1.0f - shadowStrength, 1.0f, shadow);
+			float rawShadow = lerp(1.0f - shadowStrength, 1.0f, shadow);
+			return lerp(1.0f, rawShadow, fade);
 		}
 
 		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N)
@@ -1995,13 +2004,44 @@ void updateConstantBuffer()
 	} else {
 		lightDir = glm::vec3(0.6f, 1.0f, 0.8f);
 	}
-	glm::vec3 sceneCenter(0.0f, 0.0f, 0.0f);
-	glm::vec3 lightPos = sceneCenter + lightDir * 18.0f;
+	glm::vec3 sceneMin(-10.0f), sceneMax(10.0f);
+	g_scene.GetSceneAABB(sceneMin, sceneMax);
+	glm::vec3 sceneCenter = (sceneMin + sceneMax) * 0.5f;
+	float sceneRadius = glm::length(sceneMax - sceneCenter);
+	if (sceneRadius < 10.0f) sceneRadius = 10.0f;
+
+	float orthoHalfSize = sceneRadius * 1.25f + 2.0f;
+	float lightDistance = sceneRadius * 2.0f + 10.0f;
+	glm::vec3 lightPos = sceneCenter + lightDir * lightDistance;
 	glm::vec3 up = (std::abs(lightDir.y) > 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::mat4 lightView = glm::lookAt(lightPos, sceneCenter, up);
-	float orthoHalfSize = 14.0f;
-	glm::mat4 lightProj = glm::ortho(-orthoHalfSize, orthoHalfSize, -orthoHalfSize, orthoHalfSize, 1.0f, 40.0f);
+
+	float nearPlane = 1.0f;
+	float farPlane = lightDistance + sceneRadius * 2.0f + 10.0f;
+	glm::mat4 lightProj = glm::ortho(-orthoHalfSize, orthoHalfSize, -orthoHalfSize, orthoHalfSize, nearPlane, farPlane);
 	glm::mat4 lightSpaceMatrix = lightProj * lightView;
+
+	// Calculate 8 NDC corners of the light frustum in world space for debug wireframe rendering
+	glm::mat4 invLightSpace = glm::inverse(lightSpaceMatrix);
+	const glm::vec4 ndcCorners[8] = {
+		// Near plane: Z = 0
+		{ -1.0f, -1.0f, 0.0f, 1.0f },
+		{  1.0f, -1.0f, 0.0f, 1.0f },
+		{  1.0f,  1.0f, 0.0f, 1.0f },
+		{ -1.0f,  1.0f, 0.0f, 1.0f },
+		// Far plane: Z = 1
+		{ -1.0f, -1.0f, 1.0f, 1.0f },
+		{  1.0f, -1.0f, 1.0f, 1.0f },
+		{  1.0f,  1.0f, 1.0f, 1.0f },
+		{ -1.0f,  1.0f, 1.0f, 1.0f },
+	};
+	for (int i = 0; i < 8; ++i) {
+		glm::vec4 wp = invLightSpace * ndcCorners[i];
+		if (std::abs(wp.w) > 1e-5f) {
+			g_scene.lightFrustumCorners[i] = glm::vec3(wp) / wp.w;
+		}
+	}
+	g_scene.hasLightFrustumCorners = true;
 
 	if (g_pShadowConstantMapped)
 	{

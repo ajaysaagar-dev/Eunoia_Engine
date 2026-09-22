@@ -49,6 +49,9 @@ public:
     float shadowStrength = 0.85f;
     float shadowBias = 0.0012f;
     float pcfRadius = 1.2f;
+    bool showLightFrustum = false;
+    bool hasLightFrustumCorners = false;
+    glm::vec3 lightFrustumCorners[8] = {};
 
     // Multiple Point Lights Support
     std::vector<PointLight> pointLights;
@@ -138,6 +141,56 @@ public:
             return GetWorldPosition(obj); // worldMat itself was bad — fall back
         }
         return worldCenter;
+    }
+
+    bool GetSceneAABB(glm::vec3& outMin, glm::vec3& outMax) const {
+        glm::vec3 minB(1e9f), maxB(-1e9f);
+        bool hasValidGeom = false;
+        for (const auto& obj : objects) {
+            if (!obj.visible || obj.isLight || obj.type == PrimitiveType::Empty) continue;
+            if (obj.mesh.vertices.empty()) continue;
+
+            glm::mat4 worldMat = GetWorldMatrix(obj);
+            glm::vec3 objMin(1e9f), objMax(-1e9f);
+            bool objValid = false;
+            for (const auto& v : obj.mesh.vertices) {
+                if (std::isnan(v.pos.x) || std::isnan(v.pos.y) || std::isnan(v.pos.z) ||
+                    !std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z)) {
+                    continue;
+                }
+                objMin = glm::min(objMin, v.pos);
+                objMax = glm::max(objMax, v.pos);
+                objValid = true;
+            }
+            if (!objValid) continue;
+
+            glm::vec3 corners[8] = {
+                {objMin.x, objMin.y, objMin.z},
+                {objMax.x, objMin.y, objMin.z},
+                {objMin.x, objMax.y, objMin.z},
+                {objMax.x, objMax.y, objMin.z},
+                {objMin.x, objMin.y, objMax.z},
+                {objMax.x, objMin.y, objMax.z},
+                {objMin.x, objMax.y, objMax.z},
+                {objMax.x, objMax.y, objMax.z}
+            };
+            for (int i = 0; i < 8; ++i) {
+                glm::vec4 wp = worldMat * glm::vec4(corners[i], 1.0f);
+                if (std::isfinite(wp.x) && std::isfinite(wp.y) && std::isfinite(wp.z)) {
+                    minB = glm::min(minB, glm::vec3(wp));
+                    maxB = glm::max(maxB, glm::vec3(wp));
+                    hasValidGeom = true;
+                }
+            }
+        }
+        if (!hasValidGeom) {
+            outMin = glm::vec3(-10.0f, -1.0f, -10.0f);
+            outMax = glm::vec3(10.0f, 10.0f, 10.0f);
+            return false;
+        }
+        outMin = minB;
+        outMax = maxB;
+        return true;
     }
 
     static void DecomposeMatrix(const glm::mat4& m, glm::vec3& translation, glm::vec3& rotation, glm::vec3& scale) {
@@ -913,6 +966,12 @@ struct RenderBatch {
             float det = glm::determinant(m3);
             if (std::abs(det) > 1e-6f && !std::isnan(det)) {
                 normalMatrix = glm::transpose(glm::inverse(m3));
+            } else {
+                // Robust orthonormal fallback for degenerate scales (e.g. 0-scale axes)
+                glm::vec3 c0 = glm::length(m3[0]) > 1e-5f ? glm::normalize(m3[0]) : glm::vec3(1.0f, 0.0f, 0.0f);
+                glm::vec3 c1 = glm::length(m3[1]) > 1e-5f ? glm::normalize(m3[1]) : glm::vec3(0.0f, 1.0f, 0.0f);
+                glm::vec3 c2 = glm::length(m3[2]) > 1e-5f ? glm::normalize(m3[2]) : glm::vec3(0.0f, 0.0f, 1.0f);
+                normalMatrix = glm::mat3(c0, c1, c2);
             }
 
             uint32_t vertexOffset = (uint32_t)outVertices.size();
@@ -983,6 +1042,63 @@ struct RenderBatch {
                     b.baseColor = {1.0f, 1.0f, 1.0f};
                     outBatches.push_back(b);
                 }
+            }
+        }
+
+        // 4. Debug Visualization of Light Frustum (dev.md Step 2)
+        if (showLightFrustum && hasLightFrustumCorners) {
+            uint32_t frustumStart = (uint32_t)outIndices.size();
+            glm::vec3 frustumColor{1.0f, 0.85f, 0.1f}; // bright yellow
+
+            auto AppendLine = [&](const glm::vec3& p0, const glm::vec3& p1) {
+                uint32_t baseIdx = (uint32_t)outVertices.size();
+                glm::vec3 dir = p1 - p0;
+                float len = glm::length(dir);
+                if (len < 1e-4f) return;
+                glm::vec3 side = glm::normalize(glm::cross(dir, glm::vec3(0, 1, 0)));
+                if (glm::length(side) < 1e-3f) side = glm::vec3(1, 0, 0);
+                float halfW = 0.035f;
+                outVertices.push_back({ p0 - side * halfW, glm::vec3(0, 1, 0), glm::vec2(0, 0), frustumColor });
+                outVertices.push_back({ p0 + side * halfW, glm::vec3(0, 1, 0), glm::vec2(1, 0), frustumColor });
+                outVertices.push_back({ p1 + side * halfW, glm::vec3(0, 1, 0), glm::vec2(1, 1), frustumColor });
+                outVertices.push_back({ p1 - side * halfW, glm::vec3(0, 1, 0), glm::vec2(0, 1), frustumColor });
+
+                outIndices.push_back(baseIdx + 0);
+                outIndices.push_back(baseIdx + 1);
+                outIndices.push_back(baseIdx + 2);
+                outIndices.push_back(baseIdx + 0);
+                outIndices.push_back(baseIdx + 2);
+                outIndices.push_back(baseIdx + 3);
+            };
+
+            // Near plane (0, 1, 2, 3)
+            AppendLine(lightFrustumCorners[0], lightFrustumCorners[1]);
+            AppendLine(lightFrustumCorners[1], lightFrustumCorners[2]);
+            AppendLine(lightFrustumCorners[2], lightFrustumCorners[3]);
+            AppendLine(lightFrustumCorners[3], lightFrustumCorners[0]);
+
+            // Far plane (4, 5, 6, 7)
+            AppendLine(lightFrustumCorners[4], lightFrustumCorners[5]);
+            AppendLine(lightFrustumCorners[5], lightFrustumCorners[6]);
+            AppendLine(lightFrustumCorners[6], lightFrustumCorners[7]);
+            AppendLine(lightFrustumCorners[7], lightFrustumCorners[4]);
+
+            // Connecting edges (0-4, 1-5, 2-6, 3-7)
+            AppendLine(lightFrustumCorners[0], lightFrustumCorners[4]);
+            AppendLine(lightFrustumCorners[1], lightFrustumCorners[5]);
+            AppendLine(lightFrustumCorners[2], lightFrustumCorners[6]);
+            AppendLine(lightFrustumCorners[3], lightFrustumCorners[7]);
+
+            uint32_t frustumCount = (uint32_t)outIndices.size() - frustumStart;
+            if (frustumCount > 0) {
+                RenderBatch b;
+                b.startIndex = frustumStart;
+                b.indexCount = frustumCount;
+                b.isUnlit = true;
+                b.castShadows = false;
+                b.receiveShadows = false;
+                b.baseColor = {1.0f, 1.0f, 1.0f};
+                outBatches.push_back(b);
             }
         }
     }
