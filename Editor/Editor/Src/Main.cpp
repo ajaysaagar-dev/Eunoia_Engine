@@ -85,6 +85,7 @@ struct alignas(256) SceneConstantBuffer
 	float enableShadows;
 	float shadowMapSize;
 	float numPointLights;
+	glm::vec4 ambientColor;
 	glm::vec4 pointLightPosRange[MAX_POINT_LIGHTS];
 	glm::vec4 pointLightColorIntensity[MAX_POINT_LIGHTS];
 	glm::vec4 pointLightDirType[MAX_POINT_LIGHTS];
@@ -1666,6 +1667,7 @@ int createShadersAndPipeline()
 			float enableShadows;
 			float shadowMapSize;
 			float numPointLights;
+			float4 ambientColor;
 			float4 pointLightPosRange[64];
 			float4 pointLightColorIntensity[64];
 			float4 pointLightDirType[64];
@@ -1998,9 +2000,10 @@ int createShadersAndPipeline()
 			float shadowFactor = CalculateShadow(input.worldPos, N, L);
 			float3 directLit = (diffBRDF + specBRDF) * NdotL * lightColor * shadowFactor;
 
-			float3 ambientDiff = albedo * ambientIntensity * (1.0f - metal) * ao;
+			float3 ambCol = ambientColor.rgb;
+			float3 ambientDiff = albedo * ambCol * ambientIntensity * (1.0f - metal) * ao;
 			float3 ambF = F0 + (max(1.0f - rough, F0) - F0) * pow(clamp(1.0f - NdotV, 0.0f, 1.0f), 5.0f);
-			float3 ambientSpec = ambF * ambientIntensity * lerp(1.0f, 0.15f, rough) * ao;
+			float3 ambientSpec = ambF * ambCol * ambientIntensity * lerp(1.0f, 0.15f, rough) * ao;
 
 			// Multiple Lights (Point, Spot, Area)
 			float3 pointLightsContribution = float3(0, 0, 0);
@@ -2484,6 +2487,7 @@ void updateConstantBuffer()
 	cb.lightSpaceMatrix = lightSpaceMatrix;
 	cb.cameraPos = g_camera.GetPosition();
 	cb.ambientIntensity = g_scene.ambientIntensity;
+	cb.ambientColor = glm::vec4(g_scene.ambientColor, 1.0f);
 	cb.lightDir = lightDir;
 	cb.shadowBias = g_scene.shadowBias;
 	cb.lightColor = g_scene.lightColor * g_scene.lightIntensity;
@@ -3470,6 +3474,9 @@ bool RecoverD3D12Device(HWND hwnd)
 	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
 	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
 
+	DX12GpuTexture skyLightIcon = GetOrLoadGPUTexture("Resources/Icons/sky_light.png", lightIcon);
+	g_engineUI.skyLightIconGpuHandle = skyLightIcon.gpuHandle.ptr ? skyLightIcon.gpuHandle.ptr : lightIcon.gpuHandle.ptr;
+
 	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
 
@@ -3624,6 +3631,9 @@ int main()
 
 	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
 	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture skyLightIcon = GetOrLoadGPUTexture("Resources/Icons/sky_light.png", lightIcon);
+	g_engineUI.skyLightIconGpuHandle = skyLightIcon.gpuHandle.ptr ? skyLightIcon.gpuHandle.ptr : lightIcon.gpuHandle.ptr;
 
 	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;

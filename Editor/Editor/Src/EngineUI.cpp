@@ -2338,6 +2338,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
             else if (obj.type == PrimitiveType::PointLight) lType = LightType::Point;
             else if (obj.type == PrimitiveType::SpotLight) lType = LightType::Spot;
             else if (obj.type == PrimitiveType::AreaLight) lType = LightType::Area;
+            else if (obj.type == PrimitiveType::SkyLight) lType = LightType::Sky;
 
             uint64_t iconHandle = GetLightIconGpuHandle(lType);
 
@@ -2881,6 +2882,7 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
+                if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -2927,6 +2929,8 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
                 if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
+                if (skyLightIconGpuHandle) { ImGui::Image((ImTextureID)skyLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
+                if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -2952,6 +2956,8 @@ void EngineUI::RenderOutliner(Scene& scene) {
             if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
             if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
+            if (skyLightIconGpuHandle) { ImGui::Image((ImTextureID)skyLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
+            if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
             ImGui::EndPopup();
         }
 
@@ -3169,6 +3175,8 @@ void EngineUI::RenderDetails(Scene& scene) {
                     }
                     if (obj->light.type == LightType::Directional) {
                         scene.lightColor = obj->light.color;
+                    } else if (obj->light.type == LightType::Sky) {
+                        scene.ambientColor = obj->light.color;
                     }
                 }
 
@@ -3187,9 +3195,16 @@ void EngineUI::RenderDetails(Scene& scene) {
                                         kelvinCol.b * obj->light.color.b);
                 }
 
-                if (obj->light.type != LightType::Directional) {
+                if (obj->light.type != LightType::Directional && obj->light.type != LightType::Sky) {
                     ImGui::DragFloat("Range / Radius", &obj->light.range, 1.0f, 0.1f, 10000000.0f, "%.1f m");
                     ImGui::DragFloat("Attenuation Exp", &obj->light.attenuation, 0.05f, 0.0f, 1000.0f, "%.2f");
+                }
+
+                if (obj->light.type == LightType::Sky) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Sky Light / Ambient System");
+                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "Sky Light provides omnidirectional ambient scene illumination.");
+                    ImGui::TextDisabled("Note: Sky light produces pure ambient light and does not cast shadows.");
                 }
 
                 if (obj->light.type == LightType::Spot) {
@@ -3283,6 +3298,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                 scene.shadowStrength = obj->light.shadowStrength;
                 scene.shadowBias = obj->light.shadowBias;
                 scene.shadowResolution = obj->light.shadowResolution;
+            } else if (obj->light.type == LightType::Sky) {
+                scene.ambientColor = obj->light.color;
+                scene.ambientIntensity = obj->light.intensity;
             }
         }
 

@@ -374,7 +374,7 @@ private:
         if (s == "PointLight" || s == "Point Light") return PrimitiveType::PointLight;
         if (s == "SpotLight" || s == "Spot Light") return PrimitiveType::SpotLight;
         if (s == "AreaLight" || s == "Area Light") return PrimitiveType::AreaLight;
-        if (s == "SkyLight" || s == "Sky Light" || s == "AmbientLight" || s == "Ambient Light" || s == "HemisphereLight" || s == "Hemisphere Light") return PrimitiveType::DirectionalLight;
+        if (s == "SkyLight" || s == "Sky Light" || s == "AmbientLight" || s == "Ambient Light" || s == "HemisphereLight" || s == "Hemisphere Light") return PrimitiveType::SkyLight;
         if (s == "TubeLight" || s == "Tube Light" || s == "DiscLight" || s == "Disc Light") return PrimitiveType::AreaLight;
         if (s == "Camera") return PrimitiveType::Camera;
         return PrimitiveType::Cube;

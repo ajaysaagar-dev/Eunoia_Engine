@@ -11,7 +11,8 @@ enum class LightType {
     Directional,
     Point,
     Spot,
-    Area
+    Area,
+    Sky
 };
 
 inline const char* GetLightTypeName(LightType type) {
@@ -20,6 +21,7 @@ inline const char* GetLightTypeName(LightType type) {
         case LightType::Point:       return "Point Light";
         case LightType::Spot:        return "Spot Light";
         case LightType::Area:        return "Area Light";
+        case LightType::Sky:         return "Sky Light";
         default:                     return "Light";
     }
 }
@@ -144,6 +146,7 @@ enum class PrimitiveType {
     PointLight,
     SpotLight,
     AreaLight,
+    SkyLight,
     Camera
 };
 
@@ -171,6 +174,7 @@ inline const char* GetPrimitiveTypeName(PrimitiveType type) {
         case PrimitiveType::PointLight:       return "Point Light";
         case PrimitiveType::SpotLight:        return "Spot Light";
         case PrimitiveType::AreaLight:        return "Area Light";
+        case PrimitiveType::SkyLight:         return "Sky Light";
         case PrimitiveType::Camera:           return "Camera";
         default:                              return "Object";
     }
@@ -180,7 +184,8 @@ inline bool IsLightPrimitive(PrimitiveType type) {
     return type == PrimitiveType::DirectionalLight ||
            type == PrimitiveType::PointLight ||
            type == PrimitiveType::SpotLight ||
-           type == PrimitiveType::AreaLight;
+           type == PrimitiveType::AreaLight ||
+           type == PrimitiveType::SkyLight;
 }
 
 inline bool IsCameraPrimitive(PrimitiveType type) {
@@ -384,6 +389,7 @@ struct GameObject {
                 case PrimitiveType::PointLight:       light.type = LightType::Point;       light.castShadows = true; break;
                 case PrimitiveType::SpotLight:        light.type = LightType::Spot;        light.castShadows = true; break;
                 case PrimitiveType::AreaLight:        light.type = LightType::Area;        light.castShadows = true; break;
+                case PrimitiveType::SkyLight:         light.type = LightType::Sky;         light.castShadows = false; light.intensity = 1.0f; break;
                 default: break;
             }
             light.color = col;

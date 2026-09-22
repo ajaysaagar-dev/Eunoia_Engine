@@ -60,6 +60,7 @@ public:
     glm::vec3 lightColor{1.0f, 0.98f, 0.92f};
     float lightIntensity = 1.0f;
     float ambientIntensity = 0.0f;
+    glm::vec3 ambientColor{0.15f, 0.15f, 0.18f};
     glm::vec4 clearColor{0.07f, 0.07f, 0.08f, 1.0f};
 
     // Shadow Mapping Parameters (Hardware D32_FLOAT 2048x2048 PCF)
@@ -302,10 +303,17 @@ public:
         std::string name = std::string(GetPrimitiveTypeName(lightType)) + " " + std::to_string(id);
         glm::vec3 col(1.0f, 0.95f, 0.85f);
         if (lightType == PrimitiveType::DirectionalLight) col = glm::vec3(1.0f, 0.98f, 0.92f);
+        else if (lightType == PrimitiveType::SkyLight) col = glm::vec3(0.65f, 0.8f, 1.0f);
 
         objects.emplace_back(id, name, lightType, pos, col);
         GameObject& obj = objects.back();
-        obj.light.castShadows = true;
+        if (lightType == PrimitiveType::SkyLight) {
+            obj.light.type = LightType::Sky;
+            obj.light.castShadows = false;
+            obj.light.intensity = 1.0f;
+        } else {
+            obj.light.castShadows = true;
+        }
         obj.parentId = parentId;
         if (parentId != -1) {
             GameObject* parent = FindObject(parentId);
@@ -361,7 +369,9 @@ public:
     // Keep all lights synced from their GameObjects (called each frame)
     void SyncLightPositionsFromActors() {
         ambientIntensity = 0.0f;
+        ambientColor = glm::vec3(0.0f);
         bool hasDirectional = false;
+        bool hasSkyLight = false;
         pointLights.clear();
         for (auto& obj : objects) {
             if (obj.isLight || IsLightPrimitive(obj.type)) {
@@ -385,8 +395,13 @@ public:
                     shadowResolution = obj.light.shadowResolution;
                     hasDirectional = true;
                 }
-
-                if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
+                else if (obj.light.type == LightType::Sky && obj.light.enabled) {
+                    glm::vec3 sCol = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
+                    ambientColor += sCol * obj.light.intensity;
+                    ambientIntensity += obj.light.intensity;
+                    hasSkyLight = true;
+                }
+                else if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
                     obj.light.type == LightType::Spot || obj.type == PrimitiveType::SpotLight ||
                     obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight) {
                     if (obj.light.enabled) {
@@ -421,6 +436,14 @@ public:
         }
         if (!hasDirectional) {
             lightIntensity = 0.0f;
+        }
+        if (hasSkyLight) {
+            if (ambientIntensity > 0.0001f) {
+                ambientColor /= ambientIntensity;
+            }
+        } else {
+            ambientColor = glm::vec3(0.0f);
+            ambientIntensity = 0.0f;
         }
     }
 

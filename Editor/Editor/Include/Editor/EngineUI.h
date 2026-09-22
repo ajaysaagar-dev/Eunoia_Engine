@@ -284,6 +284,7 @@ public:
     uint64_t pointLightIconGpuHandle = 0;
     uint64_t spotLightIconGpuHandle = 0;
     uint64_t areaLightIconGpuHandle = 0;
+    uint64_t skyLightIconGpuHandle = 0;
     uint64_t cameraIconGpuHandle = 0;
 
     uint64_t GetLightIconGpuHandle(LightType type) const {
@@ -292,6 +293,7 @@ public:
             case LightType::Point:       return pointLightIconGpuHandle ? pointLightIconGpuHandle : lightIconGpuHandle;
             case LightType::Spot:        return spotLightIconGpuHandle ? spotLightIconGpuHandle : lightIconGpuHandle;
             case LightType::Area:        return areaLightIconGpuHandle ? areaLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Sky:         return skyLightIconGpuHandle ? skyLightIconGpuHandle : lightIconGpuHandle;
             default:                     return lightIconGpuHandle;
         }
     }
