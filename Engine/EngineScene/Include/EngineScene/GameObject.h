@@ -11,12 +11,7 @@ enum class LightType {
     Directional,
     Point,
     Spot,
-    Area,
-    Sky,
-    Ambient,
-    Hemisphere,
-    Tube,
-    Disc
+    Area
 };
 
 inline const char* GetLightTypeName(LightType type) {
@@ -25,11 +20,6 @@ inline const char* GetLightTypeName(LightType type) {
         case LightType::Point:       return "Point Light";
         case LightType::Spot:        return "Spot Light";
         case LightType::Area:        return "Area Light";
-        case LightType::Sky:         return "Sky Light";
-        case LightType::Ambient:     return "Ambient Light";
-        case LightType::Hemisphere:  return "Hemisphere Light";
-        case LightType::Tube:        return "Tube Light";
-        case LightType::Disc:        return "Disc Light";
         default:                     return "Light";
     }
 }
@@ -154,11 +144,6 @@ enum class PrimitiveType {
     PointLight,
     SpotLight,
     AreaLight,
-    SkyLight,
-    AmbientLight,
-    HemisphereLight,
-    TubeLight,
-    DiscLight,
     Camera
 };
 
@@ -186,11 +171,6 @@ inline const char* GetPrimitiveTypeName(PrimitiveType type) {
         case PrimitiveType::PointLight:       return "Point Light";
         case PrimitiveType::SpotLight:        return "Spot Light";
         case PrimitiveType::AreaLight:        return "Area Light";
-        case PrimitiveType::SkyLight:         return "Sky Light";
-        case PrimitiveType::AmbientLight:     return "Ambient Light";
-        case PrimitiveType::HemisphereLight:  return "Hemisphere Light";
-        case PrimitiveType::TubeLight:        return "Tube Light";
-        case PrimitiveType::DiscLight:        return "Disc Light";
         case PrimitiveType::Camera:           return "Camera";
         default:                              return "Object";
     }
@@ -200,12 +180,7 @@ inline bool IsLightPrimitive(PrimitiveType type) {
     return type == PrimitiveType::DirectionalLight ||
            type == PrimitiveType::PointLight ||
            type == PrimitiveType::SpotLight ||
-           type == PrimitiveType::AreaLight ||
-           type == PrimitiveType::SkyLight ||
-           type == PrimitiveType::AmbientLight ||
-           type == PrimitiveType::HemisphereLight ||
-           type == PrimitiveType::TubeLight ||
-           type == PrimitiveType::DiscLight;
+           type == PrimitiveType::AreaLight;
 }
 
 inline bool IsCameraPrimitive(PrimitiveType type) {
@@ -408,12 +383,7 @@ struct GameObject {
                 case PrimitiveType::DirectionalLight: light.type = LightType::Directional; light.castShadows = true; break;
                 case PrimitiveType::PointLight:       light.type = LightType::Point;       light.castShadows = true; break;
                 case PrimitiveType::SpotLight:        light.type = LightType::Spot;        light.castShadows = true; break;
-                case PrimitiveType::AreaLight:        light.type = LightType::Area;        light.castShadows = false; break;
-                case PrimitiveType::SkyLight:         light.type = LightType::Sky;         light.castShadows = false; break;
-                case PrimitiveType::AmbientLight:     light.type = LightType::Ambient;     light.castShadows = false; break;
-                case PrimitiveType::HemisphereLight:  light.type = LightType::Hemisphere;  light.castShadows = false; break;
-                case PrimitiveType::TubeLight:        light.type = LightType::Tube;        light.castShadows = false; break;
-                case PrimitiveType::DiscLight:        light.type = LightType::Disc;        light.castShadows = false; break;
+                case PrimitiveType::AreaLight:        light.type = LightType::Area;        light.castShadows = true; break;
                 default: break;
             }
             light.color = col;

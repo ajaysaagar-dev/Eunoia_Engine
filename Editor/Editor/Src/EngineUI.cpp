@@ -2873,11 +2873,6 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
-                if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-                if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-                if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-                if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-                if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -2920,11 +2915,6 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
-                if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-                if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-                if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-                if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-                if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -2946,11 +2936,6 @@ void EngineUI::RenderOutliner(Scene& scene) {
             if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
             if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
             if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
-            if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-            if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-            if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-            if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-            if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
             ImGui::EndPopup();
         }
 
@@ -3166,7 +3151,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                     }
                 }
 
-                ImGui::DragFloat("Intensity##LightIntensity", &obj->light.intensity, 0.05f, 0.0f, 200.0f, "%.2f");
+                ImGui::DragFloat("Intensity##LightIntensity", &obj->light.intensity, 1.0f, 0.0f, 100000000.0f, "%.2f");
 
                 ImGui::Checkbox("Use Temperature (Kelvin)##UseTemp", &obj->light.useTemperature);
                 if (obj->light.useTemperature) {
@@ -3181,9 +3166,9 @@ void EngineUI::RenderDetails(Scene& scene) {
                                         kelvinCol.b * obj->light.color.b);
                 }
 
-                if (obj->light.type != LightType::Directional && obj->light.type != LightType::Ambient && obj->light.type != LightType::Sky) {
-                    ImGui::DragFloat("Range / Radius", &obj->light.range, 0.1f, 0.1f, 500.0f, "%.1f m");
-                    ImGui::SliderFloat("Attenuation Exp", &obj->light.attenuation, 0.5f, 4.0f, "%.2f");
+                if (obj->light.type != LightType::Directional) {
+                    ImGui::DragFloat("Range / Radius", &obj->light.range, 1.0f, 0.1f, 10000000.0f, "%.1f m");
+                    ImGui::DragFloat("Attenuation Exp", &obj->light.attenuation, 0.05f, 0.0f, 1000.0f, "%.2f");
                 }
 
                 if (obj->light.type == LightType::Spot) {
@@ -3191,81 +3176,42 @@ void EngineUI::RenderDetails(Scene& scene) {
                     ImGui::TextDisabled("Spot Cone Settings");
                     ImGui::SliderFloat("Inner Cone Angle", &obj->light.innerConeAngle, 0.0f, 89.0f, "%.1f deg");
                     if (obj->light.outerConeAngle < obj->light.innerConeAngle) obj->light.outerConeAngle = obj->light.innerConeAngle;
-                    ImGui::SliderFloat("Outer Cone Angle", &obj->light.outerConeAngle, obj->light.innerConeAngle, 90.0f, "%.1f deg");
-                    ImGui::SliderFloat("Cone Falloff", &obj->light.coneFalloff, 0.1f, 5.0f, "%.2f");
+                    ImGui::SliderFloat("Outer Cone Angle", &obj->light.outerConeAngle, obj->light.innerConeAngle, 89.9f, "%.1f deg");
+                    ImGui::DragFloat("Cone Falloff", &obj->light.coneFalloff, 0.05f, 0.1f, 100.0f, "%.2f");
                 }
 
                 if (obj->light.type == LightType::Area) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Area Light Shape");
-                    const char* areaShapes[] = { "Rectangle", "Disk", "Sphere", "Tube" };
-                    ImGui::Combo("Shape", &obj->light.areaShape, areaShapes, 4);
+                    const char* areaShapes[] = { "Rectangle", "Disk" };
+                    ImGui::Combo("Shape", &obj->light.areaShape, areaShapes, 2);
                     if (obj->light.areaShape == 0) {
-                        ImGui::DragFloat("Width", &obj->light.width, 0.05f, 0.01f, 50.0f, "%.2f m");
-                        ImGui::DragFloat("Height", &obj->light.height, 0.05f, 0.01f, 50.0f, "%.2f m");
-                    } else if (obj->light.areaShape == 1 || obj->light.areaShape == 2) {
-                        ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 25.0f, "%.2f m");
-                    } else if (obj->light.areaShape == 3) {
-                        ImGui::DragFloat("Length", &obj->light.length, 0.05f, 0.01f, 50.0f, "%.2f m");
-                        ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 10.0f, "%.2f m");
+                        ImGui::DragFloat("Width", &obj->light.width, 0.1f, 0.01f, 1000000.0f, "%.2f m");
+                        ImGui::DragFloat("Height", &obj->light.height, 0.1f, 0.01f, 1000000.0f, "%.2f m");
+                    } else {
+                        ImGui::DragFloat("Radius", &obj->light.radius, 0.1f, 0.01f, 1000000.0f, "%.2f m");
                     }
                     ImGui::Checkbox("Two Sided", &obj->light.twoSided);
                 }
 
-                if (obj->light.type == LightType::Tube) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Tube Dimensions");
-                    ImGui::DragFloat("Length", &obj->light.length, 0.05f, 0.01f, 50.0f, "%.2f m");
-                    ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 10.0f, "%.2f m");
-                }
-
-                if (obj->light.type == LightType::Disc) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Disc Dimensions");
-                    ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 25.0f, "%.2f m");
-                    ImGui::Checkbox("Two Sided", &obj->light.twoSided);
-                }
-
-                if (obj->light.type == LightType::Hemisphere) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Hemisphere Colors");
-                    ImGui::ColorEdit3("Sky Color##HemiSkyCol", &obj->light.skyColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                    ImGui::ColorEdit3("Ground Color##HemiGndCol", &obj->light.groundColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                }
-
-                if (obj->light.type == LightType::Sky) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Environment & Sky");
-                    char envBuf[260];
-                    strncpy(envBuf, obj->light.envMapTexture.c_str(), sizeof(envBuf));
-                    if (ImGui::InputText("Environment HDRI##SkyHDRI", envBuf, sizeof(envBuf))) {
-                        obj->light.envMapTexture = envBuf;
-                    }
-                    ImGui::SliderFloat("HDRI Rotation##SkyRot", &obj->light.envRotation, 0.0f, 360.0f, "%.1f deg");
-                    ImGui::SliderFloat("Diffuse Contribution##SkyDiff", &obj->light.diffuseContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Specular Contribution##SkySpec", &obj->light.specularContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Ambient Contribution##SkyAmb", &obj->light.ambientContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Mip Level##SkyMip", &obj->light.mipLevel, 0.0f, 8.0f);
-                    ImGui::ColorEdit3("Lower Hemisphere Color##SkyLowerHemiCol", &obj->light.lowerHemisphereColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                }
-
-                if (obj->light.type == LightType::Directional || obj->light.type == LightType::Point || obj->light.type == LightType::Spot) {
+                if (obj->light.type == LightType::Directional || obj->light.type == LightType::Point ||
+                    obj->light.type == LightType::Spot || obj->light.type == LightType::Area) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Shadows");
                     ImGui::Checkbox("Cast Shadows", &obj->light.castShadows);
                     if (obj->light.castShadows) {
                         ImGui::SliderFloat("Shadow Strength", &obj->light.shadowStrength, 0.0f, 1.0f);
-                        ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.00001f, 0.05f, "%.5f");
-                        const char* resOptions[] = { "512", "1024", "2048", "4096" };
-                        int curResIdx = (obj->light.shadowResolution >= 4096) ? 3 : (obj->light.shadowResolution >= 2048) ? 2 : (obj->light.shadowResolution >= 1024) ? 1 : 0;
-                        if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 4)) {
-                            int resVals[] = { 512, 1024, 2048, 4096 };
+                        ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.000001f, 1.0f, "%.6f");
+                        const char* resOptions[] = { "256", "512", "1024", "2048", "4096" };
+                        int resVals[] = { 256, 512, 1024, 2048, 4096 };
+                        int curResIdx = 0;
+                        for (int r = 0; r < 5; ++r) {
+                            if (obj->light.shadowResolution == resVals[r]) { curResIdx = r; break; }
+                        }
+                        if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 5)) {
                             obj->light.shadowResolution = resVals[curResIdx];
                         }
-                        ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 5.0f, 1000.0f, "%.1f m");
+                        ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 1.0f, 1000000.0f, "%.1f m");
                         if (obj->light.type == LightType::Directional) {
                             ImGui::Checkbox("Show Light Frustum", &scene.showLightFrustum);
                         }
@@ -3277,7 +3223,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::Checkbox("Volumetric Scattering", &obj->light.volumetric);
                 if (obj->light.volumetric) {
                     ImGui::SliderFloat("Scattering", &obj->light.volumetricScattering, 0.0f, 1.0f);
-                    ImGui::DragFloat("Volumetric Intensity", &obj->light.volumetricIntensity, 0.05f, 0.0f, 10.0f);
+                    ImGui::DragFloat("Volumetric Intensity", &obj->light.volumetricIntensity, 0.05f, 0.0f, 1000.0f);
                 }
 
                 ImGui::Separator();
@@ -3289,11 +3235,33 @@ void EngineUI::RenderDetails(Scene& scene) {
             }
 
             if (obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
-                scene.pointLights[obj->lightId].color = obj->light.color;
-                scene.pointLights[obj->lightId].intensity = obj->light.intensity;
-                scene.pointLights[obj->lightId].range = obj->light.range;
-                scene.pointLights[obj->lightId].enabled = obj->light.enabled;
-                scene.pointLights[obj->lightId].castShadows = obj->light.castShadows;
+                auto& pl = scene.pointLights[obj->lightId];
+                pl.type = obj->light.type;
+                pl.color = obj->light.color;
+                pl.intensity = obj->light.intensity;
+                pl.range = obj->light.range;
+                pl.attenuation = obj->light.attenuation;
+                pl.enabled = obj->light.enabled;
+                pl.castShadows = obj->light.castShadows;
+                pl.shadowStrength = obj->light.shadowStrength;
+                pl.shadowBias = obj->light.shadowBias;
+                pl.shadowResolution = obj->light.shadowResolution;
+                pl.innerConeAngle = obj->light.innerConeAngle;
+                pl.outerConeAngle = obj->light.outerConeAngle;
+                pl.coneFalloff = obj->light.coneFalloff;
+                pl.areaShape = obj->light.areaShape;
+                pl.width = obj->light.width;
+                pl.height = obj->light.height;
+                pl.radius = obj->light.radius;
+                pl.twoSided = obj->light.twoSided;
+            }
+            if (obj->light.type == LightType::Directional) {
+                scene.lightColor = obj->light.color;
+                scene.lightIntensity = obj->light.intensity;
+                scene.enableShadows = obj->light.castShadows;
+                scene.shadowStrength = obj->light.shadowStrength;
+                scene.shadowBias = obj->light.shadowBias;
+                scene.shadowResolution = obj->light.shadowResolution;
             }
         }
 

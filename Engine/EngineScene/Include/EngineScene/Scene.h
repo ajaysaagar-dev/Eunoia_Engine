@@ -20,12 +20,30 @@ void AddEngineLog(const std::string& category, const std::string& message, int l
 struct PointLight {
     int id = 0;
     std::string name = "Point Light";
+    LightType type = LightType::Point;
     glm::vec3 position{0.0f, 2.5f, 0.0f};
+    glm::vec3 direction{0.0f, -1.0f, 0.0f};
     glm::vec3 color{1.0f, 0.95f, 0.85f};
     float intensity = 2.0f;
     float range = 10.0f;
+    float attenuation = 2.0f;
     bool enabled = true;
     bool castShadows = true;
+    float shadowStrength = 0.85f;
+    float shadowBias = 0.0012f;
+    int shadowResolution = 1024;
+
+    // Spot Light
+    float innerConeAngle = 20.0f;
+    float outerConeAngle = 45.0f;
+    float coneFalloff = 1.0f;
+
+    // Area Light
+    int areaShape = 0;
+    float width = 1.0f;
+    float height = 1.0f;
+    float radius = 0.5f;
+    bool twoSided = false;
 };
 
 class Scene {
@@ -48,6 +66,7 @@ public:
     bool enableShadows = true;
     float shadowStrength = 0.85f;
     float shadowBias = 0.0012f;
+    int shadowResolution = 2048;
     float pcfRadius = 1.2f;
     bool showLightFrustum = false;
     bool hasLightFrustumCorners = false;
@@ -283,8 +302,6 @@ public:
         std::string name = std::string(GetPrimitiveTypeName(lightType)) + " " + std::to_string(id);
         glm::vec3 col(1.0f, 0.95f, 0.85f);
         if (lightType == PrimitiveType::DirectionalLight) col = glm::vec3(1.0f, 0.98f, 0.92f);
-        else if (lightType == PrimitiveType::SkyLight) col = glm::vec3(0.6f, 0.75f, 1.0f);
-        else if (lightType == PrimitiveType::AmbientLight) col = glm::vec3(0.8f, 0.85f, 1.0f);
 
         objects.emplace_back(id, name, lightType, pos, col);
         GameObject& obj = objects.back();
@@ -296,17 +313,30 @@ public:
         }
 
         if (lightType == PrimitiveType::PointLight || lightType == PrimitiveType::SpotLight ||
-            lightType == PrimitiveType::TubeLight || lightType == PrimitiveType::DiscLight ||
             lightType == PrimitiveType::AreaLight) {
             PointLight pl;
             pl.id = id;
             pl.name = name;
+            pl.type = obj.light.type;
             pl.position = pos;
+            pl.direction = obj.light.direction;
             pl.color = col;
-            pl.intensity = 2.0f;
-            pl.range = 10.0f;
+            pl.intensity = obj.light.intensity;
+            pl.range = obj.light.range;
+            pl.attenuation = obj.light.attenuation;
             pl.enabled = true;
             pl.castShadows = true;
+            pl.shadowStrength = obj.light.shadowStrength;
+            pl.shadowBias = obj.light.shadowBias;
+            pl.shadowResolution = obj.light.shadowResolution;
+            pl.innerConeAngle = obj.light.innerConeAngle;
+            pl.outerConeAngle = obj.light.outerConeAngle;
+            pl.coneFalloff = obj.light.coneFalloff;
+            pl.areaShape = obj.light.areaShape;
+            pl.width = obj.light.width;
+            pl.height = obj.light.height;
+            pl.radius = obj.light.radius;
+            pl.twoSided = obj.light.twoSided;
             pointLights.push_back(pl);
             obj.lightId = (int)pointLights.size() - 1;
         }
@@ -352,34 +382,37 @@ public:
                     enableShadows = obj.light.castShadows;
                     shadowStrength = obj.light.shadowStrength;
                     shadowBias = obj.light.shadowBias;
+                    shadowResolution = obj.light.shadowResolution;
                     hasDirectional = true;
-                }
-
-                if (obj.light.type == LightType::Ambient && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
-                }
-                else if (obj.light.type == LightType::Sky && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.ambientContribution * obj.light.intensity, 0.0f, 2.0f);
-                }
-                else if (obj.light.type == LightType::Hemisphere && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
                 }
 
                 if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
                     obj.light.type == LightType::Spot || obj.type == PrimitiveType::SpotLight ||
-                    obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight ||
-                    obj.light.type == LightType::Tube || obj.type == PrimitiveType::TubeLight ||
-                    obj.light.type == LightType::Disc || obj.type == PrimitiveType::DiscLight) {
+                    obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight) {
                     if (obj.light.enabled) {
                         PointLight pl;
                         pl.id = obj.id;
                         pl.name = obj.name;
+                        pl.type = obj.light.type;
                         pl.position = worldPos;
+                        pl.direction = obj.light.direction;
                         pl.color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
                         pl.intensity = obj.light.intensity;
                         pl.range = obj.light.range;
+                        pl.attenuation = obj.light.attenuation;
                         pl.enabled = obj.light.enabled;
                         pl.castShadows = obj.light.castShadows;
+                        pl.shadowStrength = obj.light.shadowStrength;
+                        pl.shadowBias = obj.light.shadowBias;
+                        pl.shadowResolution = obj.light.shadowResolution;
+                        pl.innerConeAngle = obj.light.innerConeAngle;
+                        pl.outerConeAngle = obj.light.outerConeAngle;
+                        pl.coneFalloff = obj.light.coneFalloff;
+                        pl.areaShape = obj.light.areaShape;
+                        pl.width = obj.light.width;
+                        pl.height = obj.light.height;
+                        pl.radius = obj.light.radius;
+                        pl.twoSided = obj.light.twoSided;
                         pointLights.push_back(pl);
                         obj.lightId = (int)pointLights.size() - 1;
                     }

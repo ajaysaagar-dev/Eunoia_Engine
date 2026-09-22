@@ -54,14 +54,21 @@ const int WIDTH = 1728;
 const int HEIGHT = 1117;
 const UINT FRAME_COUNT = 2;
 
-// Real-Time Shadow Mapping Configuration (2048x2048 D32_FLOAT PCF)
+// Real-Time Shadow Mapping Configuration
 const UINT SHADOW_MAP_WIDTH = 2048;
 const UINT SHADOW_MAP_HEIGHT = 2048;
 const UINT POINT_SHADOW_MAP_SIZE = 512;
 const UINT MAX_SHADOW_POINT_LIGHTS = 4;
+const UINT MAX_SHADOW_SPOT_LIGHTS = 4;
 
-// Real-Time Point Lights Configuration
+// Real-Time Lights Configuration (Directional, Point, Spot, Area)
 const int MAX_POINT_LIGHTS = 64;
+
+static UINT g_currentDirShadowRes = 2048;
+static UINT g_currentPointShadowRes = 512;
+static UINT g_currentSpotShadowRes = 1024;
+static UINT g_activePointLightResolutions[MAX_SHADOW_POINT_LIGHTS] = { 512, 512, 512, 512 };
+static UINT g_activeSpotLightResolutions[MAX_SHADOW_SPOT_LIGHTS] = { 1024, 1024, 1024, 1024 };
 
 // HLSL Constant Buffer struct (must be 256-byte aligned in D3D12)
 struct alignas(256) SceneConstantBuffer
@@ -80,7 +87,10 @@ struct alignas(256) SceneConstantBuffer
 	float numPointLights;
 	glm::vec4 pointLightPosRange[MAX_POINT_LIGHTS];
 	glm::vec4 pointLightColorIntensity[MAX_POINT_LIGHTS];
-	glm::vec4 pointLightCastShadows[MAX_POINT_LIGHTS / 4]; // x,y,z,w corresponding to point lights (1.0 = cast shadows, 0.0 = no shadows)
+	glm::vec4 pointLightDirType[MAX_POINT_LIGHTS];
+	glm::vec4 pointLightSpotAreaParams[MAX_POINT_LIGHTS];
+	glm::vec4 pointLightShadowParams[MAX_POINT_LIGHTS];
+	glm::mat4 spotLightSpaceMatrices[MAX_SHADOW_SPOT_LIGHTS];
 };
 
 struct alignas(256) ShadowConstantBuffer
@@ -205,6 +215,13 @@ static D3D12_CPU_DESCRIPTOR_HANDLE g_pointShadowDsvHandles[MAX_SHADOW_POINT_LIGH
 static D3D12_CPU_DESCRIPTOR_HANDLE g_pointShadowSrvCpuHandle = {};
 static D3D12_GPU_DESCRIPTOR_HANDLE g_pointShadowSrvGpuHandle = {};
 static int g_activeShadowPointLights = 0;
+
+// Real-Time Spot / Area Light Shadow 2D Array Resources
+static ID3D12Resource* g_spotShadowDepthBuffer = nullptr;
+static D3D12_CPU_DESCRIPTOR_HANDLE g_spotShadowDsvHandles[MAX_SHADOW_SPOT_LIGHTS] = {};
+static D3D12_CPU_DESCRIPTOR_HANDLE g_spotShadowSrvCpuHandle = {};
+static D3D12_GPU_DESCRIPTOR_HANDLE g_spotShadowSrvGpuHandle = {};
+static int g_activeShadowSpotLights = 0;
 
 static ID3D12RootSignature* g_shadowRootSignature = nullptr;
 static ID3D12PipelineState* g_shadowPipelineState = nullptr;
@@ -894,24 +911,35 @@ int createDepthStencilView(int width, int height)
 	return EXIT_SUCCESS;
 }
 
-int createShadowResources()
+int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1024)
 {
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	dirRes = SnapRes(dirRes, 2048);
+	ptRes = SnapRes(ptRes, 512);
+	spotRes = SnapRes(spotRes, 1024);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+
+	// 1. Directional Shadow Map (Texture2D)
 	if (g_shadowDepthBuffer)
 	{
 		g_shadowDepthBuffer->Release();
 		g_shadowDepthBuffer = nullptr;
 	}
-	if (g_pointShadowDepthBuffer)
-	{
-		g_pointShadowDepthBuffer->Release();
-		g_pointShadowDepthBuffer = nullptr;
-	}
 
 	D3D12_RESOURCE_DESC depthDesc = {};
 	depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	depthDesc.Alignment = 0;
-	depthDesc.Width = SHADOW_MAP_WIDTH;
-	depthDesc.Height = SHADOW_MAP_HEIGHT;
+	depthDesc.Width = dirRes;
+	depthDesc.Height = dirRes;
 	depthDesc.DepthOrArraySize = 1;
 	depthDesc.MipLevels = 1;
 	depthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -924,8 +952,6 @@ int createShadowResources()
 	depthClear.Format = DXGI_FORMAT_D32_FLOAT;
 	depthClear.DepthStencil.Depth = 1.0f;
 	depthClear.DepthStencil.Stencil = 0;
-
-	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 
 	HRESULT hr = g_d3dDevice->CreateCommittedResource(
 		&heapProps,
@@ -953,15 +979,15 @@ int createShadowResources()
 	g_d3dDevice->CreateDepthStencilView(g_shadowDepthBuffer, &dsvDesc, g_shadowDsvHandle);
 
 	// Create SRV in g_srvDescHeap for directional shadow map
-	UINT descIdx = 0;
-	if (!TryAllocSrvDescriptors(1, descIdx))
+	if (g_shadowSrvCpuHandle.ptr == 0)
 	{
-		descIdx = 0;
+		UINT descIdx = 0;
+		TryAllocSrvDescriptors(1, descIdx);
+		g_shadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_shadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_shadowSrvCpuHandle.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
+		g_shadowSrvGpuHandle.ptr += (UINT64)descIdx * g_srvDescriptorSize;
 	}
-	g_shadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
-	g_shadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
-	g_shadowSrvCpuHandle.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
-	g_shadowSrvGpuHandle.ptr += (UINT64)descIdx * g_srvDescriptorSize;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -970,14 +996,22 @@ int createShadowResources()
 	srvDesc.Texture2D.MipLevels = 1;
 	g_d3dDevice->CreateShaderResourceView(g_shadowDepthBuffer, &srvDesc, g_shadowSrvCpuHandle);
 
+	g_currentDirShadowRes = dirRes;
+
 	// ------------------------------------------------------------------------
-	// Create Point Light Shadow Cubemap Array Texture (512x512, 4 lights * 6 faces = 24 slices)
+	// 2. Point Light Shadow Cubemap Array Texture (ptRes x ptRes, 4 lights * 6 faces = 24 slices)
 	// ------------------------------------------------------------------------
+	if (g_pointShadowDepthBuffer)
+	{
+		g_pointShadowDepthBuffer->Release();
+		g_pointShadowDepthBuffer = nullptr;
+	}
+
 	D3D12_RESOURCE_DESC ptDepthDesc = {};
 	ptDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	ptDepthDesc.Alignment = 0;
-	ptDepthDesc.Width = POINT_SHADOW_MAP_SIZE;
-	ptDepthDesc.Height = POINT_SHADOW_MAP_SIZE;
+	ptDepthDesc.Width = ptRes;
+	ptDepthDesc.Height = ptRes;
 	ptDepthDesc.DepthOrArraySize = MAX_SHADOW_POINT_LIGHTS * 6; // 24
 	ptDepthDesc.MipLevels = 1;
 	ptDepthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -1023,15 +1057,15 @@ int createShadowResources()
 	}
 
 	// Create SRV in g_srvDescHeap for TextureCubeArray
-	UINT ptDescIdx = 0;
-	if (!TryAllocSrvDescriptors(1, ptDescIdx))
+	if (g_pointShadowSrvCpuHandle.ptr == 0)
 	{
-		ptDescIdx = 0;
+		UINT ptDescIdx = 0;
+		TryAllocSrvDescriptors(1, ptDescIdx);
+		g_pointShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_pointShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_pointShadowSrvCpuHandle.ptr += (SIZE_T)ptDescIdx * g_srvDescriptorSize;
+		g_pointShadowSrvGpuHandle.ptr += (UINT64)ptDescIdx * g_srvDescriptorSize;
 	}
-	g_pointShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
-	g_pointShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
-	g_pointShadowSrvCpuHandle.ptr += (SIZE_T)ptDescIdx * g_srvDescriptorSize;
-	g_pointShadowSrvGpuHandle.ptr += (UINT64)ptDescIdx * g_srvDescriptorSize;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC ptSrvDesc = {};
 	ptSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1042,19 +1076,131 @@ int createShadowResources()
 	ptSrvDesc.TextureCubeArray.MipLevels = 1;
 	g_d3dDevice->CreateShaderResourceView(g_pointShadowDepthBuffer, &ptSrvDesc, g_pointShadowSrvCpuHandle);
 
-	// Create Shadow Constant Buffer (upload heap: slot 0 for directional, slots 1..24 for point lights)
-	UINT64 shadowCbSize = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6) * 256;
-	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(shadowCbSize);
-	D3D12_HEAP_PROPERTIES uploadHeap = CreateHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-	g_d3dDevice->CreateCommittedResource(
-		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer)
+	g_currentPointShadowRes = ptRes;
+
+	// ------------------------------------------------------------------------
+	// 3. Spot / Area Light Shadow 2D Array Texture (spotRes x spotRes, 4 slices)
+	// ------------------------------------------------------------------------
+	if (g_spotShadowDepthBuffer)
+	{
+		g_spotShadowDepthBuffer->Release();
+		g_spotShadowDepthBuffer = nullptr;
+	}
+
+	D3D12_RESOURCE_DESC spotDepthDesc = {};
+	spotDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	spotDepthDesc.Alignment = 0;
+	spotDepthDesc.Width = spotRes;
+	spotDepthDesc.Height = spotRes;
+	spotDepthDesc.DepthOrArraySize = MAX_SHADOW_SPOT_LIGHTS; // 4
+	spotDepthDesc.MipLevels = 1;
+	spotDepthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	spotDepthDesc.SampleDesc.Count = 1;
+	spotDepthDesc.SampleDesc.Quality = 0;
+	spotDepthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	spotDepthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE spotDepthClear = {};
+	spotDepthClear.Format = DXGI_FORMAT_D32_FLOAT;
+	spotDepthClear.DepthStencil.Depth = 1.0f;
+	spotDepthClear.DepthStencil.Stencil = 0;
+
+	hr = g_d3dDevice->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&spotDepthDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		&spotDepthClear,
+		IID_PPV_ARGS(&g_spotShadowDepthBuffer)
 	);
-	if (g_shadowConstantBuffer) g_shadowConstantBuffer->SetName(L"g_shadowConstantBuffer");
-	D3D12_RANGE readRange = { 0, 0 };
-	g_shadowConstantBuffer->Map(0, &readRange, &g_pShadowConstantMapped);
+	if (FAILED(hr))
+	{
+		std::cerr << "Failed to create D3D12 spot shadow depth buffer: " << hr << std::endl;
+		return EXIT_FAILURE;
+	}
+	g_spotShadowDepthBuffer->SetName(L"g_spotShadowDepthBuffer");
+
+	// Create 4 DSVs at indices 26..29 of g_dsvDescHeap
+	for (UINT i = 0; i < MAX_SHADOW_SPOT_LIGHTS; ++i)
+	{
+		D3D12_DEPTH_STENCIL_VIEW_DESC spotDsvDesc = {};
+		spotDsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+		spotDsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+		spotDsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+		spotDsvDesc.Texture2DArray.FirstArraySlice = i;
+		spotDsvDesc.Texture2DArray.ArraySize = 1;
+		spotDsvDesc.Texture2DArray.MipSlice = 0;
+
+		g_spotShadowDsvHandles[i] = g_dsvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_spotShadowDsvHandles[i].ptr += (SIZE_T)(26 + i) * g_dsvDescriptorSize;
+		g_d3dDevice->CreateDepthStencilView(g_spotShadowDepthBuffer, &spotDsvDesc, g_spotShadowDsvHandles[i]);
+	}
+
+	// Create SRV in g_srvDescHeap for Texture2DArray
+	if (g_spotShadowSrvCpuHandle.ptr == 0)
+	{
+		UINT spotDescIdx = 0;
+		TryAllocSrvDescriptors(1, spotDescIdx);
+		g_spotShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_spotShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_spotShadowSrvCpuHandle.ptr += (SIZE_T)spotDescIdx * g_srvDescriptorSize;
+		g_spotShadowSrvGpuHandle.ptr += (UINT64)spotDescIdx * g_srvDescriptorSize;
+	}
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC spotSrvDesc = {};
+	spotSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	spotSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	spotSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+	spotSrvDesc.Texture2DArray.FirstArraySlice = 0;
+	spotSrvDesc.Texture2DArray.ArraySize = MAX_SHADOW_SPOT_LIGHTS;
+	spotSrvDesc.Texture2DArray.MipLevels = 1;
+	g_d3dDevice->CreateShaderResourceView(g_spotShadowDepthBuffer, &spotSrvDesc, g_spotShadowSrvCpuHandle);
+
+	g_currentSpotShadowRes = spotRes;
+
+	// ------------------------------------------------------------------------
+	// 4. Shadow Constant Buffer (upload heap: slot 0 for directional, slots 1..24 for point lights, slots 25..28 for spot lights)
+	// ------------------------------------------------------------------------
+	if (!g_shadowConstantBuffer)
+	{
+		UINT64 shadowCbSize = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + MAX_SHADOW_SPOT_LIGHTS) * 256;
+		D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(shadowCbSize);
+		D3D12_HEAP_PROPERTIES uploadHeap = CreateHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+		g_d3dDevice->CreateCommittedResource(
+			&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer)
+		);
+		if (g_shadowConstantBuffer) g_shadowConstantBuffer->SetName(L"g_shadowConstantBuffer");
+		D3D12_RANGE readRange = { 0, 0 };
+		g_shadowConstantBuffer->Map(0, &readRange, &g_pShadowConstantMapped);
+	}
 
 	return EXIT_SUCCESS;
+}
+
+void EnsureShadowBuffers(UINT reqDirRes, UINT reqPtRes, UINT reqSpotRes)
+{
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	reqDirRes = SnapRes(reqDirRes, 2048);
+	reqPtRes = SnapRes(reqPtRes, 512);
+	reqSpotRes = SnapRes(reqSpotRes, 1024);
+
+	if (reqDirRes != g_currentDirShadowRes ||
+		reqPtRes != g_currentPointShadowRes ||
+		reqSpotRes != g_currentSpotShadowRes ||
+		!g_shadowDepthBuffer || !g_pointShadowDepthBuffer || !g_spotShadowDepthBuffer)
+	{
+		WaitForGpuIdle();
+		createShadowResources(reqDirRes, reqPtRes, reqSpotRes);
+	}
 }
 
 int initD3D12(HWND hwnd)
@@ -1189,7 +1335,7 @@ int initD3D12(HWND hwnd)
 	g_rtvDescHeap->SetName(L"g_rtvDescHeap");
 
 	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-	dsvHeapDesc.NumDescriptors = 32; // Index 0: SwapChain Depth, Index 1: Directional Shadow Depth, Indices 2..25: Point Light Cubemap Faces
+	dsvHeapDesc.NumDescriptors = 64; // Index 0: SwapChain Depth, Index 1: Directional Shadow Depth, Indices 2..25: Point Cubemap Faces, Indices 26..29: Spot/Area Slices
 	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	g_d3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&g_dsvDescHeap));
@@ -1264,7 +1410,7 @@ int initD3D12(HWND hwnd)
 
 int createShadersAndPipeline()
 {
-	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t5 for materials, Descriptor Table t6 for shadow map, Descriptor Table t7 for point shadows, Samplers s0 and s1)
+	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t5 for materials, Descriptor Table t6 for shadow map, Descriptor Table t7 for point shadows, Descriptor Table t8 for spot/area shadows, Samplers s0-s2)
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	srvRange.NumDescriptors = 6;
@@ -1286,7 +1432,14 @@ int createShadersAndPipeline()
 	ptShadowSrvRange.RegisterSpace = 0;
 	ptShadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-	D3D12_ROOT_PARAMETER rootParams[5] = {};
+	D3D12_DESCRIPTOR_RANGE spotShadowSrvRange = {};
+	spotShadowSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	spotShadowSrvRange.NumDescriptors = 1;
+	spotShadowSrvRange.BaseShaderRegister = 8;
+	spotShadowSrvRange.RegisterSpace = 0;
+	spotShadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	D3D12_ROOT_PARAMETER rootParams[6] = {};
 	// 0: CBV b0 (Frame Constants)
 	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	rootParams[0].Descriptor.ShaderRegister = 0;
@@ -1300,23 +1453,29 @@ int createShadersAndPipeline()
 	rootParams[1].Constants.Num32BitValues = 24;
 	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-	// 2: Descriptor Table t0-t4 (5 SRVs for Material Textures)
+	// 2: Descriptor Table t0-t5 (6 SRVs for Material Textures)
 	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[2].DescriptorTable.pDescriptorRanges = &srvRange;
 	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// 3: Descriptor Table t5 (1 SRV for Directional Shadow Map)
+	// 3: Descriptor Table t6 (1 SRV for Directional Shadow Map)
 	rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[3].DescriptorTable.pDescriptorRanges = &shadowSrvRange;
 	rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// 4: Descriptor Table t6 (1 SRV for Point Light Shadow Cubemap Array)
+	// 4: Descriptor Table t7 (1 SRV for Point Light Shadow Cubemap Array)
 	rootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[4].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[4].DescriptorTable.pDescriptorRanges = &ptShadowSrvRange;
 	rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	// 5: Descriptor Table t8 (1 SRV for Spot / Area Light Shadow 2D Array)
+	rootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	rootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+	rootParams[5].DescriptorTable.pDescriptorRanges = &spotShadowSrvRange;
+	rootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 	D3D12_STATIC_SAMPLER_DESC staticSamplers[3] = {};
 	// Sampler 0: s0 (Anisotropic wrap for materials)
@@ -1334,7 +1493,7 @@ int createShadersAndPipeline()
 	staticSamplers[0].RegisterSpace = 0;
 	staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// Sampler 1: s1 (Hardware PCF Comparison Sampler for 2D Directional Shadow Map)
+	// Sampler 1: s1 (Hardware PCF Comparison Sampler for 2D Directional & Spot Shadow Maps)
 	staticSamplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
 	staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
 	staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -1365,7 +1524,7 @@ int createShadersAndPipeline()
 	staticSamplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 	D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-	rootSigDesc.NumParameters = 5;
+	rootSigDesc.NumParameters = 6;
 	rootSigDesc.pParameters = rootParams;
 	rootSigDesc.NumStaticSamplers = 3;
 	rootSigDesc.pStaticSamplers = staticSamplers;
@@ -1386,7 +1545,7 @@ int createShadersAndPipeline()
 	g_d3dDevice->CreateRootSignature(0, serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
 	serializedRootSig->Release();
 
-	// 2. Compile Main HLSL Shaders with Hardware PBR, 2K Textures & 16-Tap PCF Real-Time Shadows
+	// 2. Compile Main HLSL Shaders with Hardware PBR, 2K Textures & Real-Time Directional, Point, Spot, Area Shadows
 	const char* hlslSource = R"(
 		cbuffer FrameConstants : register(b0)
 		{
@@ -1404,7 +1563,10 @@ int createShadersAndPipeline()
 			float numPointLights;
 			float4 pointLightPosRange[64];
 			float4 pointLightColorIntensity[64];
-			float4 pointLightCastShadows[16];
+			float4 pointLightDirType[64];
+			float4 pointLightSpotAreaParams[64];
+			float4 pointLightShadowParams[64];
+			float4x4 spotLightSpaceMatrices[4];
 		};
 
 		cbuffer MaterialConstants : register(b1)
@@ -1438,6 +1600,7 @@ int createShadersAndPipeline()
 		Texture2D g_opacityTex : register(t5);
 		Texture2D g_shadowMap : register(t6);
 		TextureCubeArray g_pointShadowMap : register(t7);
+		Texture2DArray g_spotShadowMap : register(t8);
 
 		SamplerState g_sampler : register(s0);
 		SamplerComparisonState g_shadowSampler : register(s1);
@@ -1501,20 +1664,15 @@ int createShadersAndPipeline()
 			float cosTheta = saturate(dot(N, L));
 			float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
 
-			// Calculate shadow map world-space texel size from the lightSpaceMatrix scale
 			float lightScale = length(lightSpaceMatrix[0].xyz);
 			float texelSizeWorld = (lightScale > 0.00001f) ? (2.0f / (shadowMapSize * lightScale)) : 0.02f;
 
-			// World-space normal offset bias: geometrically moves the lookup position along the normal,
-			// eliminating self-shadow acne and repetitive interference bands across surfaces and slopes without peter-panning.
 			float normalBias = texelSizeWorld * (1.5f * sinTheta + 0.5f);
 			float3 biasedWorldPos = worldPos + N * normalBias;
 
-			// Compute shadow coordinates per-pixel from biased world position
 			float4 shadowCoord = mul(lightSpaceMatrix, float4(biasedWorldPos, 1.0f));
 			float3 projCoords = shadowCoord.xyz / shadowCoord.w;
 
-			// Outside frustum test
 			if (projCoords.z > 1.0f || projCoords.z < 0.0f ||
 				projCoords.x < -1.0f || projCoords.x > 1.0f ||
 				projCoords.y < -1.0f || projCoords.y > 1.0f)
@@ -1522,12 +1680,10 @@ int createShadersAndPipeline()
 				return 1.0f;
 			}
 
-			// Map NDC [-1, 1] to Texture UV [0, 1] (D3D texture coordinates: V=0 is top)
 			float2 shadowUV;
 			shadowUV.x = projCoords.x * 0.5f + 0.5f;
 			shadowUV.y = -projCoords.y * 0.5f + 0.5f;
 
-			// Smooth edge fading near frustum boundary to prevent hard shadow cutoff
 			float borderDist = min(min(shadowUV.x, 1.0f - shadowUV.x), min(shadowUV.y, 1.0f - shadowUV.y));
 			if (borderDist <= 0.0f) return 1.0f;
 			float fade = saturate(borderDist * 10.0f);
@@ -1535,11 +1691,9 @@ int createShadersAndPipeline()
 			float zBorderDist = min(projCoords.z, 1.0f - projCoords.z);
 			fade = min(fade, saturate(zBorderDist * 10.0f));
 
-			// Slope-scaled depth bias as a precision safeguard
 			float depthBias = max(shadowBias * (1.0f - cosTheta), shadowBias * 0.2f);
 			float currentDepth = projCoords.z - depthBias;
 
-			// 16-tap Poisson Disk PCF for smooth, continuous, stripe-free soft shadows
 			float texelSize = 1.0f / shadowMapSize;
 			float filterRadius = texelSize * max(pcfRadius, 0.5f);
 
@@ -1567,7 +1721,7 @@ int createShadersAndPipeline()
 			float3( 0.707f,  0.707f,  0.0f), float3(-0.707f, -0.707f,  0.0f)
 		};
 
-		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N)
+		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N, float shadowRes, float sBias, float sStrength)
 		{
 			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
 
@@ -1578,8 +1732,7 @@ int createShadersAndPipeline()
 			float3 L = -toFrag / currentDist;
 			float cosTheta = saturate(dot(N, L));
 
-			// Slope-scaled normal bias in world space: dynamically scale to prevent self-shadow acne without peter-panning
-			float worldBias = max(0.04f * (1.0f - cosTheta), 0.008f);
+			float worldBias = max(sBias * 20.0f * (1.0f - cosTheta), sBias * 5.0f);
 
 			float absZ = max(abs(toFrag.x), max(abs(toFrag.y), abs(toFrag.z)));
 			float nearZ = 0.05f;
@@ -1590,8 +1743,8 @@ int createShadersAndPipeline()
 
 			float refDepth = saturate((farZ / (farZ - nearZ)) - (farZ * nearZ / (farZ - nearZ)) / max(biasedZ, 0.0001f));
 
-			// Smooth soft shadow filter radius (scales with distance and scene PCF radius)
-			float diskRadius = (0.008f + 0.020f * (currentDist / farZ)) * max(pcfRadius, 0.5f);
+			float filterScale = 512.0f / max(shadowRes, 256.0f);
+			float diskRadius = (0.008f + 0.020f * saturate(currentDist / farZ)) * max(pcfRadius, 0.5f) * filterScale;
 
 			float shadow = 0.0f;
 			[unroll]
@@ -1602,10 +1755,50 @@ int createShadersAndPipeline()
 			}
 			shadow /= 16.0f;
 
-			// Smooth edge fading near range boundary
 			float distFade = saturate((pRange - currentDist) / max(pRange * 0.1f, 0.5f));
-			float finalShadow = lerp(1.0f - shadowStrength, 1.0f, shadow);
+			float finalShadow = lerp(1.0f - sStrength, 1.0f, shadow);
 			return lerp(1.0f, finalShadow, distFade);
+		}
+
+		float CalculateSpotShadow(int shadowIdx, float3 worldPos, float3 N, float3 L, float4x4 spotMatrix, float shadowRes, float sBias, float sStrength)
+		{
+			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
+
+			float cosTheta = saturate(dot(N, L));
+			float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+			float texelSize = 1.0f / max(shadowRes, 256.0f);
+			float normalBias = texelSize * 2.0f * (1.5f * sinTheta + 0.5f);
+			float3 biasedWorldPos = worldPos + N * normalBias;
+
+			float4 shadowCoord = mul(spotMatrix, float4(biasedWorldPos, 1.0f));
+			float3 projCoords = shadowCoord.xyz / shadowCoord.w;
+
+			if (projCoords.z > 1.0f || projCoords.z < 0.0f ||
+				projCoords.x < -1.0f || projCoords.x > 1.0f ||
+				projCoords.y < -1.0f || projCoords.y > 1.0f)
+			{
+				return 1.0f;
+			}
+
+			float2 shadowUV;
+			shadowUV.x = projCoords.x * 0.5f + 0.5f;
+			shadowUV.y = -projCoords.y * 0.5f + 0.5f;
+
+			float depthBias = max(sBias * (1.0f - cosTheta), sBias * 0.2f);
+			float currentDepth = projCoords.z - depthBias;
+
+			float filterRadius = texelSize * max(pcfRadius, 0.5f);
+			float shadow = 0.0f;
+			[unroll]
+			for (int k = 0; k < 16; ++k)
+			{
+				float2 offset = poissonDisk16[k] * filterRadius;
+				shadow += g_spotShadowMap.SampleCmpLevelZero(g_shadowSampler, float3(shadowUV + offset, (float)shadowIdx), currentDepth);
+			}
+			shadow /= 16.0f;
+
+			return lerp(1.0f - sStrength, 1.0f, shadow);
 		}
 
 		float4 PSMain(PSInput input) : SV_TARGET
@@ -1618,7 +1811,6 @@ int createShadersAndPipeline()
 				currentOpacity *= g_opacityTex.Sample(g_sampler, uv).r;
 			}
 
-			// Masked blend mode: clip / discard pixels below threshold
 			if (blendMode > 0.5f && blendMode < 1.5f)
 			{
 				clip(currentOpacity - opacityMaskClipValue);
@@ -1705,7 +1897,7 @@ int createShadersAndPipeline()
 			float3 ambF = F0 + (max(1.0f - rough, F0) - F0) * pow(clamp(1.0f - NdotV, 0.0f, 1.0f), 5.0f);
 			float3 ambientSpec = ambF * ambientIntensity * lerp(1.0f, 0.15f, rough) * ao;
 
-			// Multiple Point Lights with Physical Inverse-Square Falloff
+			// Multiple Lights (Point, Spot, Area)
 			float3 pointLightsContribution = float3(0, 0, 0);
 			int numLights = min((int)numPointLights, 64);
 			[loop]
@@ -1715,10 +1907,18 @@ int createShadersAndPipeline()
 				float pRange = pointLightPosRange[i].w;
 				float3 pCol = pointLightColorIntensity[i].xyz;
 				float pIntensity = pointLightColorIntensity[i].w;
+				float3 lDir = pointLightDirType[i].xyz;
+				int lType = (int)(pointLightDirType[i].w + 0.5f);
+				float4 spParams = pointLightSpotAreaParams[i];
+				float4 shParams = pointLightShadowParams[i];
+				int shadowIdx = (int)shParams.x;
+				float sStrength = shParams.y;
+				float sBias = shParams.z;
+				float shadowRes = shParams.w;
 
 				float3 toLight = pPos - input.worldPos;
 				float dist = length(toLight);
-				if (dist < pRange && dist > 0.001f)
+				if (dist < pRange && dist > 0.0001f)
 				{
 					float3 pL = toLight / dist;
 					float3 pH = normalize(pL + V);
@@ -1726,30 +1926,61 @@ int createShadersAndPipeline()
 					float pNdotH = max(dot(N, pH), 0.0f);
 					float pVdotH = max(dot(V, pH), 0.0f);
 
-					float atten = saturate(1.0f - (dist / pRange));
-					atten = (atten * atten) / (dist * dist + 1.0f);
+					float attenExp = max(spParams.z, 0.2f);
+					float normDist = dist / max(pRange, 0.0001f);
+					float distAtten = saturate(1.0f - normDist);
+					distAtten = pow(distAtten, attenExp) / (dist * dist + 1.0f);
 
-					float3 pF = F0 + (1.0f - F0) * pow(clamp(1.0f - pVdotH, 0.0f, 1.0f), 5.0f);
-					float pDenomD = (pNdotH * pNdotH * (a2 - 1.0f) + 1.0f);
-					float pD = a2 / (M_PI * pDenomD * pDenomD + 0.0001f);
-					float pg1L = pNdotL / (pNdotL * (1.0f - k) + k);
-					float pG = g1V * pg1L;
-					float3 pSpec = (pD * pF * pG) / max(4.0f * NdotV * pNdotL, 0.001f);
-					float3 pkD = (1.0f - pF) * (1.0f - metal);
-					float3 pDiff = pkD * albedo;
-
-					float pShadowFactor = 1.0f;
-					int vecIdx = i / 4;
-					int compIdx = i % 4;
-					float4 shadowVec = pointLightCastShadows[vecIdx];
-					float shadowVal = (compIdx == 0) ? shadowVec.x : ((compIdx == 1) ? shadowVec.y : ((compIdx == 2) ? shadowVec.z : shadowVec.w));
-					int shadowIdx = (int)shadowVal;
-					if (enableShadows > 0.5f && shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
+					float spotAngleAtten = 1.0f;
+					if (lType == 2) // Spot Light
 					{
-						pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N);
+						float cosDir = dot(normalize(lDir), -pL);
+						float cosInner = spParams.x;
+						float cosOuter = spParams.y;
+						spotAngleAtten = saturate((cosDir - cosOuter) / max(cosInner - cosOuter, 0.001f));
+						spotAngleAtten = spotAngleAtten * spotAngleAtten;
+					}
+					else if (lType == 3) // Area Light
+					{
+						float twoSided = spParams.w;
+						float forwardDot = dot(normalize(lDir), -pL);
+						if (twoSided < 0.5f && forwardDot <= 0.0f)
+						{
+							spotAngleAtten = 0.0f;
+						}
+						else
+						{
+							spotAngleAtten = saturate(abs(forwardDot) * 1.2f);
+						}
 					}
 
-					pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * atten * pShadowFactor;
+					if (distAtten * spotAngleAtten > 0.00001f)
+					{
+						float3 pF = F0 + (1.0f - F0) * pow(clamp(1.0f - pVdotH, 0.0f, 1.0f), 5.0f);
+						float pDenomD = (pNdotH * pNdotH * (a2 - 1.0f) + 1.0f);
+						float pD = a2 / (M_PI * pDenomD * pDenomD + 0.0001f);
+						float pg1L = pNdotL / (pNdotL * (1.0f - k) + k);
+						float pG = g1V * pg1L;
+						float3 pSpec = (pD * pF * pG) / max(4.0f * NdotV * pNdotL, 0.001f);
+						float3 pkD = (1.0f - pF) * (1.0f - metal);
+						float3 pDiff = pkD * albedo;
+
+						float pShadowFactor = 1.0f;
+						if (enableShadows > 0.5f && shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
+						{
+							if (lType == 1) // Point Light
+							{
+								pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N, shadowRes, sBias, sStrength);
+							}
+							else if (lType == 2 || lType == 3) // Spot or Area Light
+							{
+								float4x4 sMatrix = spotLightSpaceMatrices[shadowIdx];
+								pShadowFactor = CalculateSpotShadow(shadowIdx, input.worldPos, N, pL, sMatrix, shadowRes, sBias, sStrength);
+							}
+						}
+
+						pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * distAtten * spotAngleAtten * pShadowFactor;
+					}
 				}
 			}
 
@@ -2061,6 +2292,24 @@ void updateConstantBuffer()
 	SyncLevelCameraToViewportCamera();
 	g_scene.SyncLightPositionsFromActors();
 
+	// Dynamically ensure shadow buffer allocations match highest requested resolutions per light category
+	UINT reqDirRes = (UINT)g_scene.shadowResolution;
+	UINT reqPtRes = 512;
+	UINT reqSpotRes = 1024;
+	for (const auto& pl : g_scene.pointLights)
+	{
+		if (!pl.enabled || !pl.castShadows) continue;
+		if (pl.type == LightType::Point)
+		{
+			if ((UINT)pl.shadowResolution > reqPtRes) reqPtRes = (UINT)pl.shadowResolution;
+		}
+		else if (pl.type == LightType::Spot || pl.type == LightType::Area)
+		{
+			if ((UINT)pl.shadowResolution > reqSpotRes) reqSpotRes = (UINT)pl.shadowResolution;
+		}
+	}
+	EnsureShadowBuffers(reqDirRes, reqPtRes, reqSpotRes);
+
 	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
 	float aspect = (vpRect.width > 0 && vpRect.height > 0) ? (vpRect.width / vpRect.height) : 1.777f;
 	if (aspect <= 0.01f || std::isnan(aspect)) aspect = 1.777f;
@@ -2134,60 +2383,113 @@ void updateConstantBuffer()
 	cb.shadowStrength = g_scene.shadowStrength;
 	cb.pcfRadius = g_scene.pcfRadius;
 	cb.enableShadows = g_scene.enableShadows ? 1.0f : 0.0f;
-	cb.shadowMapSize = (float)SHADOW_MAP_WIDTH;
+	cb.shadowMapSize = (float)g_currentDirShadowRes;
 
-	// Fill Point Lights (up to MAX_POINT_LIGHTS)
+	// Fill Point, Spot, and Area Lights (up to MAX_POINT_LIGHTS)
 	int activePointLights = 0;
 	int activeShadowPointLights = 0;
-	for (int i = 0; i < MAX_POINT_LIGHTS / 4; ++i)
-	{
-		cb.pointLightCastShadows[i] = glm::vec4(-1.0f);
-	}
+	int activeShadowSpotLights = 0;
 
 	for (size_t i = 0; i < g_scene.pointLights.size() && activePointLights < MAX_POINT_LIGHTS; ++i)
 	{
 		const auto& pl = g_scene.pointLights[i];
 		if (!pl.enabled) continue;
+
 		cb.pointLightPosRange[activePointLights] = glm::vec4(pl.position, pl.range);
 		cb.pointLightColorIntensity[activePointLights] = glm::vec4(pl.color, pl.intensity);
 
-		if (g_scene.enableShadows && pl.castShadows && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
-		{
-			int vecIdx = activePointLights / 4;
-			int compIdx = activePointLights % 4;
-			cb.pointLightCastShadows[vecIdx][compIdx] = (float)activeShadowPointLights;
+		glm::vec3 dir = pl.direction;
+		float dLen = glm::length(dir);
+		if (dLen > 0.0001f) dir /= dLen;
+		else dir = glm::vec3(0.0f, -1.0f, 0.0f);
 
-			if (g_pShadowConstantMapped)
+		cb.pointLightDirType[activePointLights] = glm::vec4(dir, (float)pl.type);
+
+		if (pl.type == LightType::Spot)
+		{
+			float cosInner = std::cos(glm::radians(std::min(pl.innerConeAngle, pl.outerConeAngle)));
+			float cosOuter = std::cos(glm::radians(std::max(pl.innerConeAngle, pl.outerConeAngle)));
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(cosInner, cosOuter, pl.attenuation, 0.0f);
+		}
+		else if (pl.type == LightType::Area)
+		{
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(pl.width, pl.height, pl.attenuation, pl.twoSided ? 1.0f : 0.0f);
+		}
+		else
+		{
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(0.0f, 0.0f, pl.attenuation, 0.0f);
+		}
+
+		int shadowSlot = -1;
+		if (g_scene.enableShadows && pl.castShadows)
+		{
+			if (pl.type == LightType::Point && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
 			{
+				shadowSlot = activeShadowPointLights;
+				if (g_pShadowConstantMapped)
+				{
+					float nearZ = 0.05f;
+					float farZ = std::max(pl.range, 5.0f);
+					glm::mat4 ptProj = glm::perspectiveLH_ZO(glm::radians(90.0f), 1.0f, nearZ, farZ);
+					glm::vec3 pos = pl.position;
+
+					glm::mat4 faceViews[6] = {
+						glm::lookAtLH(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X (Face 0)
+						glm::lookAtLH(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X (Face 1)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y (Face 2)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y (Face 3)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z (Face 4)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z (Face 5)
+					};
+
+					for (int f = 0; f < 6; ++f)
+					{
+						ShadowConstantBuffer ptScb = {};
+						ptScb.lightSpaceMatrix = ptProj * faceViews[f];
+						UINT64 faceOffset = (UINT64)(1 + activeShadowPointLights * 6 + f) * 256;
+						memcpy((uint8_t*)g_pShadowConstantMapped + faceOffset, &ptScb, sizeof(ptScb));
+					}
+				}
+				activeShadowPointLights++;
+			}
+			else if ((pl.type == LightType::Spot || pl.type == LightType::Area) && activeShadowSpotLights < (int)MAX_SHADOW_SPOT_LIGHTS)
+			{
+				shadowSlot = activeShadowSpotLights;
+				float fov = (pl.type == LightType::Spot) ? std::max(pl.outerConeAngle * 2.0f, 5.0f) : 120.0f;
+				fov = std::min(fov, 160.0f);
 				float nearZ = 0.05f;
 				float farZ = std::max(pl.range, 5.0f);
-				glm::mat4 ptProj = glm::perspectiveLH_ZO(glm::radians(90.0f), 1.0f, nearZ, farZ);
-				glm::vec3 pos = pl.position;
+				glm::mat4 spotProj = glm::perspectiveLH_ZO(glm::radians(fov), 1.0f, nearZ, farZ);
+				glm::vec3 spotUp = (std::abs(dir.y) > 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+				glm::mat4 spotView = glm::lookAtLH(pl.position, pl.position + dir, spotUp);
+				glm::mat4 spotLightSpace = spotProj * spotView;
 
-				glm::mat4 faceViews[6] = {
-					glm::lookAtLH(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X (Face 0)
-					glm::lookAtLH(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X (Face 1)
-					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y (Face 2)
-					glm::lookAtLH(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y (Face 3)
-					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z (Face 4)
-					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z (Face 5)
-				};
+				cb.spotLightSpaceMatrices[activeShadowSpotLights] = spotLightSpace;
 
-				for (int f = 0; f < 6; ++f)
+				if (g_pShadowConstantMapped)
 				{
-					ShadowConstantBuffer ptScb = {};
-					ptScb.lightSpaceMatrix = ptProj * faceViews[f];
-					UINT64 faceOffset = (UINT64)(1 + activeShadowPointLights * 6 + f) * 256;
-					memcpy((uint8_t*)g_pShadowConstantMapped + faceOffset, &ptScb, sizeof(ptScb));
+					ShadowConstantBuffer spotScb = {};
+					spotScb.lightSpaceMatrix = spotLightSpace;
+					UINT64 spotOffset = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + activeShadowSpotLights) * 256;
+					memcpy((uint8_t*)g_pShadowConstantMapped + spotOffset, &spotScb, sizeof(spotScb));
 				}
+				activeShadowSpotLights++;
 			}
-			activeShadowPointLights++;
 		}
+
+		cb.pointLightShadowParams[activePointLights] = glm::vec4(
+			(float)shadowSlot,
+			pl.shadowStrength,
+			pl.shadowBias,
+			(float)pl.shadowResolution
+		);
 
 		activePointLights++;
 	}
+
 	cb.numPointLights = (float)activePointLights;
 	g_activeShadowPointLights = activeShadowPointLights;
+	g_activeShadowSpotLights = activeShadowSpotLights;
 
 	memcpy(g_pConstantMapped, &cb, sizeof(cb));
 }
@@ -2244,8 +2546,8 @@ void renderFrame()
 		RecordGpuBreadcrumbOp("[Barrier] ShadowDepthBuffer -> DEPTH_WRITE");
 		g_commandList->ResourceBarrier(1, &shadowBarrier);
 
-		D3D12_VIEWPORT shadowViewport = { 0.0f, 0.0f, (float)SHADOW_MAP_WIDTH, (float)SHADOW_MAP_HEIGHT, 0.0f, 1.0f };
-		D3D12_RECT shadowScissor = { 0, 0, (LONG)SHADOW_MAP_WIDTH, (LONG)SHADOW_MAP_HEIGHT };
+		D3D12_VIEWPORT shadowViewport = { 0.0f, 0.0f, (float)g_currentDirShadowRes, (float)g_currentDirShadowRes, 0.0f, 1.0f };
+		D3D12_RECT shadowScissor = { 0, 0, (LONG)g_currentDirShadowRes, (LONG)g_currentDirShadowRes };
 		g_commandList->RSSetViewports(1, &shadowViewport);
 		g_commandList->RSSetScissorRects(1, &shadowScissor);
 
@@ -2285,7 +2587,7 @@ void renderFrame()
 	}
 
 	// ----------------------------------------------------
-	// PASS 1.5: Point Light Shadow Cubemap Array Pass (512x512, up to 4 lights * 6 faces)
+	// PASS 1.5: Point Light Shadow Cubemap Array Pass (up to 4 lights * 6 faces)
 	// ----------------------------------------------------
 	if (!g_deviceLost && g_currentIndexCount > 0 && g_pointShadowDepthBuffer && g_shadowPipelineState && g_activeShadowPointLights > 0)
 	{
@@ -2297,8 +2599,8 @@ void renderFrame()
 		RecordGpuBreadcrumbOp("[Barrier] PointShadowDepthBuffer -> DEPTH_WRITE");
 		g_commandList->ResourceBarrier(1, &ptBarrier);
 
-		D3D12_VIEWPORT ptViewport = { 0.0f, 0.0f, (float)POINT_SHADOW_MAP_SIZE, (float)POINT_SHADOW_MAP_SIZE, 0.0f, 1.0f };
-		D3D12_RECT ptScissor = { 0, 0, (LONG)POINT_SHADOW_MAP_SIZE, (LONG)POINT_SHADOW_MAP_SIZE };
+		D3D12_VIEWPORT ptViewport = { 0.0f, 0.0f, (float)g_currentPointShadowRes, (float)g_currentPointShadowRes, 0.0f, 1.0f };
+		D3D12_RECT ptScissor = { 0, 0, (LONG)g_currentPointShadowRes, (LONG)g_currentPointShadowRes };
 		g_commandList->RSSetViewports(1, &ptViewport);
 		g_commandList->RSSetScissorRects(1, &ptScissor);
 
@@ -2338,6 +2640,58 @@ void renderFrame()
 		);
 		RecordGpuBreadcrumbOp("[Barrier] PointShadowDepthBuffer -> PIXEL_SHADER_RESOURCE");
 		g_commandList->ResourceBarrier(1, &ptReadBarrier);
+	}
+
+	// ----------------------------------------------------
+	// PASS 1.8: Spot & Area Light Shadow 2D Array Pass (up to 4 lights)
+	// ----------------------------------------------------
+	if (!g_deviceLost && g_currentIndexCount > 0 && g_spotShadowDepthBuffer && g_shadowPipelineState && g_activeShadowSpotLights > 0)
+	{
+		D3D12_RESOURCE_BARRIER spotBarrier = CreateTransitionBarrier(
+			g_spotShadowDepthBuffer,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_DEPTH_WRITE
+		);
+		RecordGpuBreadcrumbOp("[Barrier] SpotShadowDepthBuffer -> DEPTH_WRITE");
+		g_commandList->ResourceBarrier(1, &spotBarrier);
+
+		D3D12_VIEWPORT spotViewport = { 0.0f, 0.0f, (float)g_currentSpotShadowRes, (float)g_currentSpotShadowRes, 0.0f, 1.0f };
+		D3D12_RECT spotScissor = { 0, 0, (LONG)g_currentSpotShadowRes, (LONG)g_currentSpotShadowRes };
+		g_commandList->RSSetViewports(1, &spotViewport);
+		g_commandList->RSSetScissorRects(1, &spotScissor);
+
+		g_commandList->SetGraphicsRootSignature(g_shadowRootSignature);
+		g_commandList->SetPipelineState(g_shadowPipelineState);
+
+		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+		g_commandList->IASetIndexBuffer(&g_indexBufferView);
+
+		for (int s = 0; s < g_activeShadowSpotLights; ++s)
+		{
+			g_commandList->ClearDepthStencilView(g_spotShadowDsvHandles[s], D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			g_commandList->OMSetRenderTargets(0, nullptr, FALSE, &g_spotShadowDsvHandles[s]);
+
+			UINT64 spotCbOffset = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + s) * 256;
+			g_commandList->SetGraphicsRootConstantBufferView(0, g_shadowConstantBuffer->GetGPUVirtualAddress() + spotCbOffset);
+
+			for (size_t bIdx = 0; bIdx < g_sceneBatches.size(); ++bIdx)
+			{
+				const auto& batch = g_sceneBatches[bIdx];
+				if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0 || !batch.castShadows || batch.isUnlit) continue;
+				UINT drawCount = (UINT)std::min((size_t)batch.indexCount, (size_t)(g_currentIndexCount - batch.startIndex));
+				if (drawCount == 0) continue;
+				g_commandList->DrawIndexedInstanced(drawCount, 1, (UINT)batch.startIndex, 0, 0);
+			}
+		}
+
+		D3D12_RESOURCE_BARRIER spotReadBarrier = CreateTransitionBarrier(
+			g_spotShadowDepthBuffer,
+			D3D12_RESOURCE_STATE_DEPTH_WRITE,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+		);
+		RecordGpuBreadcrumbOp("[Barrier] SpotShadowDepthBuffer -> PIXEL_SHADER_RESOURCE");
+		g_commandList->ResourceBarrier(1, &spotReadBarrier);
 	}
 
 	// ----------------------------------------------------
@@ -2399,6 +2753,7 @@ void renderFrame()
 		g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
 		g_commandList->SetGraphicsRootDescriptorTable(3, g_shadowSrvGpuHandle);
 		g_commandList->SetGraphicsRootDescriptorTable(4, g_pointShadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(5, g_spotShadowSrvGpuHandle);
 
 		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
@@ -2531,6 +2886,7 @@ void cleanUpD3D12()
 	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
 	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
 	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
+	if (g_spotShadowDepthBuffer) { g_spotShadowDepthBuffer->Release(); g_spotShadowDepthBuffer = nullptr; }
 
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
@@ -2915,6 +3271,10 @@ bool RecoverD3D12Device(HWND hwnd)
 	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
 	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
 	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
+	if (g_spotShadowDepthBuffer) { g_spotShadowDepthBuffer->Release(); g_spotShadowDepthBuffer = nullptr; }
+	g_shadowSrvCpuHandle = {}; g_shadowSrvGpuHandle = {};
+	g_pointShadowSrvCpuHandle = {}; g_pointShadowSrvGpuHandle = {};
+	g_spotShadowSrvCpuHandle = {}; g_spotShadowSrvGpuHandle = {};
 
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
