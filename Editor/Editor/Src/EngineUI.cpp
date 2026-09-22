@@ -2218,13 +2218,14 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
 
             if (ImGui::BeginMenu("Build")) {
                 if (ImGui::MenuItem("🎮 Build Game Project (Stand-Alone)")) {
-                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+                    std::filesystem::path gameBuildDir = projectBase / "Build";
                     std::error_code ec;
                     std::filesystem::create_directories(gameBuildDir, ec);
 
                     // 1. Cook assets to <Project>/Cooked
                     std::string cookLog;
-                    std::filesystem::path cookedDir = contentRootPath / "Cooked";
+                    std::filesystem::path cookedDir = projectBase / "Cooked";
                     AssetManager::Get().CookProject(cookedDir, cookLog);
 
                     // Helper to copy directory recursively
@@ -2286,7 +2287,7 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
                     }
 
                     // 6. Copy or verify game executable
-                    std::string projName = contentRootPath.filename().string();
+                    std::string projName = projectBase.filename().string();
                     std::filesystem::path gameExe = gameBuildDir / (projName + ".exe");
                     if (!std::filesystem::exists(gameExe, ec)) {
                         if (std::filesystem::exists(gameBuildDir / "test.exe", ec)) {
@@ -2310,7 +2311,8 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
                     OpenCookModal();
                 }
                 if (ImGui::MenuItem("📂 Open Project Build Folder")) {
-                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+                    std::filesystem::path gameBuildDir = projectBase / "Build";
                     ShellExecuteA(NULL, "open", gameBuildDir.string().c_str(), NULL, NULL, SW_SHOW);
                 }
                 ImGui::EndMenu();
@@ -6349,7 +6351,8 @@ void EngineUI::RenderCookModal() {
 
     static char outputDirBuf[260] = "Cooked";
     ImGui::InputText("Target Subdirectory", outputDirBuf, sizeof(outputDirBuf));
-    std::filesystem::path fullCookedPath = contentRootPath / outputDirBuf;
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path fullCookedPath = projectBase / outputDirBuf;
     ImGui::TextDisabled("Output Location: %s", fullCookedPath.string().c_str());
 
     static int targetPlatform = 0;
@@ -6360,7 +6363,7 @@ void EngineUI::RenderCookModal() {
     if (ImGui::Button("🚀 Start Cooking Now", ImVec2(180, 30))) {
         cookLog += "\n=== Starting Asset Cooking Pipeline ===\n";
         cookLog += "Target Platform: " + std::string(platforms[targetPlatform]) + "\n";
-        cookLog += "Project Root: " + contentRootPath.string() + "\n";
+        cookLog += "Project Root: " + projectBase.string() + "\n";
         cookLog += "Cooked Destination: " + fullCookedPath.string() + "\n";
 
         StartLoadingTask("Cooking Project Assets", "Initializing destination...", 0.05f);
