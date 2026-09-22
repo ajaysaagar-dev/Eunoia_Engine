@@ -1318,7 +1318,7 @@ int createShadersAndPipeline()
 	rootParams[4].DescriptorTable.pDescriptorRanges = &ptShadowSrvRange;
 	rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+	D3D12_STATIC_SAMPLER_DESC staticSamplers[3] = {};
 	// Sampler 0: s0 (Anisotropic wrap for materials)
 	staticSamplers[0].Filter = D3D12_FILTER_ANISOTROPIC;
 	staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -1334,7 +1334,7 @@ int createShadersAndPipeline()
 	staticSamplers[0].RegisterSpace = 0;
 	staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// Sampler 1: s1 (Hardware PCF Comparison Sampler for Shadow Map)
+	// Sampler 1: s1 (Hardware PCF Comparison Sampler for 2D Directional Shadow Map)
 	staticSamplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
 	staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
 	staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -1349,10 +1349,25 @@ int createShadersAndPipeline()
 	staticSamplers[1].RegisterSpace = 0;
 	staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+	// Sampler 2: s2 (Hardware PCF Comparison Sampler for Point Light Cube Shadows - Clamp for seamless edges)
+	staticSamplers[2].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	staticSamplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].MipLODBias = 0.0f;
+	staticSamplers[2].MaxAnisotropy = 1;
+	staticSamplers[2].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	staticSamplers[2].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	staticSamplers[2].MinLOD = 0.0f;
+	staticSamplers[2].MaxLOD = D3D12_FLOAT32_MAX;
+	staticSamplers[2].ShaderRegister = 2;
+	staticSamplers[2].RegisterSpace = 0;
+	staticSamplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
 	D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
 	rootSigDesc.NumParameters = 5;
 	rootSigDesc.pParameters = rootParams;
-	rootSigDesc.NumStaticSamplers = 2;
+	rootSigDesc.NumStaticSamplers = 3;
 	rootSigDesc.pStaticSamplers = staticSamplers;
 	rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -1426,6 +1441,7 @@ int createShadersAndPipeline()
 
 		SamplerState g_sampler : register(s0);
 		SamplerComparisonState g_shadowSampler : register(s1);
+		SamplerComparisonState g_pointShadowSampler : register(s2);
 
 		struct VSInput
 		{
@@ -1512,31 +1528,56 @@ int createShadersAndPipeline()
 			return lerp(1.0f, rawShadow, fade);
 		}
 
+		static const float3 pointShadowOffsets[16] = {
+			float3( 0.577f,  0.577f,  0.577f), float3(-0.577f,  0.577f,  0.577f),
+			float3( 0.577f, -0.577f,  0.577f), float3(-0.577f, -0.577f,  0.577f),
+			float3( 0.577f,  0.577f, -0.577f), float3(-0.577f,  0.577f, -0.577f),
+			float3( 0.577f, -0.577f, -0.577f), float3(-0.577f, -0.577f, -0.577f),
+			float3( 1.0f,  0.0f,  0.0f), float3(-1.0f,  0.0f,  0.0f),
+			float3( 0.0f,  1.0f,  0.0f), float3( 0.0f, -1.0f,  0.0f),
+			float3( 0.0f,  0.0f,  1.0f), float3( 0.0f,  0.0f, -1.0f),
+			float3( 0.707f,  0.707f,  0.0f), float3(-0.707f, -0.707f,  0.0f)
+		};
+
 		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N)
 		{
+			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
+
 			float3 toFrag = worldPos - pPos;
 			float currentDist = length(toFrag);
 			if (currentDist >= pRange || currentDist <= 0.001f) return 1.0f;
 
+			float3 L = -toFrag / currentDist;
+			float cosTheta = saturate(dot(N, L));
+
+			// Slope-scaled normal bias in world space: dynamically scale to prevent self-shadow acne without peter-panning
+			float worldBias = max(0.04f * (1.0f - cosTheta), 0.008f);
+
 			float absZ = max(abs(toFrag.x), max(abs(toFrag.y), abs(toFrag.z)));
-			float nearZ = 0.1f;
+			float nearZ = 0.05f;
 			float farZ = max(pRange, 5.0f);
-			float refDepth = (farZ / (farZ - nearZ)) - (farZ * nearZ / (farZ - nearZ)) / max(absZ, 0.001f);
 
-			float normalBias = max(0.004f * (1.0f - max(dot(N, normalize(-toFrag)), 0.0f)), 0.001f);
-			float compareVal = refDepth - normalBias;
+			float biasedZ = max(absZ - worldBias, nearZ);
+			if (biasedZ >= farZ) return 1.0f;
 
-			float filterRadius = 0.015f * (currentDist / farZ);
-			float3 up = abs(toFrag.y) < 0.99f ? float3(0, 1, 0) : float3(1, 0, 0);
-			float3 right = normalize(cross(up, toFrag)) * filterRadius;
-			up = normalize(cross(toFrag, right)) * filterRadius;
+			float refDepth = saturate((farZ / (farZ - nearZ)) - (farZ * nearZ / (farZ - nearZ)) / max(biasedZ, 0.0001f));
+
+			// Smooth soft shadow filter radius (scales with distance and scene PCF radius)
+			float diskRadius = (0.008f + 0.020f * (currentDist / farZ)) * max(pcfRadius, 0.5f);
 
 			float shadow = 0.0f;
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag + right + up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag - right + up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag + right - up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag - right - up, (float)shadowIdx), compareVal);
-			return shadow * 0.25f;
+			[unroll]
+			for (int k = 0; k < 16; ++k)
+			{
+				float3 sampleDir = toFrag + pointShadowOffsets[k] * diskRadius;
+				shadow += g_pointShadowMap.SampleCmpLevelZero(g_pointShadowSampler, float4(sampleDir, (float)shadowIdx), refDepth);
+			}
+			shadow /= 16.0f;
+
+			// Smooth edge fading near range boundary
+			float distFade = saturate((pRange - currentDist) / max(pRange * 0.1f, 0.5f));
+			float finalShadow = lerp(1.0f - shadowStrength, 1.0f, shadow);
+			return lerp(1.0f, finalShadow, distFade);
 		}
 
 		float4 PSMain(PSInput input) : SV_TARGET
@@ -1670,8 +1711,12 @@ int createShadersAndPipeline()
 					float3 pDiff = pkD * albedo;
 
 					float pShadowFactor = 1.0f;
-					int shadowIdx = (int)pointLightCastShadows[i / 4][i % 4];
-					if (shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
+					int vecIdx = i / 4;
+					int compIdx = i % 4;
+					float4 shadowVec = pointLightCastShadows[vecIdx];
+					float shadowVal = (compIdx == 0) ? shadowVec.x : ((compIdx == 1) ? shadowVec.y : ((compIdx == 2) ? shadowVec.z : shadowVec.w));
+					int shadowIdx = (int)shadowVal;
+					if (enableShadows > 0.5f && shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
 					{
 						pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N);
 					}
@@ -1812,7 +1857,7 @@ int createShadersAndPipeline()
 	shadowPsoDesc.VS = { shadowVS->GetBufferPointer(), shadowVS->GetBufferSize() };
 	shadowPsoDesc.PS = { nullptr, 0 }; // Depth-only pass
 	shadowPsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-	shadowPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+	shadowPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 	shadowPsoDesc.RasterizerState.FrontCounterClockwise = FALSE;
 	shadowPsoDesc.RasterizerState.DepthClipEnable = TRUE;
 	shadowPsoDesc.RasterizerState.DepthBias = 50;
@@ -2078,7 +2123,7 @@ void updateConstantBuffer()
 		cb.pointLightPosRange[activePointLights] = glm::vec4(pl.position, pl.range);
 		cb.pointLightColorIntensity[activePointLights] = glm::vec4(pl.color, pl.intensity);
 
-		if (pl.castShadows && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
+		if (g_scene.enableShadows && pl.castShadows && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
 		{
 			int vecIdx = activePointLights / 4;
 			int compIdx = activePointLights % 4;
@@ -2086,18 +2131,18 @@ void updateConstantBuffer()
 
 			if (g_pShadowConstantMapped)
 			{
-				float nearZ = 0.1f;
+				float nearZ = 0.05f;
 				float farZ = std::max(pl.range, 5.0f);
-				glm::mat4 ptProj = glm::perspective(glm::radians(90.0f), 1.0f, nearZ, farZ);
+				glm::mat4 ptProj = glm::perspectiveLH_ZO(glm::radians(90.0f), 1.0f, nearZ, farZ);
 				glm::vec3 pos = pl.position;
 
 				glm::mat4 faceViews[6] = {
-					glm::lookAt(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X
-					glm::lookAt(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y
-					glm::lookAt(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z
+					glm::lookAtLH(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X (Face 0)
+					glm::lookAtLH(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X (Face 1)
+					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y (Face 2)
+					glm::lookAtLH(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y (Face 3)
+					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z (Face 4)
+					glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z (Face 5)
 				};
 
 				for (int f = 0; f < 6; ++f)
