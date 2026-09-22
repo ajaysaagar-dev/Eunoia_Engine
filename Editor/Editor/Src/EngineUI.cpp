@@ -1,5 +1,6 @@
 #include <Editor/EngineUI.h>
 #include <Editor/UndoManager.h>
+#include <Editor/EditorGizmoSystem.h>
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -2137,6 +2138,16 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
                 ImGui::MenuItem("Details (Right Sidebar)", nullptr, &showDetails);
                 ImGui::MenuItem("Content Browser (Bottom Dock)", nullptr, &showBottomDrawer);
                 ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
+                if (ImGui::BeginMenu("Editor Gizmos")) {
+                    ImGui::MenuItem("Show Light Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightGizmos);
+                    ImGui::MenuItem("Show Camera Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraGizmos);
+                    ImGui::Separator();
+                    ImGui::MenuItem("Show Light Ranges", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightRanges);
+                    ImGui::MenuItem("Show Light Directions", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightDirections);
+                    ImGui::MenuItem("Show Camera Frustums", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraFrustums);
+                    ImGui::MenuItem("Show Clip Planes", nullptr, &Eunoia::EditorGizmoSystem::Get().showClipPlanes);
+                    ImGui::EndMenu();
+                }
                 ImGui::Separator();
                 if (ImGui::MenuItem("↺ Reset Layout to Default")) {
                     leftSidebarWidth = 280.0f;
@@ -2482,6 +2493,14 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         if (ImGui::BeginPopup("ShowPopup")) {
             if (ImGui::MenuItem("Grid", nullptr, scene.showGrid)) scene.showGrid = !scene.showGrid;
             if (ImGui::MenuItem("Transform Gizmo", nullptr, showGizmo)) showGizmo = !showGizmo;
+            ImGui::Separator();
+            ImGui::MenuItem("Show Light Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightGizmos);
+            ImGui::MenuItem("Show Camera Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraGizmos);
+            ImGui::MenuItem("Show Light Ranges", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightRanges);
+            ImGui::MenuItem("Show Light Directions", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightDirections);
+            ImGui::MenuItem("Show Camera Frustums", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraFrustums);
+            ImGui::MenuItem("Show Clip Planes", nullptr, &Eunoia::EditorGizmoSystem::Get().showClipPlanes);
+            ImGui::Separator();
             if (ImGui::MenuItem("Light Frustum", nullptr, scene.showLightFrustum)) scene.showLightFrustum = !scene.showLightFrustum;
             if (ImGui::MenuItem("Mesh Cluster Culling Stats", nullptr, showClusterCullingStats)) showClusterCullingStats = !showClusterCullingStats;
             if (ImGui::MenuItem("Game View [G]", nullptr, isGameView)) ToggleGameView(scene);

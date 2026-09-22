@@ -33,6 +33,7 @@
 #include <EngineScene/LevelSerializer.h>
 #include <EngineRenderer/Camera.h>
 #include <Editor/EngineUI.h>
+#include <Editor/EditorGizmoSystem.h>
 #include <EngineAssets/TextureManager.h>
 #include <EngineAssets/AssetSystem.h>
 #include <EngineAssets/MeshImporter.h>
@@ -2375,6 +2376,9 @@ void updateSceneGeometry()
 	static std::vector<uint32_t> sceneIndices;
 
 	g_scene.BuildSceneMesh(sceneVertices, sceneIndices, g_sceneBatches, g_camera.GetPosition());
+
+	// Light & Camera Editor Gizmos (dev.md)
+	Eunoia::EditorGizmoSystem::Get().RenderGizmos(g_scene, g_camera.GetPosition(), sceneVertices, sceneIndices, g_sceneBatches);
 
 	g_currentVertexCount = (uint32_t)std::min(sceneVertices.size(), MAX_SCENE_VERTICES);
 	g_currentIndexCount  = (uint32_t)std::min(sceneIndices.size(), MAX_SCENE_INDICES);

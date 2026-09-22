@@ -75,6 +75,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\Engine\EngineRenderer\Src\SceneRenderer.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\Main.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\EngineUI.cpp" ^
+    "%PROJECT_DIR%\Editor\Editor\Src\EditorGizmoSystem.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_draw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_tables.cpp" ^

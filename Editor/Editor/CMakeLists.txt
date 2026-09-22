@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 set(EDITOR_SOURCES
     Src/Main.cpp
     Src/EngineUI.cpp
+    Src/EditorGizmoSystem.cpp
     ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/MeshClusterBuilder.cpp
     ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/MeshClusterCulling.cpp
     ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/HiZManager.cpp
