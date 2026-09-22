@@ -226,6 +226,12 @@ public:
 
     EngineUI();
 
+    // Initialize EngineUI with a pre-selected project path (called after standalone project browser)
+    void InitWithProject(const std::filesystem::path& projectPath, Scene& scene, OrbitCamera& camera);
+
+    // Standalone Project Browser window (runs before editor, returns selected project path or empty)
+    static std::filesystem::path RunStandaloneProjectBrowser();
+
     void AddLog(const std::string& category, const std::string& message, int level = 0);
     void SetupTheme();
     void Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit);

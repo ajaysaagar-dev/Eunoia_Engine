@@ -60,6 +60,15 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetRegistry.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineScene\Src\EunoiaBehaviour.cpp" ^
+    "%PROJECT_DIR%\Engine\EnginePlatform\Src\Window.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\Device.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\SwapChain.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\CommandContext.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\DescriptorAllocator.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\Fence.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\PipelineState.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\UploadHeap.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRenderer\Src\SceneRenderer.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\Main.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\EngineUI.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui.cpp" ^
@@ -68,9 +77,10 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\deps\imgui\imgui_widgets.cpp" ^
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_glfw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_dx12.cpp" ^
+    "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_opengl3.cpp" ^
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 ^
+    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 ^
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (
@@ -127,10 +137,27 @@ echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
 "%COMPILER%" -std=c++17 -O2 ^
     "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
     "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineScene\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineAssets\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineRHI\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineRenderer\Include" ^
+    "-I%PROJECT_DIR%\deps\tinyobj" ^
+    "-I%PROJECT_DIR%\deps\cgltf" ^
+    "-I%PROJECT_DIR%\deps\ufbx" ^
     "-I%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\include" ^
+    "-I%PROJECT_DIR%\deps\glm" ^
+    "-I%PROJECT_DIR%\deps\json" ^
+    "-I%PROJECT_DIR%" ^
+    "%PROJECT_DIR%\deps\ufbx\ufbx.c" ^
+    "%PROJECT_DIR%\Engine\EnginePlatform\Src\Window.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineScene\Src\EunoiaBehaviour.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetRegistry.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetManager.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\TextureManager.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Runtime\Src\Main.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -lgdi32 ^
+    -lglfw3 -lgdi32 -lole32 -lshell32 ^
     -o "%GAME_BUILD_DIR%\test.exe"
 
 if !ERRORLEVEL! equ 0 (

@@ -2903,6 +2903,20 @@ int main()
 		return -1;
 	}
 
+	// 1b. Run the Standalone Project Browser as a separate window BEFORE the editor
+	// This opens a lightweight OpenGL+ImGui window for project selection.
+	// The main D3D12 editor window only opens AFTER a project is selected.
+	std::filesystem::path selectedProjectPath = EngineUI::RunStandaloneProjectBrowser();
+	if (selectedProjectPath.empty())
+	{
+		// User closed the project browser without selecting — exit the application
+		std::cerr << "[INFO] No project selected. Exiting." << std::endl;
+		glfwTerminate();
+		return 0;
+	}
+	std::cerr << "[INFO] Project selected: " << selectedProjectPath.string() << std::endl;
+
+	// 2. Create main editor window (D3D12, NO_API)
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 	g_window = glfwCreateWindow(WIDTH, HEIGHT, "Eunoia-Editor", nullptr, nullptr);
 	if (!g_window)
@@ -3007,6 +3021,9 @@ int main()
 	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
 	InputSystem::Get().SetupDefaultActions();
+
+	// Initialize EngineUI with the project selected from the standalone Project Browser window
+	g_engineUI.InitWithProject(selectedProjectPath, g_scene, g_camera);
 
 	auto lastTime = std::chrono::high_resolution_clock::now();
 	float frameCount = 0.0f;
