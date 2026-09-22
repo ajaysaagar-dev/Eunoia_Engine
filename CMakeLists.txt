@@ -16,39 +16,39 @@ set(EUNOIA_GLFW_ROOT   ${EUNOIA_DEPS}/glfw-3.5.1.bin.WIN64)
 # Each layer depends ONLY on layers defined below it.
 # ──────────────────────────────────────────────────────────────────────────────
 # Layer 1: Zero dependencies, STL only
-add_subdirectory(engine/EngineCore)
+add_subdirectory(Engine/EngineCore)
 
 # Layer 2: Windowing & Input (depends on Core)
-add_subdirectory(engine/EnginePlatform)
+add_subdirectory(Engine/EnginePlatform)
 
 # Layer 3: Render Hardware Interface / D3D12 (depends on Core)
-add_subdirectory(engine/EngineRHI)
+add_subdirectory(Engine/EngineRHI)
 
 # Layer 4: Asset import/cook/load & Geometry (depends on RHI, Platform, Core)
-add_subdirectory(engine/EngineAssets)
+add_subdirectory(Engine/EngineAssets)
 
 # Layer 5: Render passes, materials, camera, lighting (depends on Assets, RHI, Core)
-add_subdirectory(engine/EngineRenderer)
+add_subdirectory(Engine/EngineRenderer)
 
 # Layer 6: ECS, Scene graph, Behaviours, Serialization (depends on Renderer, Assets, Platform, Core)
-add_subdirectory(engine/EngineScene)
+add_subdirectory(Engine/EngineScene)
 
 # Plugin Core System (depends on Core)
-add_subdirectory(engine/EunoiaPluginCore)
+add_subdirectory(Engine/EunoiaPluginCore)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Application Targets
 # ──────────────────────────────────────────────────────────────────────────────
 # Layer 7: Editor executable with ImGui / ImGuizmo
-add_subdirectory(editor/Editor)
+add_subdirectory(Editor/Editor)
 
 # Standalone Runtime executable (no ImGui dependency)
-add_subdirectory(runtime)
+add_subdirectory(Runtime)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Test Targets (optional)
 # ──────────────────────────────────────────────────────────────────────────────
 option(EUNOIA_BUILD_TESTS "Build unit tests" ON)
 if(EUNOIA_BUILD_TESTS)
-    add_subdirectory(tests)
+    add_subdirectory(Tests)
 endif()

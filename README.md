@@ -43,12 +43,12 @@ A 3D Game Engine and real-time Level Editor built with **DirectX 12 (D3D12)**, *
 ### Quick Start
 To build and launch the editor:
 ```cmd
-run.bat
+Run.bat
 ```
 
 Or build and package distribution manually:
 ```cmd
-build.bat
+Build.bat
 ```
 This produces `EngineBuild\Eunoia-Editor.exe` and packages code, binaries, shaders, and resources.
 
@@ -57,30 +57,30 @@ This produces `EngineBuild\Eunoia-Editor.exe` and packages code, binaries, shade
 Eunoia Engine enforces a strict, one-directional layered architecture:
 
 ```
-  Editor (editor/Editor) | Standalone Runtime (runtime)
-            ↓
+  Editor (Editor/Editor) | Standalone Runtime (Runtime)
+             ↓
   EngineScene    (ECS, Scene Graph, Behaviours, Serialization)
-            ↓
+             ↓
   EngineRenderer (Render Passes, Materials, Cameras, Lighting)
-            ↓
+             ↓
   EngineAssets   (Asset Registry, Manager, Importers, Textures, Geometry)
-            ↓
+             ↓
   EngineRHI      (DirectX 12 Abstraction)
-            ↓
+             ↓
   EnginePlatform (Windowing & Input via GLFW)
-            ↓
+             ↓
   EngineCore     (Thread Pool, Job System, Logging, Time - STL only)
 ```
 
-For complete documentation on architectural rules, layer definitions, and modular guidelines, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+For complete documentation on architectural rules, layer definitions, and modular guidelines, see [Docs/ARCHITECTURE.md](Docs/ARCHITECTURE.md).
 
 ## Project Structure
 
 ```
 ├── .github/workflows/         # CI build & test workflows
-├── cmake/                     # Shared CMake helpers
-├── docs/                      # Architecture, dev guides, UI reference
-├── engine/
+├── CMake/                     # Shared CMake helpers
+├── Docs/                      # Architecture, dev guides, UI reference
+├── Engine/
 │   ├── EngineCore/            # Layer 1: Core primitives (STL only)
 │   ├── EnginePlatform/        # Layer 2: Windowing & Input (GLFW)
 │   ├── EngineRHI/             # Layer 3: D3D12 hardware abstraction
@@ -88,16 +88,18 @@ For complete documentation on architectural rules, layer definitions, and modula
 │   ├── EngineRenderer/        # Layer 5: Renderer, cameras & materials
 │   ├── EngineScene/           # Layer 6: Scene, game objects & behaviours
 │   └── EunoiaPluginCore/      # Modular plugin manager & service registry
-├── editor/
+├── Editor/
 │   └── Editor/                # Layer 7: Editor UI, Panels, ImGui
-├── runtime/                   # Standalone headless/game runtime stub
-├── tests/                     # Unit tests per engine module
-├── deps/                      # Third-party libraries (glm, glfw, imgui, etc.)
-├── projects/                  # Projects & custom scripts
-├── resources/                 # Editor icons and default assets
-├── shaders/                   # HLSL DirectX 12 shaders
-├── tools/                     # Toolchain compilers & scripts
+├── Runtime/                   # Standalone headless/game runtime stub
+├── Tests/                     # Unit tests per engine module
+├── Deps/                      # Third-party libraries (glm, glfw, imgui, etc.)
+├── Projects/                  # Projects & custom scripts
+│   └── <ProjectName>/
+│       └── Cooked/            # Project-specific cooked content
+├── Resources/                 # Editor icons and default assets
+├── Shaders/                   # HLSL DirectX 12 shaders
+├── Tools/                     # Toolchain compilers & scripts
 ├── CMakeLists.txt             # Modular root CMakeLists
-├── build.bat                  # Compilation & packaging script
-└── run.bat                    # Engine launcher
+├── Build.bat                  # Compilation & packaging script
+└── Run.bat                    # Engine launcher
 ```
