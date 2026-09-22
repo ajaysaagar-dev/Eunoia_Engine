@@ -6,9 +6,9 @@
 // Listens for EngineRHI device-lost events and shows a restart-required overlay.
 // ============================================================================
 
-#include "../../include/Scene.h"
-#include "../../include/Camera.h"
-#include "../../include/EngineUI.h"
+#include <EngineScene/Scene.h>
+#include <EngineRenderer/Camera.h>
+#include <Editor/EngineUI.h>
 #include <functional>
 #include <string>
 

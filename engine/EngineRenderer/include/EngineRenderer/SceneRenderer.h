@@ -9,8 +9,9 @@
 
 #include <d3d12.h>
 #include <wrl/client.h>
-#include "../../include/Scene.h"
-#include "../../include/Camera.h"
+#include <EngineRenderer/Camera.h>
+
+class Scene;
 
 namespace EngineRenderer {
 

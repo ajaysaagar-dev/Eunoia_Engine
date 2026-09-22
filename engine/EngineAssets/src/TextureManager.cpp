@@ -1,3 +1,3 @@
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-#include "TextureManager.h"
+#include <EngineAssets/stb_image.h>
+#include <EngineAssets/TextureManager.h>

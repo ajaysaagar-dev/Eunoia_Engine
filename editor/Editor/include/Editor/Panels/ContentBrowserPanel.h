@@ -4,8 +4,8 @@
 // Was: inline inside EngineUI::RenderContentBrowser() in src/EngineUI.cpp
 // ============================================================================
 
-#include "../../../include/Scene.h"
-#include "../../../include/AssetSystem.h"
+#include <EngineScene/Scene.h>
+#include <EngineAssets/AssetSystem.h>
 #include <string>
 
 namespace Editor {

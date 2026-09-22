@@ -4,7 +4,7 @@
 // Was: inline inside EngineUI::RenderOutliner() in src/EngineUI.cpp
 // ============================================================================
 
-#include "../../../include/Scene.h"
+#include <EngineScene/Scene.h>
 #include <string>
 
 namespace Editor {

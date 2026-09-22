@@ -1,5 +1,5 @@
-#include "../../EunoiaPluginCore/PluginManager.h"
-#include "../../EunoiaPluginCore/IEditorPanel.h"
+#include <EunoiaPluginCore/PluginManager.h>
+#include <EunoiaPluginCore/IEditorPanel.h>
 #include "../../plugins/engine/include/Engine/ILog.h"
 #include "../../plugins/platform/include/Platform/IWindow.h"
 #include "../../plugins/rhi/include/RHI/IRHI.h"

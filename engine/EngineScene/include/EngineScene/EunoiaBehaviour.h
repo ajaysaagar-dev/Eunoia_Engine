@@ -6,8 +6,8 @@
 #include <algorithm>
 #include <iostream>
 #include <glm/glm.hpp>
-#include "EngineLogger.h"
-#include "ScreenPrint.h"
+#include <EngineCore/EngineLogger.h>
+#include <EngineScene/ScreenPrint.h>
 
 // Forward declarations
 struct GameObject;

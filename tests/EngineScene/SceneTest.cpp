@@ -3,12 +3,14 @@
 #include "EngineScene/Scene.h"
 #include "EngineScene/SceneSerializer.h"
 
+void AddEngineLog(const std::string&, const std::string&, int) {}
+
 int main() {
     std::cout << "[RUNNING] EngineScene Tests...\n";
 
     Scene scene;
-    int parentId = scene.AddObject(PrimitiveType::Cube, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f));
-    int childId = scene.AddObject(PrimitiveType::Sphere, glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(1.0f));
+    int parentId = scene.AddObject(PrimitiveType::Cube, glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(1.0f)).id;
+    int childId = scene.AddObject(PrimitiveType::Sphere, glm::vec3(0.0f, 2.0f, 0.0f), glm::vec3(1.0f)).id;
 
     scene.SetParent(childId, parentId);
     auto* parent = scene.FindObject(parentId);

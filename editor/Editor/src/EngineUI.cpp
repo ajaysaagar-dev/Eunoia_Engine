@@ -1,5 +1,5 @@
-#include "EngineUI.h"
-#include "UndoManager.h"
+#include <Editor/EngineUI.h>
+#include <Editor/UndoManager.h>
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -18,12 +18,12 @@
 #undef GetClassName
 #endif
 #include <map>
-#include "TextureManager.h"
-#include "MeshImporter.h"
-#include "EngineLogger.h"
-#include "BehaviourRegistry.h"
-#include "InputSystem.h"
-#include "ScreenPrint.h"
+#include <EngineAssets/TextureManager.h>
+#include <EngineAssets/MeshImporter.h>
+#include <EngineCore/EngineLogger.h>
+#include <EngineScene/BehaviourRegistry.h>
+#include <EnginePlatform/InputSystem.h>
+#include <EngineScene/ScreenPrint.h>
 #include <shellapi.h>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
@@ -3757,11 +3757,11 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                             std::ofstream cppFile(cppPath);
                             if (cppFile.is_open()) {
-                                cppFile << "#include \"EunoiaBehaviour.h\"\n"
-                                    << "#include \"BehaviourRegistry.h\"\n"
-                                    << "#include \"GameObject.h\"\n"
-                                    << "#include \"InputSystem.h\"\n"
-                                    << "#include \"EngineLogger.h\"\n\n"
+                                cppFile << "#include <EngineScene/EunoiaBehaviour.h>\n"
+                                    << "#include <EngineScene/BehaviourRegistry.h>\n"
+                                    << "#include <EngineScene/GameObject.h>\n"
+                                    << "#include <EnginePlatform/InputSystem.h>\n"
+                                    << "#include <EngineCore/EngineLogger.h>\n\n"
                                     << "// ============================================================================\n"
                                     << "// " << behName << " — Eunoia Behaviour Script\n"
                                     << "// Inherits EunoiaBehaviour. Register properties in RegisterProperties().\n"

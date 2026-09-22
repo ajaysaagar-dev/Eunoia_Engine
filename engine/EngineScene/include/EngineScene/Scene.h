@@ -9,10 +9,10 @@
 #include <cmath>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include "GameObject.h"
-#include "Geometry.h"
-#include "TextureManager.h"
-#include "MeshImporter.h"
+#include <EngineScene/GameObject.h>
+#include <EngineAssets/Geometry.h>
+#include <EngineAssets/TextureManager.h>
+#include <EngineAssets/MeshImporter.h>
 #include <filesystem>
 
 void AddEngineLog(const std::string& category, const std::string& message, int level);

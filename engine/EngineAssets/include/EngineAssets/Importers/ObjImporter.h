@@ -1,6 +1,6 @@
 #pragma once
 #include <string>
-#include "../../../include/MeshImporter.h"
+#include <EngineAssets/MeshImporter.h>
 
 namespace EngineAssets {
 

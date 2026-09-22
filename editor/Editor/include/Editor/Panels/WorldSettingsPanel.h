@@ -4,7 +4,7 @@
 // Was: inline inside EngineUI::RenderWorldSettings() in src/EngineUI.cpp
 // ============================================================================
 
-#include "../../../include/Scene.h"
+#include <EngineScene/Scene.h>
 
 namespace Editor {
 

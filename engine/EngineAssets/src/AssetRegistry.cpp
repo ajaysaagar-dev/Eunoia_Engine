@@ -1,5 +1,5 @@
-#include "AssetRegistry.h"
-#include "AssetEvents.h"
+#include <EngineAssets/AssetRegistry.h>
+#include <EngineAssets/AssetEvents.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>

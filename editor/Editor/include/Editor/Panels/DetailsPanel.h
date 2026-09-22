@@ -4,8 +4,8 @@
 // Was: inline inside EngineUI::RenderDetails() in src/EngineUI.cpp
 // ============================================================================
 
-#include "../../../include/Scene.h"
-#include "../../../include/Camera.h"
+#include <EngineScene/Scene.h>
+#include <EngineRenderer/Camera.h>
 
 namespace Editor {
 

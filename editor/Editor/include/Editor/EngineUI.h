@@ -1,8 +1,8 @@
 #pragma once
-#include "Scene.h"
-#include "Camera.h"
-#include "AssetSystem.h"
-#include "SceneSerializer.h"
+#include <EngineScene/Scene.h>
+#include <EngineRenderer/Camera.h>
+#include <EngineAssets/AssetSystem.h>
+#include <EngineScene/SceneSerializer.h>
 #include <string>
 #include <vector>
 #include <filesystem>

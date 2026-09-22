@@ -4,8 +4,8 @@
 #include <memory>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include "Geometry.h"
-#include "EunoiaBehaviour.h"
+#include <EngineAssets/Geometry.h>
+#include <EngineScene/EunoiaBehaviour.h>
 
 enum class LightType {
     Directional,

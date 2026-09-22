@@ -3,7 +3,7 @@
 #include <vector>
 #include <filesystem>
 #include <glm/glm.hpp>
-#include "Geometry.h"
+#include <EngineAssets/Geometry.h>
 
 struct ImportedMaterial {
     std::string name = "Default_Material";

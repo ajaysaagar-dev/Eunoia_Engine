@@ -1,4 +1,4 @@
-#include "MeshImporter.h"
+#include <EngineAssets/MeshImporter.h>
 #include <algorithm>
 #include <iostream>
 

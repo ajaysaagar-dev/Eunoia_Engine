@@ -1,5 +1,5 @@
-#include "AssetManager.h"
-#include "AssetEvents.h"
+#include <EngineAssets/AssetManager.h>
+#include <EngineAssets/AssetEvents.h>
 #include <iostream>
 #include <fstream>
 

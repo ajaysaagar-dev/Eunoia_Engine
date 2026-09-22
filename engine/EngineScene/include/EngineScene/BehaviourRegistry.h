@@ -1,5 +1,5 @@
 #pragma once
-#include "EunoiaBehaviour.h"
+#include <EngineScene/EunoiaBehaviour.h>
 #include <string>
 #include <unordered_map>
 #include <functional>

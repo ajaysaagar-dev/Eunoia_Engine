@@ -26,18 +26,18 @@
 #include <unordered_map>
 #include <filesystem>
 
-#include "Geometry.h"
-#include "GameObject.h"
-#include "Level.h"
-#include "LevelSerializer.h"
-#include "Camera.h"
-#include "EngineUI.h"
-#include "TextureManager.h"
-#include "AssetSystem.h"
-#include "MeshImporter.h"
-#include "InputSystem.h"
-#include "EngineLogger.h"
-#include "ScreenPrint.h"
+#include <EngineAssets/Geometry.h>
+#include <EngineScene/GameObject.h>
+#include <EngineScene/Level.h>
+#include <EngineScene/LevelSerializer.h>
+#include <EngineRenderer/Camera.h>
+#include <Editor/EngineUI.h>
+#include <EngineAssets/TextureManager.h>
+#include <EngineAssets/AssetSystem.h>
+#include <EngineAssets/MeshImporter.h>
+#include <EnginePlatform/InputSystem.h>
+#include <EngineCore/EngineLogger.h>
+#include <EngineScene/ScreenPrint.h>
 
 extern "C" {
     unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);

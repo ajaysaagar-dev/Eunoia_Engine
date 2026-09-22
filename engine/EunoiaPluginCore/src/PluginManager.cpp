@@ -2,7 +2,7 @@
 // Eunoia Engine — Plugin Manager Implementation
 // ============================================================================
 
-#include "PluginManager.h"
+#include <EunoiaPluginCore/PluginManager.h>
 
 #include <nlohmann/json.hpp>
 

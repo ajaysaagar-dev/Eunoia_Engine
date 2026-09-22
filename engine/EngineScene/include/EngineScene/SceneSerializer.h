@@ -1,6 +1,6 @@
 #pragma once
-#include "Scene.h"
-#include "BehaviourRegistry.h"
+#include <EngineScene/Scene.h>
+#include <EngineScene/BehaviourRegistry.h>
 #include <string>
 #include <fstream>
 #include <sstream>

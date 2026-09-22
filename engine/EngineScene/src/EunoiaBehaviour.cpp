@@ -1,9 +1,9 @@
-#include "EunoiaBehaviour.h"
-#include "BehaviourRegistry.h"
-#include "GameObject.h"
-#include "Scene.h"
-#include "InputSystem.h"
-#include "Camera.h"
+#include <EngineScene/EunoiaBehaviour.h>
+#include <EngineScene/BehaviourRegistry.h>
+#include <EngineScene/GameObject.h>
+#include <EngineScene/Scene.h>
+#include <EnginePlatform/InputSystem.h>
+#include <EngineRenderer/Camera.h>
 #include <cmath>
 
 // ============================================================================

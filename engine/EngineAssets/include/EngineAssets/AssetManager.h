@@ -2,7 +2,7 @@
 #include "AssetID.h"
 #include "AssetRegistry.h"
 #include "AssetHandle.h"
-#include "TextureManager.h"
+#include <EngineAssets/TextureManager.h>
 #include <unordered_map>
 #include <memory>
 #include <mutex>
