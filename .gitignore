@@ -12,6 +12,8 @@
 *.dll
 *.o
 *.obj
+*.elogs
+logs.elogs
 
 # User-specific files
 *.suo
