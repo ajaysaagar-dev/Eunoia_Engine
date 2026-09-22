@@ -904,7 +904,13 @@ private:
             // Restore mesh geometry for imported meshes, or empty mesh for empty/light actors
             if (obj.isImportedMesh && !obj.meshFilePath.empty()) {
                 ImportedModel model;
-                try { model = MeshImporter::Load(obj.meshFilePath); } catch (...) {}
+                try {
+                    model = MeshImporter::Load(obj.meshFilePath);
+                } catch (const std::exception& e) {
+                    std::cout << "[SceneSerializer] Error loading mesh for " << obj.name << ": " << e.what() << " (neglecting, forcing open)\n";
+                } catch (...) {
+                    std::cout << "[SceneSerializer] Unknown error loading mesh for " << obj.name << " (neglecting, forcing open)\n";
+                }
                 if (model.valid && !model.meshes.empty()) {
                     if (obj.submeshIndex >= 0 && obj.submeshIndex < (int)model.meshes.size()) {
                         obj.mesh.vertices = model.meshes[obj.submeshIndex].vertices;
@@ -968,6 +974,10 @@ private:
                         obj.mesh.vertices.clear();
                         obj.mesh.indices.clear();
                     }
+                } else {
+                    // Fallback to empty mesh or default cube representation so scene forces open
+                    obj.mesh = GeometryBuilder::CreateCube(1.0f, 1);
+                    std::cout << "[SceneSerializer] Notice: Actor '" << obj.name << "' (ID: " << obj.id << ") mesh '" << obj.meshFilePath << "' could not be loaded. Force opening with fallback geometry.\n";
                 }
             } else if (obj.type == PrimitiveType::Empty || obj.isLight || IsLightPrimitive(obj.type)) {
                 obj.isLight = (obj.type != PrimitiveType::Empty);

@@ -1,6 +1,12 @@
 #include <EngineAssets/MeshImporter.h>
 #include <algorithm>
 #include <iostream>
+#include <sstream>
+#include <unordered_map>
+#include <mutex>
+
+static std::unordered_map<std::string, ImportedModel> s_modelCache;
+static std::mutex s_modelCacheMutex;
 
 #define TINYOBJLOADER_IMPLEMENTATION
 #include "tiny_obj_loader.h"
@@ -32,11 +38,26 @@ ImportedModel MeshImporter::LoadOBJ(const std::string& filePath) {
         if (!reader.Error().empty()) {
             model.errorMsg = reader.Error();
         }
+        std::cout << "[MeshImporter] Notice: Parsing OBJ '" << filePath << "' encountered error: " << model.errorMsg << " (neglecting, force opening).\n";
         return model;
     }
 
+    // Neglect repetitive material-not-found spam and only log non-mtl warnings once
     if (!reader.Warning().empty()) {
-        std::cout << "TinyObjReader: " << reader.Warning();
+        std::istringstream stream(reader.Warning());
+        std::string line;
+        bool hasLoggedMissingMtl = false;
+        while (std::getline(stream, line)) {
+            if (line.find("not found in .mtl") != std::string::npos) {
+                // Neglect repetitive "not found in .mtl" spam; log a single one-line notice once
+                if (!hasLoggedMissingMtl) {
+                    hasLoggedMissingMtl = true;
+                    std::cout << "[MeshImporter] Notice: Materials not found in .mtl for '" << filePath << "' (neglecting missing materials, using defaults).\n";
+                }
+            } else if (!line.empty()) {
+                std::cout << "[MeshImporter] Warning: " << line << "\n";
+            }
+        }
     }
 
     auto& attrib = reader.GetAttrib();
@@ -440,30 +461,72 @@ bool MeshImporter::IsSupportedFormat(const std::string& ext) {
     return lowerExt == ".obj" || lowerExt == ".gltf" || lowerExt == ".glb" || lowerExt == ".fbx";
 }
 
+void MeshImporter::ClearCache() {
+    std::lock_guard<std::mutex> lock(s_modelCacheMutex);
+    s_modelCache.clear();
+}
+
+void MeshImporter::InvalidateCache(const std::string& filePath) {
+    std::lock_guard<std::mutex> lock(s_modelCacheMutex);
+    s_modelCache.erase(filePath);
+}
+
 ImportedModel MeshImporter::Load(const std::string& filePath) {
+    if (filePath.empty()) {
+        ImportedModel m;
+        m.errorMsg = "Empty file path";
+        return m;
+    }
+
+    // 1. Check in-memory cache first to avoid re-parsing heavy models repeatedly
+    {
+        std::lock_guard<std::mutex> lock(s_modelCacheMutex);
+        auto it = s_modelCache.find(filePath);
+        if (it != s_modelCache.end() && it->second.valid) {
+            return it->second;
+        }
+    }
+
     try {
         std::filesystem::path path(filePath);
+        if (!std::filesystem::exists(path)) {
+            ImportedModel model;
+            model.errorMsg = "File does not exist: " + filePath;
+            std::cout << "[MeshImporter] Notice: " << model.errorMsg << " (neglecting, force opening scene).\n";
+            return model;
+        }
+
         std::string ext = path.extension().string();
         std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
         
+        ImportedModel model;
         if (ext == ".obj") {
-            return LoadOBJ(filePath);
+            model = LoadOBJ(filePath);
         } else if (ext == ".gltf" || ext == ".glb") {
-            return LoadGLTF(filePath);
+            model = LoadGLTF(filePath);
         } else if (ext == ".fbx") {
-            return LoadFBX(filePath);
+            model = LoadFBX(filePath);
+        } else {
+            model.errorMsg = "Unsupported format: " + ext;
+            return model;
+        }
+
+        // Cache successfully loaded models
+        if (model.valid) {
+            std::lock_guard<std::mutex> lock(s_modelCacheMutex);
+            s_modelCache[filePath] = model;
         }
         
-        ImportedModel model;
-        model.errorMsg = "Unsupported format";
         return model;
     } catch (const std::exception& ex) {
         ImportedModel model;
         model.errorMsg = ex.what();
+        std::cout << "[MeshImporter] Exception loading '" << filePath << "': " << ex.what() << " (neglecting, force opening).\n";
         return model;
     } catch (...) {
         ImportedModel model;
         model.errorMsg = "Unknown exception loading model";
+        std::cout << "[MeshImporter] Unknown exception loading '" << filePath << "' (neglecting, force opening).\n";
         return model;
     }
 }

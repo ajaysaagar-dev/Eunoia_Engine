@@ -45,4 +45,6 @@ public:
     static ImportedModel LoadFBX(const std::string& filePath);
     static ImportedModel Load(const std::string& filePath);
     static bool IsSupportedFormat(const std::string& ext);
+    static void ClearCache();
+    static void InvalidateCache(const std::string& filePath);
 };
