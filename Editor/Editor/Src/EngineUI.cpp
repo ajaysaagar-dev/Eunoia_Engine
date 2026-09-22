@@ -451,15 +451,21 @@ std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
 
             // Tab buttons
             float tabW = 180.0f;
-            if (activeTab == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+            bool tab0Active = (activeTab == 0);
+            if (tab0Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
             std::string recentLabel = "Recent Projects (" + std::to_string(projects.size()) + ")";
-            if (ImGui::Button(recentLabel.c_str(), ImVec2(tabW, 32))) activeTab = 0;
-            if (activeTab == 0) ImGui::PopStyleColor();
+            if (ImGui::Button(recentLabel.c_str(), ImVec2(tabW, 32))) {
+                activeTab = 0;
+            }
+            if (tab0Active) ImGui::PopStyleColor();
 
             ImGui::SameLine();
-            if (activeTab == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
-            if (ImGui::Button("New Project", ImVec2(tabW, 32))) activeTab = 1;
-            if (activeTab == 1) ImGui::PopStyleColor();
+            bool tab1Active = (activeTab == 1);
+            if (tab1Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+            if (ImGui::Button("New Project", ImVec2(tabW, 32))) {
+                activeTab = 1;
+            }
+            if (tab1Active) ImGui::PopStyleColor();
 
             ImGui::SameLine();
             ImGui::TextDisabled("|");
@@ -700,6 +706,31 @@ std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
                 pf << j.dump(4);
                 pf.close();
             }
+        }
+
+        // Starter scene in Content/Scenes/Main.escene
+        std::filesystem::path starterScenePath = scenesDir / "Main.escene";
+        if (!std::filesystem::exists(starterScenePath, ec)) {
+            Scene starterScene;
+            starterScene.Clear();
+            starterScene.AddObject(PrimitiveType::Plane, {0.0f, 0.0f, 0.0f}, {0.35f, 0.65f, 0.45f});
+            starterScene.AddObject(PrimitiveType::Cube, {0.0f, 0.5f, 0.0f}, {0.85f, 0.35f, 0.25f});
+            SceneSerializer::SaveScene(starterScene, starterScenePath.string());
+        }
+
+        // Starter material in Content/Materials/Default_Material.emat
+        std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
+        if (!std::filesystem::exists(defaultMatPath, ec)) {
+            MaterialAsset defaultMat;
+            defaultMat.name = "Default_Material";
+            defaultMat.filePath = defaultMatPath.string();
+            defaultMat.baseColor = glm::vec3(0.55f, 0.55f, 0.55f);
+            defaultMat.metallic = 0.0f;
+            defaultMat.roughness = 0.5f;
+            defaultMat.specular = 0.5f;
+            defaultMat.assetId = AssetID::CreateRandom();
+            defaultMat.virtualPath = "/Game/Materials/Default_Material";
+            SaveMaterialFile(defaultMatPath.string(), defaultMat);
         }
 
         // Update recent projects config
@@ -6402,19 +6433,21 @@ void EngineUI::RenderProjectBrowser(Scene& scene, OrbitCamera& camera) {
         ImGui::Spacing();
 
         // Top Tabs: [ Recent Projects ] | [ New Project ]
-        if (projectBrowserTab == 0) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        bool tab0Active = (projectBrowserTab == 0);
+        if (tab0Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
         std::string recentTabLabel = "📂 Recent Projects (" + std::to_string(recentProjects.size()) + ")";
         if (ImGui::Button(recentTabLabel.c_str(), ImVec2(180, 32))) {
             projectBrowserTab = 0;
         }
-        if (projectBrowserTab == 0) ImGui::PopStyleColor();
+        if (tab0Active) ImGui::PopStyleColor();
 
         ImGui::SameLine();
-        if (projectBrowserTab == 1) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        bool tab1Active = (projectBrowserTab == 1);
+        if (tab1Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
         if (ImGui::Button("➕ New Project", ImVec2(150, 32))) {
             projectBrowserTab = 1;
         }
-        if (projectBrowserTab == 1) ImGui::PopStyleColor();
+        if (tab1Active) ImGui::PopStyleColor();
 
         ImGui::SameLine();
         ImGui::TextDisabled("|");

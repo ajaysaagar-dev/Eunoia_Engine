@@ -248,8 +248,8 @@ public:
     void OpenCookModal();
 
     // Material file I/O & Textures
-    bool LoadMaterialFile(const std::string& path, MaterialAsset& outMat);
-    bool SaveMaterialFile(const std::string& path, const MaterialAsset& mat);
+    static bool LoadMaterialFile(const std::string& path, MaterialAsset& outMat);
+    static bool SaveMaterialFile(const std::string& path, const MaterialAsset& mat);
     void OpenMaterialEditor(const std::string& path);
     void ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj, const MaterialAsset& ma);
     std::vector<TextureAssetEntry> ScanProjectTextures();
