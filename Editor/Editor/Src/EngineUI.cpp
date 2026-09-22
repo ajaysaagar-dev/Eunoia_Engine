@@ -279,7 +279,11 @@ void EngineUI::SaveEditorConfig() {
 // ================================================================================
 
 // Forward-declare OpenGL and GLFW ImGui backends (compiled in Build.bat)
+#ifndef GLFW_EXPOSE_NATIVE_WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#endif
 #include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
 
@@ -1832,27 +1836,218 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     // 11. Project Browser Dialog Window (Startup & On-Demand)
     RenderProjectBrowser(scene, camera);
 
+    // 12. Custom Window Frame Perimeter Border (when not maximized and not in immersive mode)
+    bool isMax = false;
+#ifdef _WIN32
+    if (m_window) {
+        HWND hwnd = glfwGetWin32Window(m_window);
+        if (hwnd) isMax = (IsZoomed(hwnd) != 0);
+    }
+#endif
+    if (!isMax && !isImmersiveMode) {
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        fg->AddRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+                    IM_COL32(48, 52, 64, 255), 0.0f, 0, 1.0f);
+    }
+
     s_justExitedPlayMode = false;
 }
 
 void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
+    RenderCustomTitleBar(scene, outShouldExit);
+    RenderMainMenuBar(scene, camera, outShouldExit);
+}
+
+void EngineUI::RenderCustomTitleBar(Scene& scene, bool& outShouldExit) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    float titleBarH = 32.0f;
     float topBarW = vp->Size.x;
 
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(topBarW, topBarHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(topBarW, titleBarH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.065f, 0.070f, 0.088f, 1.0f));
+
+    if (ImGui::Begin("##CustomTitleBar", nullptr, flags)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        bool mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        bool mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+
+        HWND hwnd = nullptr;
+        bool isMaximized = false;
+#ifdef _WIN32
+        if (m_window) {
+            hwnd = glfwGetWin32Window(m_window);
+            if (hwnd) {
+                isMaximized = (IsZoomed(hwnd) != 0);
+            }
+        }
+#endif
+
+        // Vertically center content in 32px title bar
+        ImGui::SetCursorPosY(5.0f);
+
+        // 1. Engine Logo & Brand Badge
+        ImGui::TextColored(ImVec4(0.12f, 0.72f, 1.00f, 1.0f), "[Eunoia]");
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        // 2. Project Name & Active Level
+        std::string titleStr = "Eunoia Engine";
+        if (!activeProjectName.empty()) {
+            titleStr += "  —  " + activeProjectName;
+        }
+        if (!currentLevelFilePath.empty()) {
+            std::string lvl = std::filesystem::path(currentLevelFilePath).stem().string();
+            titleStr += "  [" + lvl + (levelUnsaved ? " *" : "") + "]";
+        } else {
+            titleStr += "  [Untitled Level" + std::string(levelUnsaved ? " *" : "") + "]";
+        }
+        ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.92f, 1.0f), "%s", titleStr.c_str());
+
+        // 3. Play Mode Indicator
+        if (scene.isPlayMode) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.20f, 0.88f, 0.40f, 1.0f), "● PLAY MODE");
+        }
+
+        // 4. Custom Window Frame Control Buttons (Minimize, Maximize/Restore, Close)
+        float btnAreaW = 138.0f;
+        float btnY = vp->Pos.y;
+        float btnH = titleBarH;
+
+        // Button bounding boxes
+        ImVec2 minMin(vp->Pos.x + topBarW - btnAreaW, btnY);
+        ImVec2 minMax(minMin.x + 44.0f, btnY + btnH);
+        bool minHovered = (mousePos.x >= minMin.x && mousePos.x < minMax.x &&
+                           mousePos.y >= minMin.y && mousePos.y < minMax.y);
+
+        ImVec2 maxMin(minMin.x + 44.0f, btnY);
+        ImVec2 maxMax(maxMin.x + 44.0f, btnY + btnH);
+        bool maxHovered = (mousePos.x >= maxMin.x && mousePos.x < maxMax.x &&
+                           mousePos.y >= maxMin.y && mousePos.y < maxMax.y);
+
+        ImVec2 clsMin(maxMin.x + 44.0f, btnY);
+        ImVec2 clsMax(clsMin.x + 50.0f, btnY + btnH);
+        bool clsHovered = (mousePos.x >= clsMin.x && mousePos.x < clsMax.x &&
+                           mousePos.y >= clsMin.y && mousePos.y < clsMax.y);
+
+        bool anyBtnHovered = minHovered || maxHovered || clsHovered;
+
+        // --- Minimize Button ---
+        if (minHovered) {
+            dl->AddRectFilled(minMin, minMax, mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200));
+        }
+        float minCx = (minMin.x + minMax.x) * 0.5f;
+        float minCy = (minMin.y + minMax.y) * 0.5f;
+        dl->AddLine(ImVec2(minCx - 5.0f, minCy), ImVec2(minCx + 5.0f, minCy), IM_COL32(210, 215, 225, 255), 1.5f);
+
+        if (minHovered && mouseClicked) {
+            if (m_window) {
+                glfwIconifyWindow(m_window);
+            }
+        }
+
+        // --- Maximize / Restore Button ---
+        if (maxHovered) {
+            dl->AddRectFilled(maxMin, maxMax, mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200));
+        }
+        float maxCx = (maxMin.x + maxMax.x) * 0.5f;
+        float maxCy = (maxMin.y + maxMax.y) * 0.5f;
+        if (isMaximized) {
+            // Overlapping boxes (Restore icon)
+            dl->AddRect(ImVec2(maxCx - 3.0f, maxCy - 6.0f), ImVec2(maxCx + 5.0f, maxCy + 2.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.2f);
+            ImU32 fillCol = maxHovered ? (mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200)) : IM_COL32(17, 18, 23, 255);
+            dl->AddRectFilled(ImVec2(maxCx - 5.0f, maxCy - 3.0f), ImVec2(maxCx + 3.0f, maxCy + 5.0f), fillCol);
+            dl->AddRect(ImVec2(maxCx - 5.0f, maxCy - 3.0f), ImVec2(maxCx + 3.0f, maxCy + 5.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.2f);
+        } else {
+            // Single square box (Maximize icon)
+            dl->AddRect(ImVec2(maxCx - 5.0f, maxCy - 5.0f), ImVec2(maxCx + 5.0f, maxCy + 5.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.5f);
+        }
+
+        if (maxHovered && mouseClicked) {
+#ifdef _WIN32
+            if (hwnd) {
+                if (isMaximized) ShowWindow(hwnd, SW_RESTORE);
+                else ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+#else
+            if (m_window) {
+                if (isMaximized) glfwRestoreWindow(m_window);
+                else glfwMaximizeWindow(m_window);
+            }
+#endif
+        }
+
+        // --- Close Button ---
+        if (clsHovered) {
+            dl->AddRectFilled(clsMin, clsMax, mouseDown ? IM_COL32(190, 15, 25, 255) : IM_COL32(232, 17, 35, 255));
+        }
+        float clsCx = (clsMin.x + clsMax.x) * 0.5f;
+        float clsCy = (clsMin.y + clsMax.y) * 0.5f;
+        ImU32 crossColor = clsHovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(210, 215, 225, 255);
+        dl->AddLine(ImVec2(clsCx - 5.0f, clsCy - 5.0f), ImVec2(clsCx + 5.0f, clsCy + 5.0f), crossColor, 1.5f);
+        dl->AddLine(ImVec2(clsCx + 5.0f, clsCy - 5.0f), ImVec2(clsCx - 5.0f, clsCy + 5.0f), crossColor, 1.5f);
+
+        if (clsHovered && mouseClicked) {
+            outShouldExit = true;
+        }
+
+        // --- Window Dragging & Double-Click Maximize ---
+#ifdef _WIN32
+        bool titleBarHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+        if (titleBarHovered && !anyBtnHovered && !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive()) {
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (hwnd) {
+                    if (isMaximized) ShowWindow(hwnd, SW_RESTORE);
+                    else ShowWindow(hwnd, SW_MAXIMIZE);
+                }
+            } else if (mouseClicked) {
+                if (hwnd) {
+                    ReleaseCapture();
+                    SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    ImGui::GetIO().MouseDown[0] = false;
+                }
+            }
+        }
+#endif
+
+        // Subtle bottom border line under title bar
+        dl->AddLine(ImVec2(vp->Pos.x, vp->Pos.y + titleBarH),
+                    ImVec2(vp->Pos.x + topBarW, vp->Pos.y + titleBarH),
+                    IM_COL32(35, 38, 48, 255), 1.0f);
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
+}
+
+void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float topBarW = vp->Size.x;
+    float titleBarH = 32.0f;
+    float menuBarH = topBarHeight - titleBarH;
+
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + titleBarH), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(topBarW, menuBarH), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 4.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     if (ImGui::Begin("Menu Bar", nullptr, flags)) {
         if (ImGui::BeginMenuBar()) {
-            // Eunoia Brand Badge
-            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "[Eunoia]");
-            ImGui::SameLine();
 
             // Menu Bar Dropdowns
             if (ImGui::BeginMenu("File")) {

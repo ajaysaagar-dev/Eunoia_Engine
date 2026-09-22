@@ -84,7 +84,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_opengl3.cpp" ^
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 ^
+    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 -ldwmapi ^
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (

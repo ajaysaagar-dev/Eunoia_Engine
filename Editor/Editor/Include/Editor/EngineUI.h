@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <unordered_set>
 
+struct GLFWwindow;
+
 struct EngineLogEntry {
     std::string category;
     std::string message;
@@ -142,7 +144,7 @@ public:
     // UI layout dimensions (scaled for friendly visibility and comfort)
     float uiMargin = 0.0f;
     float uiGap = 0.0f;
-    float topBarHeight = 62.0f;
+    float topBarHeight = 68.0f;
     float leftSidebarWidth = 280.0f;
     float rightSidebarWidth = 320.0f;
     float bottomDockHeight = 260.0f;
@@ -239,6 +241,9 @@ public:
 
     // Standalone Project Browser window (runs before editor, returns selected project path or empty)
     static std::filesystem::path RunStandaloneProjectBrowser();
+
+    void SetWindow(GLFWwindow* window) { m_window = window; }
+    GLFWwindow* GetWindow() const { return m_window; }
 
     void AddLog(const std::string& category, const std::string& message, int level = 0);
     void SetupTheme();
@@ -344,6 +349,8 @@ public:
 
 private:
     void RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
+    void RenderCustomTitleBar(Scene& scene, bool& outShouldExit);
+    void RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
     void RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs);
     void RenderOutliner(Scene& scene);
     void DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_set<int>& visitedIds, int depth = 0);
@@ -361,4 +368,6 @@ private:
 
     int m_pendingReparentChild = -1;
     int m_pendingReparentParent = -1;
+
+    GLFWwindow* m_window = nullptr;
 };

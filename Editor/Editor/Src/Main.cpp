@@ -3,6 +3,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <windows.h>
+#include <dwmapi.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
@@ -3556,6 +3557,108 @@ bool RecoverD3D12Device(HWND hwnd)
 	return true;
 }
 
+// ============================================================================
+// Custom Window Frame & Window Procedure for Editor
+// Provides borderless dark custom frame, native resize borders, snap, and DWM shadow
+// ============================================================================
+static WNDPROC g_originalWndProc = nullptr;
+
+static LRESULT CALLBACK CustomWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	switch (uMsg)
+	{
+	case WM_NCCALCSIZE:
+	{
+		if (wParam == TRUE)
+		{
+			// Returning 0 removes default OS caption and borders; client area fills entire window
+			if (IsZoomed(hwnd))
+			{
+				// When maximized, adjust the client rect to match monitor work area (avoids 8px overflow)
+				HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+				MONITORINFO mi = { sizeof(mi) };
+				if (GetMonitorInfo(hMon, &mi))
+				{
+					NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
+					p->rgrc[0] = mi.rcWork;
+				}
+				return 0;
+			}
+			return 0;
+		}
+		return 0;
+	}
+
+	case WM_GETMINMAXINFO:
+	{
+		MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+		HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi = { sizeof(mi) };
+		if (GetMonitorInfo(hMon, &mi))
+		{
+			mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+			mmi->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+			mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+			mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+		}
+		mmi->ptMinTrackSize.x = 800;
+		mmi->ptMinTrackSize.y = 500;
+		return 0;
+	}
+
+	case WM_NCHITTEST:
+	{
+		if (IsZoomed(hwnd))
+		{
+			return HTCLIENT;
+		}
+
+		POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+		RECT rc;
+		GetWindowRect(hwnd, &rc);
+
+		const int BORDER_SIZE = 7;
+		bool left   = (pt.x >= rc.left && pt.x < rc.left + BORDER_SIZE);
+		bool right  = (pt.x <= rc.right && pt.x > rc.right - BORDER_SIZE);
+		bool top    = (pt.y >= rc.top && pt.y < rc.top + BORDER_SIZE);
+		bool bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - BORDER_SIZE);
+
+		if (top && left)     return HTTOPLEFT;
+		if (top && right)    return HTTOPRIGHT;
+		if (bottom && left)  return HTBOTTOMLEFT;
+		if (bottom && right) return HTBOTTOMRIGHT;
+		if (left)            return HTLEFT;
+		if (right)           return HTRIGHT;
+		if (top)             return HTTOP;
+		if (bottom)          return HTBOTTOM;
+
+		return HTCLIENT;
+	}
+
+	case WM_NCACTIVATE:
+		return TRUE;
+	}
+
+	return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
+}
+
+static void SetupCustomWindowFrame(HWND hwnd)
+{
+	if (!hwnd) return;
+
+	LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+	style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CAPTION | WS_SYSMENU;
+	SetWindowLongPtr(hwnd, GWL_STYLE, style);
+
+	g_originalWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)CustomWindowProc);
+
+	MARGINS margins = { 1, 1, 1, 1 };
+	DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+	SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 int main()
 {
 	EngineLogger::Get().Init("logs.elogs");
@@ -3592,6 +3695,9 @@ int main()
 	}
 
 	HWND hwnd = glfwGetWin32Window(g_window);
+	SetupCustomWindowFrame(hwnd);
+	g_engineUI.SetWindow(g_window);
+
 	ShowWindow(hwnd, SW_SHOW);
 	UpdateWindow(hwnd);
 

@@ -46,6 +46,7 @@ target_link_libraries(Eunoia-Editor PRIVATE
     gdi32
     imm32
     comdlg32
+    dwmapi
 )
 
 target_compile_features(Eunoia-Editor PRIVATE cxx_std_17)
