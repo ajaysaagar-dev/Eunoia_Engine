@@ -50,7 +50,7 @@ Or build and package distribution manually:
 ```cmd
 Build.bat
 ```
-This produces `EngineBuild\Eunoia-Editor.exe` and packages code, binaries, shaders, and resources.
+This produces `Build\Engine\Eunoia-Editor.exe` and packages code, binaries, shaders, and resources into `Build\Engine\`. Standalone game builds are output directly to `Projects\<ProjectName>\Build\`.
 
 ## Architecture
 
@@ -92,9 +92,15 @@ For complete documentation on architectural rules, layer definitions, and modula
 │   └── Editor/                # Layer 7: Editor UI, Panels, ImGui
 ├── Runtime/                   # Standalone headless/game runtime stub
 ├── Tests/                     # Unit tests per engine module
+├── Build/                     # Root build outputs
+│   ├── Engine/                # Engine editor build & packaged distribution
+│   ├── Intermediates/         # Intermediate compilation cache
+│   ├── Runtime/               # Engine runtime artifacts
+│   └── Tests/                 # Unit test binaries
 ├── Deps/                      # Third-party libraries (glm, glfw, imgui, etc.)
 ├── Projects/                  # Projects & custom scripts
 │   └── <ProjectName>/
+│       ├── Build/             # Game build outputs (binaries & launch scripts)
 │       └── Cooked/            # Project-specific cooked content
 ├── Resources/                 # Editor icons and default assets
 ├── Shaders/                   # HLSL DirectX 12 shaders

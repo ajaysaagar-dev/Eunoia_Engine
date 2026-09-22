@@ -2,19 +2,17 @@
 setlocal
 cd /d "%~dp0"
 
-if not exist "EngineBuild\Eunoia-Editor.exe" (
-    if not exist "Eunoia-Editor.exe" (
-        echo [INFO] Eunoia-Editor.exe not found. Building first...
-        call Build.bat
-        if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-    )
+if not exist "Build\Engine\Eunoia-Editor.exe" (
+    echo [INFO] Build\Engine\Eunoia-Editor.exe not found. Building first...
+    call Build.bat
+    if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 )
 
-if exist "EngineBuild\Eunoia-Editor.exe" (
-    echo [INFO] Starting Eunoia-Editor from EngineBuild...
-    cd /d "%~dp0EngineBuild"
+if exist "Build\Engine\Eunoia-Editor.exe" (
+    echo [INFO] Starting Eunoia-Editor from Build\Engine...
+    cd /d "%~dp0Build\Engine"
     start "" "Eunoia-Editor.exe"
 ) else (
-    echo [INFO] Starting Eunoia-Editor...
-    start "" "Eunoia-Editor.exe"
+    echo [ERROR] Could not find or build Eunoia-Editor.exe.
+    exit /b 1
 )

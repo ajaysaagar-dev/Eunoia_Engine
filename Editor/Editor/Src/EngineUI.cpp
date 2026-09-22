@@ -1033,6 +1033,44 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 ImGui::EndMenu();
             }
 
+            if (ImGui::BeginMenu("Build")) {
+                if (ImGui::MenuItem("🎮 Build Game Project (Stand-Alone)")) {
+                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    std::error_code ec;
+                    std::filesystem::create_directories(gameBuildDir, ec);
+
+                    // 1. Cook assets to <Project>/Cooked
+                    std::string cookLog;
+                    std::filesystem::path cookedDir = contentRootPath / "Cooked";
+                    AssetManager::Get().CookProject(cookedDir, cookLog);
+
+                    // 2. Copy glfw3.dll
+                    std::filesystem::path glfwSrc = "C:\\Projects\\Eunoia-Engine\\deps\\glfw-3.5.1.bin.WIN64\\lib-mingw-w64\\glfw3.dll";
+                    if (std::filesystem::exists(glfwSrc, ec)) {
+                        std::filesystem::copy_file(glfwSrc, gameBuildDir / "glfw3.dll", std::filesystem::copy_options::overwrite_existing, ec);
+                    }
+
+                    // 3. Create game launch script
+                    std::ofstream runScript(gameBuildDir / "Run.bat");
+                    if (runScript.is_open()) {
+                        std::string projName = contentRootPath.filename().string();
+                        runScript << "@echo off\ncd /d \"%~dp0\"\necho Starting " << projName << "...\nstart \"\" \"" << projName << ".exe\"\n";
+                        runScript.close();
+                    }
+
+                    AddLog("LogBuild", "Game Project built into: " + gameBuildDir.string(), 2);
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("📦 Cook Project Assets")) {
+                    OpenCookModal();
+                }
+                if (ImGui::MenuItem("📂 Open Project Build Folder")) {
+                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    ShellExecuteA(NULL, "open", gameBuildDir.string().c_str(), NULL, NULL, SW_SHOW);
+                }
+                ImGui::EndMenu();
+            }
+
             if (ImGui::BeginMenu("Actor")) {
                 if (ImGui::MenuItem("Cube")) { scene.AddObject(PrimitiveType::Cube, {0.0f, 0.5f, 0.0f}, {0.85f, 0.35f, 0.25f}); AddLog("LogActor", "Spawned Cube", 2); }
                 if (ImGui::MenuItem("Plane")) { scene.AddObject(PrimitiveType::Plane, {0.0f, 0.0f, 0.0f}, {0.35f, 0.65f, 0.45f}); AddLog("LogActor", "Spawned Plane", 2); }

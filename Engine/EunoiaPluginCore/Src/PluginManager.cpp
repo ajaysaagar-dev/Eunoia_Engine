@@ -184,8 +184,12 @@ bool PluginManager::LoadPluginDLL(LoadedPlugin& plugin, const std::filesystem::p
     // Look for <name>.dll in the plugin directory or in the build output
     std::filesystem::path dllPath = pluginDir / (plugin.name + ".dll");
     if (!std::filesystem::exists(dllPath)) {
-        // Try builds/ directory
-        dllPath = std::filesystem::path("builds") / (plugin.name + ".dll");
+        // Try Build/Engine/ directory
+        dllPath = std::filesystem::path("Build") / "Engine" / (plugin.name + ".dll");
+    }
+    if (!std::filesystem::exists(dllPath)) {
+        // Try current working directory
+        dllPath = std::filesystem::path(plugin.name + ".dll");
     }
     if (!std::filesystem::exists(dllPath)) {
         std::cerr << "[PluginManager] DLL not found for plugin '" << plugin.name

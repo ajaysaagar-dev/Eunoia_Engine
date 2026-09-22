@@ -3,8 +3,20 @@ setlocal enabledelayedexpansion
 set "PROJECT_DIR=%~dp0"
 if "%PROJECT_DIR:~-1%"=="\" set "PROJECT_DIR=%PROJECT_DIR:~0,-1%"
 
-set "OUTPUT_DIR=%PROJECT_DIR%\EngineBuild"
+:: Build directories: Build\Engine for engine, Build subfolders as needed, and Projects\<Game>\Build for games
+set "BUILD_ROOT=%PROJECT_DIR%\Build"
+set "OUTPUT_DIR=%BUILD_ROOT%\Engine"
+set "INTERMEDIATES_DIR=%BUILD_ROOT%\Intermediates"
+set "TESTS_BUILD_DIR=%BUILD_ROOT%\Tests"
+set "RUNTIME_BUILD_DIR=%BUILD_ROOT%\Runtime"
+set "GAME_BUILD_DIR=%PROJECT_DIR%\Projects\test\Build"
+
+if not exist "%BUILD_ROOT%" mkdir "%BUILD_ROOT%"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
+if not exist "%INTERMEDIATES_DIR%" mkdir "%INTERMEDIATES_DIR%"
+if not exist "%TESTS_BUILD_DIR%" mkdir "%TESTS_BUILD_DIR%"
+if not exist "%RUNTIME_BUILD_DIR%" mkdir "%RUNTIME_BUILD_DIR%"
+if not exist "%GAME_BUILD_DIR%" mkdir "%GAME_BUILD_DIR%"
 
 set "COMPILER=%PROJECT_DIR%\tools\w64devkit\bin\g++.exe"
 if not exist "%COMPILER%" (
@@ -57,23 +69,20 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (
-    echo [ERROR] Build failed.
+    echo [ERROR] Engine build failed.
     exit /b !ERRORLEVEL!
 )
 
 echo [SUCCESS] Eunoia-Editor.exe built successfully in %OUTPUT_DIR%.
 
-:: Sync executable to root for backwards-compatible launching
-copy /y "%OUTPUT_DIR%\Eunoia-Editor.exe" "%PROJECT_DIR%\Eunoia-Editor.exe" >nul 2>&1
-
-echo [INFO] Packaging binaries, code, headers, and assets into .\EngineBuild...
+echo [INFO] Packaging binaries, code, headers, and assets into %OUTPUT_DIR%...
 
 :: Copy external DLLs if present
 if exist "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" (
     copy /y "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" "%OUTPUT_DIR%\" >nul 2>&1
 )
-if exist "%PROJECT_DIR%\builds\*.dll" (
-    copy /y "%PROJECT_DIR%\builds\*.dll" "%OUTPUT_DIR%\" >nul 2>&1
+if exist "%PROJECT_DIR%\Plugins\primitives\primitives.dll" (
+    copy /y "%PROJECT_DIR%\Plugins\primitives\primitives.dll" "%OUTPUT_DIR%\" >nul 2>&1
 )
 
 :: Copy resources and shaders
@@ -93,7 +102,7 @@ xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects" "%OUTPUT_DIR%\Projects\" >nul 2
 :: Copy dependencies needed for project compiling (e.g. GLM)
 xcopy /s /e /y /d /q /i "%PROJECT_DIR%\deps\glm" "%OUTPUT_DIR%\Deps\glm\" >nul 2>&1
 
-:: Generate run script inside EngineBuild
+:: Generate run script inside Build\Engine
 (
 echo @echo off
 echo cd /d "%%~dp0"
@@ -104,3 +113,34 @@ echo start "" "Eunoia-Editor.exe"
 echo [SUCCESS] Complete game engine distribution packaged into: %OUTPUT_DIR%
 echo [INFO] Contents of %OUTPUT_DIR%:
 dir /b "%OUTPUT_DIR%"
+
+:: ─────────────────────────────────────────────────────────────────────────────
+:: Build Standalone Game Runtime into the respective game project's Build folder
+:: ─────────────────────────────────────────────────────────────────────────────
+echo.
+echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
+"%COMPILER%" -std=c++17 -O2 ^
+    "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
+    "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
+    "-I%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\include" ^
+    "%PROJECT_DIR%\Runtime\Src\Main.cpp" ^
+    "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
+    -lglfw3 -lgdi32 ^
+    -o "%GAME_BUILD_DIR%\test.exe"
+
+if !ERRORLEVEL! equ 0 (
+    if exist "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" (
+        copy /y "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" "%GAME_BUILD_DIR%\" >nul 2>&1
+    )
+    (
+    echo @echo off
+    echo cd /d "%%~dp0"
+    echo echo [INFO] Starting test game...
+    echo start "" "test.exe"
+    ) > "%GAME_BUILD_DIR%\Run.bat"
+    echo [SUCCESS] Game built successfully into %GAME_BUILD_DIR%.
+    echo [INFO] Contents of %GAME_BUILD_DIR%:
+    dir /b "%GAME_BUILD_DIR%"
+) else (
+    echo [WARNING] Game build encountered an issue.
+)

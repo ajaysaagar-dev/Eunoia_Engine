@@ -167,9 +167,15 @@ C:\Projects\Eunoia-Engine
 ├── Runtime/                       # Standalone headless/game runtime stub
 ├── Tests/                         # Unit tests per engine module
 ├── Deps/                          # External libraries (glm, glfw, imgui, ufbx, etc.)
+├── Build/                         # Root build outputs
+│   ├── Engine/                    # Engine editor build & packaged distribution
+│   ├── Intermediates/             # Intermediate compilation cache
+│   ├── Runtime/                   # Standalone engine runtime artifacts
+│   └── Tests/                     # Test binaries
 ├── Projects/                      # User and sample projects
 │   └── <ProjectName>/
 │       ├── Behaviours/
+│       ├── Build/                 # Game build outputs (binaries & launch scripts)
 │       ├── Cooked/                # Cooked content for the project
 │       │   ├── Content/           # Runtime-optimized assets
 │       │   └── CookedAssetRegistry.json
@@ -188,7 +194,26 @@ C:\Projects\Eunoia-Engine
 
 ---
 
-## 4. Cooked Content Architecture
+## 4. Build and Packaging Output Architecture
+
+1. **Engine Build (`Build/Engine/`)**:
+   - The engine distribution is compiled and packaged entirely into `Build/Engine/`.
+   - Contains `Eunoia-Editor.exe`, required dynamic libraries (`glfw3.dll`, plugin DLLs), packaged modules, shaders, and resources.
+   - Root `Run.bat` executes the engine from `Build/Engine/`.
+   - Other folders inside `Build/` (`Build/Intermediates/`, `Build/Tests/`, `Build/Runtime/`) keep builds compartmentalized.
+
+2. **Game Project Build (`Projects/<GameProject>/Build/`)**:
+   - Every game project packages its runtime executable and launch scripts into its own local `Build/` folder:
+     ```
+     Projects/<GameProject>/Build/
+     ├── <GameProject>.exe         # Standalone game executable
+     ├── glfw3.dll                 # Runtime dependencies
+     └── Run.bat                   # Game launcher script
+     ```
+
+---
+
+## 5. Cooked Content Architecture
 
 All asset cooking operations store output strictly within the respective game project's folder:
 
@@ -206,7 +231,7 @@ Projects/<GameProject>/Cooked/
 
 ---
 
-## 5. Include and Module Rules
+## 6. Include and Module Rules
 
 1. **Header Inclusion Standard**:
    All inter-module inclusions must specify the module prefix:
