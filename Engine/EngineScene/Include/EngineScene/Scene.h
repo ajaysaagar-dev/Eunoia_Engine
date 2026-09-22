@@ -63,77 +63,11 @@ public:
     bool playAnimations = true;
 
     Scene() {
-        LoadDefaultScene();
+        Clear();
     }
 
     void LoadDefaultScene() {
-        objects.clear();
-        pointLights.clear();
-        nextId = 1;
-        activeLevelCameraId = -1;
-
-        // Add Default Point Lights
-        PointLight pl1;
-        pl1.id = 1;
-        pl1.name = "Key Fill Light";
-        pl1.position = glm::vec3(-2.5f, 3.0f, 2.0f);
-        pl1.color = glm::vec3(1.0f, 0.85f, 0.65f);
-        pl1.intensity = 2.2f;
-        pl1.range = 12.0f;
-        pl1.enabled = true;
-        pl1.castShadows = true;
-        pointLights.push_back(pl1);
-
-        PointLight pl2;
-        pl2.id = 2;
-        pl2.name = "Rim Accent Light";
-        pl2.position = glm::vec3(2.5f, 2.2f, -2.0f);
-        pl2.color = glm::vec3(0.4f, 0.7f, 1.0f);
-        pl2.intensity = 1.6f;
-        pl2.range = 10.0f;
-        pl2.enabled = true;
-        pl2.castShadows = true;
-        pointLights.push_back(pl2);
-
-        glm::vec3 defaultGray{0.55f, 0.55f, 0.55f};
-
-        // Ground Plane
-        GameObject& plane = AddObject(PrimitiveType::Plane, {0.0f, -0.01f, 0.0f}, defaultGray);
-        plane.name = "Ground Plane";
-        plane.scale = {4.0f, 1.0f, 4.0f};
-        plane.roughness = 0.6f;
-
-        // Center Cube
-        GameObject& cube = AddObject(PrimitiveType::Cube, {-1.4f, 0.5f, 0.0f}, defaultGray);
-        cube.name = "Cube";
-        cube.autoRotate = true;
-        cube.autoRotateSpeed = {0.0f, 45.0f, 0.0f};
-        cube.roughness = 0.4f;
-
-        // Sphere
-        GameObject& sphere = AddObject(PrimitiveType::Sphere, {1.4f, 0.6f, 0.0f}, defaultGray);
-        sphere.name = "Sphere";
-        sphere.autoRotate = true;
-        sphere.autoRotateSpeed = {30.0f, 40.0f, 0.0f};
-        sphere.roughness = 0.25f;
-        sphere.metallic = 0.2f;
-
-        // Cylinder
-        GameObject& cyl = AddObject(PrimitiveType::Cylinder, {0.0f, 0.6f, 1.5f}, defaultGray);
-        cyl.name = "Cylinder";
-        cyl.roughness = 0.5f;
-
-        // Torus
-        GameObject& torus = AddObject(PrimitiveType::Torus, {0.0f, 0.8f, -1.5f}, defaultGray);
-        torus.name = "Torus";
-        torus.autoRotate = true;
-        torus.autoRotateSpeed = {40.0f, 0.0f, 40.0f};
-        torus.roughness = 0.3f;
-        torus.metallic = 0.5f;
-
-        SyncLightActors();
-
-        selectedId = cube.id;
+        Clear();
     }
 
     GameObject* FindObject(int id) {
@@ -344,6 +278,8 @@ public:
     // Keep all lights synced from their GameObjects (called each frame)
     void SyncLightPositionsFromActors() {
         ambientIntensity = 0.0f;
+        bool hasDirectional = false;
+        pointLights.clear();
         for (auto& obj : objects) {
             if (obj.isLight || IsLightPrimitive(obj.type)) {
                 obj.isLight = true;
@@ -363,6 +299,7 @@ public:
                     enableShadows = obj.light.castShadows;
                     shadowStrength = obj.light.shadowStrength;
                     shadowBias = obj.light.shadowBias;
+                    hasDirectional = true;
                 }
 
                 if (obj.light.type == LightType::Ambient && obj.light.enabled) {
@@ -380,7 +317,7 @@ public:
                     obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight ||
                     obj.light.type == LightType::Tube || obj.type == PrimitiveType::TubeLight ||
                     obj.light.type == LightType::Disc || obj.type == PrimitiveType::DiscLight) {
-                    if (obj.lightId < 0 || obj.lightId >= (int)pointLights.size()) {
+                    if (obj.light.enabled) {
                         PointLight pl;
                         pl.id = obj.id;
                         pl.name = obj.name;
@@ -392,17 +329,12 @@ public:
                         pl.castShadows = obj.light.castShadows;
                         pointLights.push_back(pl);
                         obj.lightId = (int)pointLights.size() - 1;
-                    } else {
-                        pointLights[obj.lightId].position = worldPos;
-                        pointLights[obj.lightId].name = obj.name;
-                        pointLights[obj.lightId].color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
-                        pointLights[obj.lightId].intensity = obj.light.intensity;
-                        pointLights[obj.lightId].range = obj.light.range;
-                        pointLights[obj.lightId].enabled = obj.light.enabled;
-                        pointLights[obj.lightId].castShadows = obj.light.castShadows;
                     }
                 }
             }
+        }
+        if (!hasDirectional) {
+            lightIntensity = 0.0f;
         }
     }
 
@@ -772,8 +704,14 @@ public:
 
     void Clear() {
         objects.clear();
+        pointLights.clear();
         selectedId = -1;
         activeLevelCameraId = -1;
+        nextId = 1;
+        lightIntensity = 0.0f;
+        ambientIntensity = 0.0f;
+        playModePreObjects.clear();
+        playModePreSelectedId = -1;
     }
 
     // Play Mode State & Runtime Lifecycle (dev.md Section 30-36)

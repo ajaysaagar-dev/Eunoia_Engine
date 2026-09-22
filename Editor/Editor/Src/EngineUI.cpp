@@ -709,12 +709,11 @@ std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
         }
 
         // Starter scene in Content/Scenes/Main.escene
+        // Starter scene in Content/Scenes/Main.escene (completely empty - no objects, no lights)
         std::filesystem::path starterScenePath = scenesDir / "Main.escene";
         if (!std::filesystem::exists(starterScenePath, ec)) {
             Scene starterScene;
             starterScene.Clear();
-            starterScene.AddObject(PrimitiveType::Plane, {0.0f, 0.0f, 0.0f}, {0.35f, 0.65f, 0.45f});
-            starterScene.AddObject(PrimitiveType::Cube, {0.0f, 0.5f, 0.0f}, {0.85f, 0.35f, 0.25f});
             SceneSerializer::SaveScene(starterScene, starterScenePath.string());
         }
 
@@ -1070,13 +1069,11 @@ bool EngineUI::CreateNewProject(const std::string& parentDir, const std::string&
         SaveMaterialFile(defaultMatPath.string(), defaultMat);
     }
 
-    // 3. Starter scene in Content/Scenes
+    // 3. Starter scene in Content/Scenes (completely empty - no objects, no lights)
     std::filesystem::path starterScenePath = scenesDir / "Main.escene";
     if (!std::filesystem::exists(starterScenePath, ec)) {
         Scene starterScene;
         starterScene.Clear();
-        starterScene.AddObject(PrimitiveType::Plane, {0.0f, 0.0f, 0.0f}, {0.35f, 0.65f, 0.45f});
-        starterScene.AddObject(PrimitiveType::Cube, {0.0f, 0.5f, 0.0f}, {0.85f, 0.35f, 0.25f});
         SceneSerializer::SaveScene(starterScene, starterScenePath.string());
     }
 
@@ -1139,7 +1136,7 @@ bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, 
             }
         }
         if (!found) {
-            scene.LoadDefaultScene();
+            scene.Clear();
             currentLevelFilePath = "";
         }
     }
