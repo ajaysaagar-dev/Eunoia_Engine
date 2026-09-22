@@ -7,6 +7,7 @@
 #include <iostream>
 #include <glm/glm.hpp>
 #include "EngineLogger.h"
+#include "ScreenPrint.h"
 
 // Forward declarations
 struct GameObject;
@@ -96,7 +97,8 @@ struct RespectiveObjectAccessor {
     GameObject*     Actor(void* objRef) const;
     GameObject*     Shape(void* objRef) const;
     GameObject*     Transform(void* objRef) const;
-    OrbitCamera*    Camera(void* objRef) const;
+    GameObject*     Camera(void* objRef) const;
+    GameObject*     CameraActor(void* objRef) const;
 };
 
 // ============================================================================
@@ -298,6 +300,20 @@ public:
     // Transform accessors (Capitalized keywords: Transform.Location, Transform.Position, Transform.Rotation, Transform.Scale)
     BehaviourTransform Transform;
     BehaviourTransform& transform = Transform;
+
+    // On-screen Print function (prints in game view screen top-left with time)
+    template<typename T>
+    void Print(const T& value, float time) {
+        ::Print(value, time);
+    }
+    template<typename T>
+    void Print(const T& value) {
+        ::Print(value);
+    }
+    template<typename T1, typename T2, typename... Rest>
+    void Print(const T1& v1, const T2& v2, const Rest&... rest) {
+        ::Print(v1, v2, rest...);
+    }
 
 protected:
     EunoiaBehaviour() {

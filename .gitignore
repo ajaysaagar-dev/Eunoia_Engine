@@ -3,10 +3,12 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/master/VisualStudio.gitignore
 
-projects/
+[Ee]ngine[Bb]uild/
+[Pp]rojects/
 [Cc]ooked
 [Bb]uilds
 [Bb]uild
+[Ee]ngineBuild/
 *.dll
 *.o
 *.obj

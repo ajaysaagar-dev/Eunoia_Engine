@@ -49,6 +49,7 @@ enum class EunoiaPluginCategory : uint32_t {
     Lights      = 9,
     Behaviours  = 10,
     Editor      = 11,
+    Cameras     = 12,
     Custom      = 255
 };
 

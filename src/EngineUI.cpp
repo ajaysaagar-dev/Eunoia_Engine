@@ -23,6 +23,7 @@
 #include "EngineLogger.h"
 #include "BehaviourRegistry.h"
 #include "InputSystem.h"
+#include "ScreenPrint.h"
 #include <shellapi.h>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
@@ -637,6 +638,7 @@ void EngineUI::SetupTheme() {
 }
 
 void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit) {
+    currentCamera = &camera;
     if (!scene.onPreChange) {
         scene.onPreChange = [&scene](const std::string& action) {
             UndoManager::Get().RecordSnapshot(scene, action);
@@ -765,6 +767,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             }
         }
         ImGui::End();
+
+        // Game View top-left: Render on-screen Print messages (Print(value, time))
+        RenderScreenPrintOverlay(mainVp->WorkPos.x + 16.0f, mainVp->WorkPos.y + 54.0f);
 
         // Game View occupies the available area; editor UI is hidden
         RenderLoadingModal();
@@ -975,6 +980,44 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 ImGui::EndMenu();
             }
 
+            if (ImGui::BeginMenu("World")) {
+                if (ImGui::BeginMenu("Level Camera")) {
+                    bool noneSelected = (scene.activeLevelCameraId == -1);
+                    if (ImGui::MenuItem("None (Viewport Camera)", nullptr, noneSelected)) {
+                        scene.activeLevelCameraId = -1;
+                        AddLog("LogCamera", "Level Camera set to: None (Viewport Camera)", 0);
+                    }
+                    ImGui::Separator();
+
+                    int cameraCount = 0;
+                    for (const auto& obj : scene.objects) {
+                        if (obj.isCamera || obj.type == PrimitiveType::Camera) {
+                            cameraCount++;
+                            bool isCurrent = (scene.activeLevelCameraId == obj.id);
+                            std::string itemLabel = obj.name + " (ID: " + std::to_string(obj.id) + ")";
+                            if (ImGui::MenuItem(itemLabel.c_str(), nullptr, isCurrent)) {
+                                scene.activeLevelCameraId = obj.id;
+                                AddLog("LogCamera", "Selected Level Camera: " + obj.name, 0);
+                            }
+                        }
+                    }
+
+                    if (cameraCount == 0) {
+                        ImGui::TextDisabled("  (No cameras in scene)");
+                        ImGui::Separator();
+                        if (ImGui::MenuItem("+ Add Camera to Scene")) {
+                            GameObject& newCam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f});
+                            newCam.name = "Camera Actor";
+                            newCam.rotation = {0.0f, 0.0f, 0.0f};
+                            scene.activeLevelCameraId = newCam.id;
+                            AddLog("LogCamera", "Created and set Level Camera: " + newCam.name, 2);
+                        }
+                    }
+                    ImGui::EndMenu();
+                }
+                ImGui::EndMenu();
+            }
+
             if (ImGui::BeginMenu("Assets")) {
                 if (ImGui::MenuItem("🔄 Scan & Sync Asset Registry")) {
                     SyncRegistryWithUIProgress(contentRootPath);
@@ -997,6 +1040,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 if (ImGui::MenuItem("Cylinder")) { scene.AddObject(PrimitiveType::Cylinder, {0.0f, 0.6f, 0.0f}, {0.95f, 0.80f, 0.20f}); AddLog("LogActor", "Spawned Cylinder", 2); }
                 if (ImGui::MenuItem("Pyramid / Cone")) { scene.AddObject(PrimitiveType::Pyramid, {0.0f, 0.0f, 0.0f}, {0.90f, 0.50f, 0.20f}); AddLog("LogActor", "Spawned Pyramid", 2); }
                 if (ImGui::MenuItem("Torus")) { scene.AddObject(PrimitiveType::Torus, {0.0f, 0.6f, 0.0f}, {0.75f, 0.30f, 0.85f}); AddLog("LogActor", "Spawned Torus", 2); }
+                if (ImGui::MenuItem("Camera")) { GameObject& cam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f}); cam.name = "Camera Actor"; AddLog("LogActor", "Spawned Camera", 2); }
                 ImGui::Separator();
                 if (ImGui::MenuItem("🧊 Import 3D Mesh (OBJ/GLTF)...")) {
                     ImportMeshWithSavePrompt(scene);
@@ -1025,6 +1069,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 if (ImGui::MenuItem("Cylinder")) { scene.AddObject(PrimitiveType::Cylinder); AddLog("LogActor", "Spawned Cylinder", 2); }
                 if (ImGui::MenuItem("Pyramid / Cone")) { scene.AddObject(PrimitiveType::Pyramid); AddLog("LogActor", "Spawned Pyramid", 2); }
                 if (ImGui::MenuItem("Torus")) { scene.AddObject(PrimitiveType::Torus); AddLog("LogActor", "Spawned Torus", 2); }
+                if (ImGui::MenuItem("Camera")) { GameObject& cam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f}); cam.name = "Camera Actor"; AddLog("LogActor", "Spawned Camera", 2); }
                 ImGui::Separator();
                 ImGui::TextDisabled("CUSTOM MESH");
                 if (ImGui::MenuItem("Import 3D Mesh (OBJ/GLTF)...")) {
@@ -1179,6 +1224,9 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
     ImGui::End();
     ImGui::PopStyleVar();
 
+    // Viewport top-left: Render on-screen Print messages
+    RenderScreenPrintOverlay(overlayX, overlayY + 36.0f);
+
     // 3D Viewport Point Light Sprite Billboards (dev.md)
     if (!isGameView) {
         ImDrawList* drawList = ImGui::GetBackgroundDrawList();
@@ -1238,6 +1286,64 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
                 }
             }
         }
+
+        // 3D Viewport Camera Sprite Billboards
+        for (auto& obj : scene.objects) {
+            if (!obj.visible || (!obj.isCamera && obj.type != PrimitiveType::Camera)) continue;
+            glm::vec3 worldPos = scene.GetWorldPosition(obj);
+            glm::vec4 clip = vpMatrix * glm::vec4(worldPos, 1.0f);
+            if (clip.w <= 0.05f) continue;
+
+            glm::vec3 ndc = glm::vec3(clip) / clip.w;
+            if (ndc.z < -1.0f || ndc.z > 1.0f) continue;
+
+            float screenX = vp->Pos.x + vpRect.x + (ndc.x * 0.5f + 0.5f) * vpRect.width;
+            float screenY = vp->Pos.y + vpRect.y + ((1.0f - ndc.y) * 0.5f) * vpRect.height;
+
+            if (screenX < vp->Pos.x + vpRect.x || screenX > vp->Pos.x + vpRect.x + vpRect.width ||
+                screenY < vp->Pos.y + vpRect.y || screenY > vp->Pos.y + vpRect.y + vpRect.height) continue;
+
+            float iconSize = 38.0f;
+            ImVec2 pMin(screenX - iconSize * 0.5f, screenY - iconSize * 0.5f);
+            ImVec2 pMax(screenX + iconSize * 0.5f, screenY + iconSize * 0.5f);
+
+            bool isSelected = (scene.selectedId == obj.id);
+
+            // Draw Sprite Billboard (@resources/icons/camera.png)
+            if (cameraIconGpuHandle != 0) {
+                drawList->AddImage((ImTextureID)cameraIconGpuHandle, pMin, pMax,
+                                   ImVec2(0, 0), ImVec2(1, 1),
+                                   isSelected ? IM_COL32(255, 255, 255, 255) : IM_COL32(200, 235, 255, 210));
+            } else {
+                drawList->AddCircleFilled(ImVec2(screenX, screenY), 12.0f, IM_COL32(60, 180, 240, 220));
+            }
+
+            // Selection ring
+            if (isSelected) {
+                drawList->AddCircle(ImVec2(screenX, screenY), 20.0f, IM_COL32(0, 255, 100, 255), 24, 2.0f);
+                drawList->AddCircle(ImVec2(screenX, screenY), 22.0f, IM_COL32(80, 210, 255, 180), 24, 1.0f);
+            } else {
+                drawList->AddCircle(ImVec2(screenX, screenY), 16.0f, IM_COL32(80, 180, 230, 90), 16, 1.0f);
+            }
+
+            // Active level camera badge
+            if (scene.activeLevelCameraId == obj.id) {
+                drawList->AddCircleFilled(ImVec2(screenX + 12.0f, screenY - 12.0f), 5.0f, IM_COL32(0, 255, 100, 255));
+            }
+
+            // Click detection on camera sprite
+            if (mouseClicked && !ImGui::GetIO().WantCaptureMouse && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing()) {
+                float dx = mousePos.x - screenX;
+                float dy = mousePos.y - screenY;
+                if (dx * dx + dy * dy <= 20.0f * 20.0f) {
+                    scene.selectedId = obj.id;
+                    AddLog("LogActor", "Selected Camera Actor via Viewport Sprite: " + obj.name, 0);
+                }
+            }
+        }
+
+        // Camera Picture-in-Picture (PiP) Preview in bottom right of viewport
+        RenderCameraPreviewOverlay(scene, camera);
     }
 
     // 1px border framing the center 3D viewport exactly according to UI_Ref.svg blueprint
@@ -1245,6 +1351,241 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
     ImVec2 vpMin(vp->Pos.x + vpRect.x, vp->Pos.y + vpRect.y);
     ImVec2 vpMax(vp->Pos.x + vpRect.x + vpRect.width, vp->Pos.y + vpRect.y + vpRect.height);
     fgDrawList->AddRect(vpMin, vpMax, IM_COL32(40, 40, 40, 255), 0.0f, 0, 1.0f);
+}
+
+void EngineUI::RenderScreenPrintOverlay(float startX, float startY) {
+    auto& screenPrint = ScreenPrint::System::Get();
+    const auto messages = screenPrint.GetMessages();
+    if (messages.empty()) return;
+
+    ImGui::SetNextWindowPos(ImVec2(startX, startY), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
+                             ImGuiWindowFlags_AlwaysAutoResize |
+                             ImGuiWindowFlags_NoSavedSettings |
+                             ImGuiWindowFlags_NoFocusOnAppearing |
+                             ImGuiWindowFlags_NoNav |
+                             ImGuiWindowFlags_NoMove |
+                             ImGuiWindowFlags_NoInputs;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 4.0f));
+
+    if (ImGui::Begin("##ScreenPrintOverlay", nullptr, flags)) {
+        for (size_t i = 0; i < messages.size(); ++i) {
+            const auto& msg = messages[i];
+            float alpha = 1.0f;
+            if (msg.remainingTime < 0.5f) {
+                alpha = std::clamp(msg.remainingTime / 0.5f, 0.0f, 1.0f);
+            }
+
+            ImVec4 textColor = ImVec4(msg.color.x, msg.color.y, msg.color.z, alpha);
+            ImVec4 bgColor   = ImVec4(0.05f, 0.07f, 0.09f, 0.85f * alpha);
+
+            ImGui::PushStyleColor(ImGuiCol_Text, textColor);
+            ImGui::PushStyleColor(ImGuiCol_Button, bgColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, bgColor);
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, bgColor);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+
+            std::string btnId = "##screen_msg_" + std::to_string(i);
+            ImGui::Button((msg.text + btnId).c_str());
+
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(4);
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar(3);
+}
+
+void EngineUI::RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera) {
+    if (isGameView || scene.selectedId == -1) return;
+
+    GameObject* selObj = scene.FindObject(scene.selectedId);
+    if (!selObj || (!selObj->isCamera && selObj->type != PrimitiveType::Camera)) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+
+    float pipW = 280.0f;
+    float pipH = 196.0f;
+    float pipX = vp->Pos.x + vpRect.x + vpRect.width - pipW - 14.0f;
+    float pipY = vp->Pos.y + vpRect.y + vpRect.height - pipH - 14.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(pipX, pipY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(pipW, pipH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                             ImGuiWindowFlags_NoSavedSettings;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.11f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.55f, 0.90f, 0.85f));
+
+    if (ImGui::Begin("##CameraPiPWindow", nullptr, flags)) {
+        // Header
+        ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 1.0f), "📷 %s", selObj->name.c_str());
+        ImGui::SameLine();
+        bool isLevelCam = (scene.activeLevelCameraId == selObj->id);
+        if (isLevelCam) {
+            ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "[Active]");
+        } else {
+            if (ImGui::SmallButton("Set Level Cam")) {
+                scene.activeLevelCameraId = selObj->id;
+                AddLog("LogCamera", "Set Active Level Camera: " + selObj->name, 0);
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Align")) {
+            camera.yaw = selObj->rotation.y;
+            camera.pitch = selObj->rotation.x;
+            camera.fov = selObj->camera.fov;
+            camera.distance = 1.0f;
+            camera.target = scene.GetWorldPosition(*selObj) + camera.GetForward() * 1.0f;
+            AddLog("LogCamera", "Aligned Viewport to " + selObj->name, 0);
+        }
+
+        // Viewport canvas
+        ImVec2 canvasP0 = ImGui::GetCursorScreenPos();
+        ImVec2 canvasSize = ImGui::GetContentRegionAvail();
+        float cW = canvasSize.x;
+        float cH = canvasSize.y;
+
+        if (cW > 10.0f && cH > 10.0f) {
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            dl->PushClipRect(canvasP0, ImVec2(canvasP0.x + cW, canvasP0.y + cH), true);
+
+            float targetAspect = (selObj->camera.aspectRatio > 0.1f) ? selObj->camera.aspectRatio : (16.0f / 9.0f);
+            float viewW = cW;
+            float viewH = cW / targetAspect;
+            if (viewH > cH) {
+                viewH = cH;
+                viewW = cH * targetAspect;
+            }
+            float viewX = canvasP0.x + (cW - viewW) * 0.5f;
+            float viewY = canvasP0.y + (cH - viewH) * 0.5f;
+
+            // Background of camera view
+            dl->AddRectFilled(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(14, 15, 18, 255));
+
+            // Camera VP Matrix
+            glm::vec3 camWorldPos = scene.GetWorldPosition(*selObj);
+            float rYaw = glm::radians(selObj->rotation.y);
+            float rPitch = glm::radians(selObj->rotation.x);
+            glm::vec3 camFwd = glm::normalize(glm::vec3(-std::cos(rPitch) * std::sin(rYaw), -std::sin(rPitch), -std::cos(rPitch) * std::cos(rYaw)));
+            glm::mat4 camViewMat = glm::lookAt(camWorldPos, camWorldPos + camFwd, glm::vec3(0, 1, 0));
+            glm::mat4 camProjMat;
+            if (!selObj->camera.isOrthographic) {
+                camProjMat = glm::perspective(glm::radians(std::clamp(selObj->camera.fov, 10.0f, 150.0f)), targetAspect, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
+            } else {
+                float halfH = std::max(0.1f, selObj->camera.orthoSize);
+                float halfW = halfH * targetAspect;
+                camProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
+            }
+            glm::mat4 camVP = camProjMat * camViewMat;
+
+            // Project Ground Grid lines
+            auto ProjectPoint = [&](const glm::vec3& pt, ImVec2& outPt) -> bool {
+                glm::vec4 c = camVP * glm::vec4(pt, 1.0f);
+                if (c.w <= 0.05f) return false;
+                glm::vec3 ndc = glm::vec3(c) / c.w;
+                if (ndc.z < -1.0f || ndc.z > 1.0f) return false;
+                outPt.x = viewX + (ndc.x * 0.5f + 0.5f) * viewW;
+                outPt.y = viewY + ((1.0f - ndc.y) * 0.5f) * viewH;
+                return true;
+            };
+
+            // Ground grid lines
+            for (int gz = -6; gz <= 6; gz += 2) {
+                ImVec2 pA, pB;
+                if (ProjectPoint(glm::vec3(-6.0f, 0.0f, (float)gz), pA) && ProjectPoint(glm::vec3(6.0f, 0.0f, (float)gz), pB)) {
+                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
+                }
+            }
+            for (int gx = -6; gx <= 6; gx += 2) {
+                ImVec2 pA, pB;
+                if (ProjectPoint(glm::vec3((float)gx, 0.0f, -6.0f), pA) && ProjectPoint(glm::vec3((float)gx, 0.0f, 6.0f), pB)) {
+                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
+                }
+            }
+
+            // Project Scene Objects
+            int drawnTriangles = 0;
+            for (const auto& otherObj : scene.objects) {
+                if (!otherObj.visible || otherObj.id == selObj->id || otherObj.isCamera || otherObj.isLight) continue;
+                if (otherObj.mesh.vertices.empty() || otherObj.mesh.indices.empty()) continue;
+
+                glm::mat4 model = scene.GetWorldMatrix(otherObj);
+                glm::mat4 mvp = camVP * model;
+
+                size_t indCount = otherObj.mesh.indices.size();
+                size_t step = (indCount > 300) ? 6 : 3;
+
+                for (size_t i = 0; i + 2 < indCount; i += step) {
+                    if (drawnTriangles > 350) break;
+
+                    const auto& v0 = otherObj.mesh.vertices[otherObj.mesh.indices[i]];
+                    const auto& v1 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 1]];
+                    const auto& v2 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 2]];
+
+                    glm::vec4 c0 = mvp * glm::vec4(v0.pos, 1.0f);
+                    glm::vec4 c1 = mvp * glm::vec4(v1.pos, 1.0f);
+                    glm::vec4 c2 = mvp * glm::vec4(v2.pos, 1.0f);
+
+                    if (c0.w <= 0.05f || c1.w <= 0.05f || c2.w <= 0.05f) continue;
+
+                    ImVec2 p0(viewX + (c0.x / c0.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c0.y / c0.w) * 0.5f) * viewH);
+                    ImVec2 p1(viewX + (c1.x / c1.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c1.y / c1.w) * 0.5f) * viewH);
+                    ImVec2 p2(viewX + (c2.x / c2.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c2.y / c2.w) * 0.5f) * viewH);
+
+                    // 2D Backface test
+                    float cp = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
+                    if (cp < 0.0f) {
+                        int cr = std::clamp((int)(otherObj.color.r * 180.0f), 20, 255);
+                        int cg = std::clamp((int)(otherObj.color.g * 180.0f), 20, 255);
+                        int cb = std::clamp((int)(otherObj.color.b * 180.0f), 20, 255);
+                        dl->AddTriangleFilled(p0, p1, p2, IM_COL32(cr, cg, cb, 230));
+                        dl->AddTriangle(p0, p1, p2, IM_COL32(30, 32, 40, 150), 1.0f);
+                        drawnTriangles++;
+                    }
+                }
+            }
+
+            // Frame and overlays
+            dl->AddRect(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(70, 75, 88, 255), 0.0f, 0, 1.0f);
+
+            // Crosshair
+            float midX = viewX + viewW * 0.5f;
+            float midY = viewY + viewH * 0.5f;
+            dl->AddLine(ImVec2(midX - 7.0f, midY), ImVec2(midX + 7.0f, midY), IM_COL32(255, 255, 255, 80));
+            dl->AddLine(ImVec2(midX, midY - 7.0f), ImVec2(midX, midY + 7.0f), IM_COL32(255, 255, 255, 80));
+
+            // Dotted Action Safe Area (90%)
+            dl->AddRect(ImVec2(viewX + viewW * 0.05f, viewY + viewH * 0.05f),
+                        ImVec2(viewX + viewW * 0.95f, viewY + viewH * 0.95f),
+                        IM_COL32(255, 255, 255, 35));
+
+            // Camera info overlay
+            char camInfo[64];
+            if (!selObj->camera.isOrthographic) {
+                snprintf(camInfo, sizeof(camInfo), "FOV: %.1f° | Persp", selObj->camera.fov);
+            } else {
+                snprintf(camInfo, sizeof(camInfo), "Size: %.1f | Ortho", selObj->camera.orthoSize);
+            }
+            dl->AddText(ImVec2(viewX + 6.0f, viewY + viewH - 16.0f), IM_COL32(180, 200, 220, 190), camInfo);
+
+            dl->PopClipRect();
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(2);
 }
 
 void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_set<int>& visitedIds, int depth) {
@@ -1273,6 +1614,12 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_se
     char label[128];
     if (obj.isLight || IsLightPrimitive(obj.type)) {
         snprintf(label, sizeof(label), "[%s] %s", GetLightTypeName(obj.light.type), obj.name.c_str());
+    } else if (obj.isCamera || obj.type == PrimitiveType::Camera) {
+        if (scene.activeLevelCameraId == obj.id) {
+            snprintf(label, sizeof(label), "[Camera*] %s (Active)", obj.name.c_str());
+        } else {
+            snprintf(label, sizeof(label), "[Camera] %s", obj.name.c_str());
+        }
     } else if (obj.type == PrimitiveType::Empty) {
         snprintf(label, sizeof(label), "[Empty] %s", obj.name.c_str());
     } else {
@@ -1285,6 +1632,14 @@ void EngineUI::DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_se
     }
     if (ImGui::BeginPopupContextItem()) {
         scene.selectedId = obj.id;
+        if (obj.isCamera || obj.type == PrimitiveType::Camera) {
+            bool isCurrent = (scene.activeLevelCameraId == obj.id);
+            if (ImGui::MenuItem(isCurrent ? "Clear as Active Level Camera" : "Set as Active Level Camera")) {
+                if (isCurrent) scene.activeLevelCameraId = -1;
+                else scene.activeLevelCameraId = obj.id;
+            }
+            ImGui::Separator();
+        }
         if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
             GameObject* copy = scene.DuplicateObject(obj.id);
             if (copy) {
@@ -1451,6 +1806,11 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
+            if (ImGui::MenuItem("Camera")) {
+                GameObject& cam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f});
+                cam.name = "Camera Actor";
+                AddLog("LogActor", "Spawned Camera Actor via Outliner Context Menu", 2);
+            }
             if (ImGui::MenuItem("Empty Actor")) { scene.AddEmptyActor(); AddLog("LogActor", "Spawned Empty Actor", 2); }
             ImGui::EndPopup();
         }
@@ -1493,6 +1853,11 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
+            if (ImGui::MenuItem("Camera")) {
+                GameObject& cam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f});
+                cam.name = "Camera Actor";
+                AddLog("LogActor", "Spawned Camera Actor via Outliner", 2);
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Empty Actor")) { scene.AddEmptyActor(); AddLog("LogActor", "Spawned Empty Actor via Outliner", 2); }
             ImGui::EndPopup();
@@ -1513,6 +1878,13 @@ void EngineUI::RenderOutliner(Scene& scene) {
             if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
             if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
             ImGui::EndPopup();
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("+ Camera")) {
+            GameObject& cam = scene.AddObject(PrimitiveType::Camera, {0.0f, 2.0f, -4.0f});
+            cam.name = "Camera Actor";
+            AddLog("LogActor", "Spawned Camera Actor via Outliner", 2);
         }
 
         ImGui::SameLine();
@@ -1621,6 +1993,8 @@ void EngineUI::RenderDetails(Scene& scene) {
         // Actor Header Banner
         if (obj->isLight) {
             ImGui::TextColored(ImVec4(1.00f, 0.85f, 0.20f, 1.0f), "[PointLightComponent]");
+        } else if (obj->isCamera || obj->type == PrimitiveType::Camera) {
+            ImGui::TextColored(ImVec4(0.30f, 0.90f, 0.70f, 1.0f), "[CameraComponent]");
         } else if (obj->type == PrimitiveType::Empty) {
             ImGui::TextColored(ImVec4(0.35f, 0.80f, 1.00f, 1.0f), "[EmptyActor]");
         } else {
@@ -1846,8 +2220,90 @@ void EngineUI::RenderDetails(Scene& scene) {
             }
         }
 
+        // Camera Component Category
+        if (obj->isCamera || obj->type == PrimitiveType::Camera) {
+            if (ImGui::CollapsingHeader("Camera Component", ImGuiTreeNodeFlags_DefaultOpen)) {
+                // Projection Mode
+                const char* projModes[] = { "Perspective", "Orthographic" };
+                int currentMode = obj->camera.isOrthographic ? 1 : 0;
+                if (ImGui::Combo("Projection", &currentMode, projModes, 2)) {
+                    obj->camera.isOrthographic = (currentMode == 1);
+                }
+
+                if (!obj->camera.isOrthographic) {
+                    ImGui::SliderFloat("Field of View (FOV)", &obj->camera.fov, 10.0f, 150.0f, "%.1f deg");
+                } else {
+                    ImGui::DragFloat("Orthographic Size", &obj->camera.orthoSize, 0.1f, 0.1f, 100.0f, "%.2f");
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Clipping Planes");
+                ImGui::DragFloat("Near Plane", &obj->camera.nearPlane, 0.01f, 0.001f, 50.0f, "%.3f m");
+                ImGui::DragFloat("Far Plane", &obj->camera.farPlane, 1.0f, 1.0f, 50000.0f, "%.1f m");
+                if (obj->camera.nearPlane < 0.001f) obj->camera.nearPlane = 0.001f;
+                if (obj->camera.farPlane <= obj->camera.nearPlane) obj->camera.farPlane = obj->camera.nearPlane + 1.0f;
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Aspect Ratio");
+                const char* aspectPresets[] = { "16:9 (1.778)", "16:10 (1.600)", "4:3 (1.333)", "21:9 (2.333)", "1:1 (1.000)", "Custom" };
+                int curAspectPreset = 5;
+                if (std::abs(obj->camera.aspectRatio - 16.0f/9.0f) < 0.01f) curAspectPreset = 0;
+                else if (std::abs(obj->camera.aspectRatio - 16.0f/10.0f) < 0.01f) curAspectPreset = 1;
+                else if (std::abs(obj->camera.aspectRatio - 4.0f/3.0f) < 0.01f) curAspectPreset = 2;
+                else if (std::abs(obj->camera.aspectRatio - 21.0f/9.0f) < 0.01f) curAspectPreset = 3;
+                else if (std::abs(obj->camera.aspectRatio - 1.0f) < 0.01f) curAspectPreset = 4;
+
+                if (ImGui::Combo("Preset##CamAspect", &curAspectPreset, aspectPresets, 6)) {
+                    if (curAspectPreset == 0) obj->camera.aspectRatio = 16.0f / 9.0f;
+                    else if (curAspectPreset == 1) obj->camera.aspectRatio = 16.0f / 10.0f;
+                    else if (curAspectPreset == 2) obj->camera.aspectRatio = 4.0f / 3.0f;
+                    else if (curAspectPreset == 3) obj->camera.aspectRatio = 21.0f / 9.0f;
+                    else if (curAspectPreset == 4) obj->camera.aspectRatio = 1.0f;
+                }
+                ImGui::DragFloat("Ratio Value##CamRatio", &obj->camera.aspectRatio, 0.01f, 0.2f, 5.0f, "%.3f");
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Level Camera");
+                bool isLevelCam = (scene.activeLevelCameraId == obj->id);
+                if (isLevelCam) {
+                    ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "[ACTIVE LEVEL CAMERA]");
+                    if (ImGui::Button("Clear as Level Camera", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                        scene.activeLevelCameraId = -1;
+                        AddLog("LogCamera", "Cleared active level camera", 0);
+                    }
+                } else {
+                    ImGui::TextDisabled("Status: Not set as level camera");
+                    if (ImGui::Button("Set as Active Level Camera", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                        scene.activeLevelCameraId = obj->id;
+                        AddLog("LogCamera", "Set " + obj->name + " as Active Level Camera", 0);
+                    }
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Camera Pilot & Alignment");
+                if (currentCamera) {
+                    if (ImGui::Button("Align View to Camera", ImVec2(ImGui::GetContentRegionAvail().x * 0.49f, 26.0f))) {
+                        currentCamera->yaw = obj->rotation.y;
+                        currentCamera->pitch = obj->rotation.x;
+                        currentCamera->fov = obj->camera.fov;
+                        currentCamera->distance = 1.0f;
+                        currentCamera->target = scene.GetWorldPosition(*obj) + currentCamera->GetForward() * 1.0f;
+                        AddLog("LogCamera", "Aligned Viewport to " + obj->name, 0);
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Align Camera to View", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                        obj->position = currentCamera->GetPosition();
+                        obj->rotation.y = currentCamera->yaw;
+                        obj->rotation.x = currentCamera->pitch;
+                        obj->camera.fov = currentCamera->fov;
+                        AddLog("LogCamera", "Aligned " + obj->name + " to current viewport camera", 0);
+                    }
+                }
+            }
+        }
+
         // Primitive Shape Settings Category (dev.md)
-        if (!obj->isLight && !IsLightPrimitive(obj->type) && obj->type != PrimitiveType::Empty && obj->type != PrimitiveType::ImportedMesh) {
+        if (!obj->isLight && !IsLightPrimitive(obj->type) && !obj->isCamera && !IsCameraPrimitive(obj->type) && obj->type != PrimitiveType::Empty && obj->type != PrimitiveType::ImportedMesh) {
             char shapeHeader[128];
             snprintf(shapeHeader, sizeof(shapeHeader), "%s Parameters", GetPrimitiveTypeName(obj->type));
             if (ImGui::CollapsingHeader(shapeHeader, ImGuiTreeNodeFlags_DefaultOpen)) {
@@ -1947,7 +2403,7 @@ void EngineUI::RenderDetails(Scene& scene) {
         }
 
         // 2. Static Mesh Category (only for mesh actors)
-        if (!obj->isLight && obj->type != PrimitiveType::Empty && ImGui::CollapsingHeader("Static Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!obj->isLight && !obj->isCamera && obj->type != PrimitiveType::Camera && obj->type != PrimitiveType::Empty && ImGui::CollapsingHeader("Static Mesh", ImGuiTreeNodeFlags_DefaultOpen)) {
             char meshAsset[64];
             snprintf(meshAsset, sizeof(meshAsset), "SM_%s", GetPrimitiveTypeName(obj->type));
             ImGui::TextDisabled("Static Mesh Asset:");
@@ -1956,7 +2412,7 @@ void EngineUI::RenderDetails(Scene& scene) {
         }
 
         // 3. Materials Category (Element 0) (mesh actors or parent actors with children)
-        if (!obj->isLight && (obj->type != PrimitiveType::Empty || !obj->childIds.empty()) && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!obj->isLight && !obj->isCamera && obj->type != PrimitiveType::Camera && (obj->type != PrimitiveType::Empty || !obj->childIds.empty()) && ImGui::CollapsingHeader("Materials", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::TextDisabled("Element 0: Material Slot");
             if (!obj->childIds.empty()) {
                 ImGui::SameLine();
@@ -4405,8 +4861,49 @@ void EngineUI::RenderCookModal() {
 // Play Mode / Editor Mode Management (dev.md Section 30-36)
 // ============================================================================
 
-void EngineUI::EnterPlayMode(Scene& scene) {
+extern void WaitForGpuIdle();
+
+void EngineUI::EnterPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
     if (scene.isPlayMode) return;
+
+    // Flush and wait for in-flight GPU frames before modifying scene state and UI viewport
+    WaitForGpuIdle();
+
+    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
+    if (cam && scene.activeLevelCameraId != -1) {
+        GameObject* camObj = scene.FindObject(scene.activeLevelCameraId);
+        if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera)) {
+            savedCameraTarget = cam->target;
+            savedCameraDistance = cam->distance;
+            savedCameraYaw = cam->yaw;
+            savedCameraPitch = cam->pitch;
+            savedCameraFov = cam->fov;
+            savedCameraIsOrtho = cam->isOrthographic;
+            savedCameraOrthoSize = cam->orthoSize;
+            savedCameraNearPlane = cam->nearPlane;
+            savedCameraFarPlane = cam->farPlane;
+            hasSavedPlayModeCamera = true;
+
+            glm::mat4 worldMat = scene.GetWorldMatrix(*camObj);
+            glm::vec3 worldPos, worldRot, worldScale;
+            Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+
+            cam->yaw = worldRot.y;
+            cam->pitch = worldRot.x;
+            cam->fov = camObj->camera.fov;
+            cam->isOrthographic = camObj->camera.isOrthographic;
+            cam->orthoSize = camObj->camera.orthoSize;
+            cam->nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+            cam->farPlane = std::max(1.0f, camObj->camera.farPlane);
+            cam->distance = 1.0f;
+            cam->target = worldPos + cam->GetForward() * 1.0f;
+            AddLog("LogCamera", "Started Play Mode with Level Camera: " + camObj->name, 0);
+        } else {
+            hasSavedPlayModeCamera = false;
+        }
+    } else {
+        hasSavedPlayModeCamera = false;
+    }
 
     // Hide all editor UI panels so the game view takes the full window
     prevShowOutliner     = showOutliner;
@@ -4426,9 +4923,28 @@ void EngineUI::EnterPlayMode(Scene& scene) {
     AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press DELETE to stop.", 0);
 }
 
-void EngineUI::ExitPlayMode(Scene& scene) {
+void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
     if (!scene.isPlayMode) return;
+
+    // Flush and wait for in-flight GPU frames before restoring scene actors and editor UI
+    WaitForGpuIdle();
+
     scene.StopPlayMode();
+
+    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
+    if (cam && hasSavedPlayModeCamera) {
+        cam->target = savedCameraTarget;
+        cam->distance = savedCameraDistance;
+        cam->yaw = savedCameraYaw;
+        cam->pitch = savedCameraPitch;
+        cam->fov = savedCameraFov;
+        cam->isOrthographic = savedCameraIsOrtho;
+        cam->orthoSize = savedCameraOrthoSize;
+        cam->nearPlane = savedCameraNearPlane;
+        cam->farPlane = savedCameraFarPlane;
+        hasSavedPlayModeCamera = false;
+        AddLog("LogCamera", "Restored Viewport Camera after exiting Play Mode.", 0);
+    }
 
     // Restore all editor panels
     showOutliner     = prevShowOutliner;
@@ -4796,6 +5312,7 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
                                 // Filter by requested reference type (dev.md Section 10)
                                 if (prop.refType == ObjectRefType::Light && !sceneObj.isLight) continue;
                                 if (prop.refType == ObjectRefType::Mesh && sceneObj.mesh.indices.empty()) continue;
+                                if (prop.refType == ObjectRefType::Camera && !sceneObj.isCamera && sceneObj.type != PrimitiveType::Camera) continue;
 
                                 bool isSelected = (prop.targetId == sceneObj.id);
                                 std::string itemLabel = sceneObj.name + " (ID: " + std::to_string(sceneObj.id) + ")";
@@ -4821,6 +5338,7 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
                                     bool compatible = true;
                                     if (prop.refType == ObjectRefType::Light && !draggedObj->isLight) compatible = false;
                                     if (prop.refType == ObjectRefType::Mesh && draggedObj->mesh.indices.empty()) compatible = false;
+                                    if (prop.refType == ObjectRefType::Camera && !draggedObj->isCamera && draggedObj->type != PrimitiveType::Camera) compatible = false;
 
                                     if (compatible) {
                                         UndoManager::Get().RecordSnapshot(scene, "Drop Reference: " + prop.name);

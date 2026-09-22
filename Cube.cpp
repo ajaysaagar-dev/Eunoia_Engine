@@ -37,6 +37,7 @@
 #include "MeshImporter.h"
 #include "InputSystem.h"
 #include "EngineLogger.h"
+#include "ScreenPrint.h"
 
 extern "C" {
     unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);
@@ -128,6 +129,7 @@ static UINT g_srvDescriptorSize = 0;
 
 static ID3D12Resource* g_renderTargets[FRAME_COUNT] = {};
 static ID3D12CommandAllocator* g_commandAllocators[FRAME_COUNT] = {};
+static ID3D12GraphicsCommandList* g_commandLists[FRAME_COUNT] = {};
 static ID3D12GraphicsCommandList* g_commandList = nullptr;
 
 static ID3D12Resource* g_depthStencilBuffer = nullptr;
@@ -1219,7 +1221,7 @@ int initD3D12(HWND hwnd)
 	createDepthStencilView(g_currentWidth, g_currentHeight);
 	createShadowResources();
 
-	// 9. Create Command Allocators & List
+	// 9. Create Command Allocators & Lists (Per-frame for zero concurrency hazard)
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
 		g_d3dDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&g_commandAllocators[i]));
@@ -1228,10 +1230,16 @@ int initD3D12(HWND hwnd)
 			std::wstring caName = L"g_commandAllocator_" + std::to_wstring(i);
 			g_commandAllocators[i]->SetName(caName.c_str());
 		}
+
+		g_d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[i], nullptr, IID_PPV_ARGS(&g_commandLists[i]));
+		if (g_commandLists[i])
+		{
+			std::wstring clName = L"g_commandList_" + std::to_wstring(i);
+			g_commandLists[i]->SetName(clName.c_str());
+			g_commandLists[i]->Close();
+		}
 	}
-	g_d3dDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_commandAllocators[0], nullptr, IID_PPV_ARGS(&g_commandList));
-	g_commandList->SetName(L"g_commandList");
-	g_commandList->Close();
+	g_commandList = g_commandLists[0];
 
 	// 10. Create Fence & Event
 	g_d3dDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_fence));
@@ -1871,8 +1879,71 @@ int createDynamicBuffers()
 	return EXIT_SUCCESS;
 }
 
+static void SyncViewportCameraToLevelCamera()
+{
+	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
+	{
+		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
+		{
+			camObj->rotation.x = g_camera.pitch;
+			camObj->rotation.y = g_camera.yaw;
+
+			glm::vec3 camPos = g_camera.GetPosition();
+			if (camObj->parentId != -1)
+			{
+				GameObject* parent = g_scene.FindObject(camObj->parentId);
+				if (parent)
+				{
+					glm::mat4 invParent = glm::inverse(g_scene.GetWorldMatrix(*parent));
+					camObj->position = glm::vec3(invParent * glm::vec4(camPos, 1.0f));
+				}
+				else
+				{
+					camObj->position = camPos;
+				}
+			}
+			else
+			{
+				camObj->position = camPos;
+			}
+		}
+	}
+}
+
+static void SyncLevelCameraToViewportCamera()
+{
+	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
+	{
+		// While user actively pilots camera via RMB fly or viewport controls, do not overwrite from level camera actor
+		if (g_camera.isFlying || s_isRightMouseDown || s_isMiddleMouseDown)
+		{
+			return;
+		}
+
+		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
+		{
+			glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
+			glm::vec3 worldPos, worldRot, worldScale;
+			Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+
+			g_camera.yaw = worldRot.y;
+			g_camera.pitch = worldRot.x;
+			g_camera.fov = camObj->camera.fov;
+			g_camera.isOrthographic = camObj->camera.isOrthographic;
+			g_camera.orthoSize = camObj->camera.orthoSize;
+			g_camera.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+			g_camera.farPlane = std::max(1.0f, camObj->camera.farPlane);
+			g_camera.distance = 1.0f;
+			g_camera.target = worldPos + g_camera.GetForward() * 1.0f;
+		}
+	}
+}
+
 void updateSceneGeometry()
 {
+	SyncLevelCameraToViewportCamera();
 	static std::vector<Vertex> sceneVertices;
 	static std::vector<uint32_t> sceneIndices;
 
@@ -1904,6 +1975,7 @@ void updateConstantBuffer()
 {
 	if (!g_pConstantMapped) return;
 
+	SyncLevelCameraToViewportCamera();
 	g_scene.SyncLightPositionsFromActors();
 
 	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
@@ -2039,6 +2111,7 @@ void renderFrame()
 {
 	if (g_deviceLost) return;
 
+	g_commandList = g_commandLists[g_frameIndex];
 	g_commandAllocators[g_frameIndex]->Reset();
 	g_commandList->Reset(g_commandAllocators[g_frameIndex], nullptr);
 
@@ -2168,8 +2241,13 @@ void renderFrame()
 
 	// Restrict 3D Viewport & Scissor to the Center Viewport (matching UI_Ref.svg blueprint)
 	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
-	D3D12_VIEWPORT viewport = { vpRect.x, vpRect.y, vpRect.width, vpRect.height, 0.0f, 1.0f };
-	D3D12_RECT scissor = { (LONG)vpRect.x, (LONG)vpRect.y, (LONG)(vpRect.x + vpRect.width), (LONG)(vpRect.y + vpRect.height) };
+	float vx = std::max(0.0f, std::min((float)g_currentWidth - 1.0f, vpRect.x));
+	float vy = std::max(0.0f, std::min((float)g_currentHeight - 1.0f, vpRect.y));
+	float vw = std::max(1.0f, std::min((float)g_currentWidth - vx, vpRect.width));
+	float vh = std::max(1.0f, std::min((float)g_currentHeight - vy, vpRect.height));
+
+	D3D12_VIEWPORT viewport = { vx, vy, vw, vh, 0.0f, 1.0f };
+	D3D12_RECT scissor = { (LONG)vx, (LONG)vy, (LONG)(vx + vw), (LONG)(vy + vh) };
 	g_commandList->RSSetViewports(1, &viewport);
 	g_commandList->RSSetScissorRects(1, &scissor);
 
@@ -2320,10 +2398,14 @@ void cleanUpD3D12()
 	ImGui_ImplGlfw_Shutdown();
 	ImGui::DestroyContext();
 
-	if (g_vertexBuffer) { g_vertexBuffer->Unmap(0, nullptr); g_vertexBuffer->Release(); }
-	if (g_indexBuffer) { g_indexBuffer->Unmap(0, nullptr); g_indexBuffer->Release(); }
-	if (g_constantBuffer) { g_constantBuffer->Unmap(0, nullptr); g_constantBuffer->Release(); }
-	if (g_shadowConstantBuffer) { g_shadowConstantBuffer->Unmap(0, nullptr); g_shadowConstantBuffer->Release(); }
+	if (g_vertexBuffer) { g_vertexBuffer->Unmap(0, nullptr); g_vertexBuffer->Release(); g_vertexBuffer = nullptr; }
+	if (g_indexBuffer) { g_indexBuffer->Unmap(0, nullptr); g_indexBuffer->Release(); g_indexBuffer = nullptr; }
+	if (g_constantBuffer) { g_constantBuffer->Unmap(0, nullptr); g_constantBuffer->Release(); g_constantBuffer = nullptr; }
+	if (g_shadowConstantBuffer) { g_shadowConstantBuffer->Unmap(0, nullptr); g_shadowConstantBuffer->Release(); g_shadowConstantBuffer = nullptr; }
+	g_pVertexMapped = nullptr;
+	g_pIndexMapped = nullptr;
+	g_pConstantMapped = nullptr;
+	g_pShadowConstantMapped = nullptr;
 
 	for (auto* tex : g_allocatedTextures) {
 		if (tex) tex->Release();
@@ -2332,38 +2414,44 @@ void cleanUpD3D12()
 	g_gpuTextureMap.clear();
 	g_materialDescriptorTables.clear();
 
-	if (g_depthStencilBuffer) g_depthStencilBuffer->Release();
-	if (g_shadowDepthBuffer) g_shadowDepthBuffer->Release();
-	if (g_pointShadowDepthBuffer) g_pointShadowDepthBuffer->Release();
+	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
+	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
+	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
 
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
-		if (g_renderTargets[i]) g_renderTargets[i]->Release();
-		if (g_commandAllocators[i]) g_commandAllocators[i]->Release();
+		if (g_commandLists[i]) { g_commandLists[i]->Release(); g_commandLists[i] = nullptr; }
+		if (g_renderTargets[i]) { g_renderTargets[i]->Release(); g_renderTargets[i] = nullptr; }
+		if (g_commandAllocators[i]) { g_commandAllocators[i]->Release(); g_commandAllocators[i] = nullptr; }
 	}
+	g_commandList = nullptr;
 
-	if (g_commandList) g_commandList->Release();
-	if (g_pipelineState) g_pipelineState->Release();
-	if (g_rootSignature) g_rootSignature->Release();
-	if (g_shadowPipelineState) g_shadowPipelineState->Release();
-	if (g_shadowRootSignature) g_shadowRootSignature->Release();
+	if (g_pipelineState) { g_pipelineState->Release(); g_pipelineState = nullptr; }
+	if (g_rootSignature) { g_rootSignature->Release(); g_rootSignature = nullptr; }
+	if (g_shadowPipelineState) { g_shadowPipelineState->Release(); g_shadowPipelineState = nullptr; }
+	if (g_shadowRootSignature) { g_shadowRootSignature->Release(); g_shadowRootSignature = nullptr; }
 
-	if (g_rtvDescHeap) g_rtvDescHeap->Release();
-	if (g_dsvDescHeap) g_dsvDescHeap->Release();
-	if (g_srvDescHeap) g_srvDescHeap->Release();
+	if (g_rtvDescHeap) { g_rtvDescHeap->Release(); g_rtvDescHeap = nullptr; }
+	if (g_dsvDescHeap) { g_dsvDescHeap->Release(); g_dsvDescHeap = nullptr; }
+	if (g_srvDescHeap) { g_srvDescHeap->Release(); g_srvDescHeap = nullptr; }
 
-	if (g_uploadCmdList) g_uploadCmdList->Release();
-	if (g_uploadCmdAlloc) g_uploadCmdAlloc->Release();
-	if (g_uploadFence) g_uploadFence->Release();
-	if (g_uploadFenceEvent) CloseHandle(g_uploadFenceEvent);
+	if (g_uploadCmdList) { g_uploadCmdList->Release(); g_uploadCmdList = nullptr; }
+	if (g_uploadCmdAlloc) { g_uploadCmdAlloc->Release(); g_uploadCmdAlloc = nullptr; }
+	if (g_uploadFence) { g_uploadFence->Release(); g_uploadFence = nullptr; }
+	if (g_uploadFenceEvent) { CloseHandle(g_uploadFenceEvent); g_uploadFenceEvent = nullptr; }
 
-	if (g_fence) g_fence->Release();
-	if (g_fenceEvent) CloseHandle(g_fenceEvent);
+	if (g_fence) { g_fence->Release(); g_fence = nullptr; }
+	if (g_fenceEvent) { CloseHandle(g_fenceEvent); g_fenceEvent = nullptr; }
 
-	if (g_swapChain) g_swapChain->Release();
-	if (g_commandQueue) g_commandQueue->Release();
-	if (g_d3dDevice) g_d3dDevice->Release();
-	if (g_dxgiFactory) g_dxgiFactory->Release();
+	if (g_swapChain) { g_swapChain->Release(); g_swapChain = nullptr; }
+	if (g_commandQueue) { g_commandQueue->Release(); g_commandQueue = nullptr; }
+	if (g_d3dDevice) { g_d3dDevice->Release(); g_d3dDevice = nullptr; }
+	if (g_dxgiFactory) { g_dxgiFactory->Release(); g_dxgiFactory = nullptr; }
+
+	g_srvDescriptorAllocIndex = 0;
+	g_globalFenceValue = 0;
+	g_uploadFenceValue = 0;
+	for (UINT i = 0; i < FRAME_COUNT; i++) g_fenceValues[i] = 0;
 }
 
 // GLFW Callbacks
@@ -2566,17 +2654,21 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			s_isRightMouseDown = true;
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-			if (!isAlt && !io.WantCaptureMouse)
+			bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+			if (!isAlt && !wantCapture)
 			{
 				double mx, my;
 				glfwGetCursorPos(window, &mx, &my);
-				EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+				EngineUI::ViewportRect vpRect = g_scene.isPlayMode ?
+					EngineUI::ViewportRect{0.0f, 0.0f, (float)g_currentWidth, (float)g_currentHeight} :
+					g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
 				if (mx >= vpRect.x && mx <= vpRect.x + vpRect.width &&
 				    my >= vpRect.y && my <= vpRect.y + vpRect.height)
 				{
 					g_camera.isFlying = true;
 					s_firstMouseAfterCapture = true;
 					glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+					InputSystem::Get().ResetMouseDelta();
 				}
 			}
 		}
@@ -2585,6 +2677,7 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			s_isRightMouseDown = false;
 			g_camera.isFlying = false;
 			glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+			InputSystem::Get().ResetMouseDelta();
 		}
 	}
 }
@@ -2610,14 +2703,16 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 	bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 	              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
 
-	// 1. In-Editor Fly Camera (Hold RMB + Mouse Movement -> Look around)
+	// 1. Fly Camera (Hold RMB + Mouse Movement -> Look around) - Active in Editor and in Play Mode
 	if (g_camera.isFlying && s_isRightMouseDown && !isAlt)
 	{
 		g_camera.LookAround((float)deltaX, (float)deltaY);
+		SyncViewportCameraToLevelCamera();
 		return;
 	}
 
-	if (io.WantCaptureMouse || ImGuizmo::IsOver()) return;
+	bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+	if (wantCapture || ImGuizmo::IsOver()) return;
 
 	// 2. Alt Navigation (Unreal Engine Maya-style viewport controls)
 	if (isAlt)
@@ -2626,16 +2721,19 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		{
 			// Alt + LMB + Drag: Orbit around pivot/selected object
 			g_camera.Orbit((float)deltaX, (float)deltaY);
+			SyncViewportCameraToLevelCamera();
 		}
 		else if (s_isRightMouseDown)
 		{
 			// Alt + RMB + Drag: Dolly/zoom
 			g_camera.Dolly((float)(deltaX - deltaY));
+			SyncViewportCameraToLevelCamera();
 		}
 		else if (s_isMiddleMouseDown)
 		{
 			// Alt + MMB + Drag: Pan/track
 			g_camera.Pan((float)deltaX, (float)deltaY);
+			SyncViewportCameraToLevelCamera();
 		}
 	}
 	else
@@ -2644,6 +2742,7 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		if (s_isMiddleMouseDown)
 		{
 			g_camera.Pan((float)deltaX, (float)deltaY);
+			SyncViewportCameraToLevelCamera();
 		}
 	}
 }
@@ -2662,8 +2761,10 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 	}
 	else
 	{
-		if (io.WantCaptureMouse) return;
+		bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+		if (wantCapture) return;
 		g_camera.Zoom((float)yoffset);
+		SyncViewportCameraToLevelCamera();
 	}
 }
 
@@ -2673,6 +2774,120 @@ static void dropCallback(GLFWwindow* window, int count, const char** paths)
 		EngineLogger::Get().LogAction("FILE_DROP", paths[0], "Count: " + std::to_string(count));
 	}
 	g_engineUI.HandleFileDrop(paths, count);
+}
+
+bool RecoverD3D12Device(HWND hwnd)
+{
+	std::cerr << "[RECOVERY] Attempting full DirectX 12 device recovery and state restoration...\n";
+	EngineLogger::Get().LogAction("DEVICE_RECOVERY_START", "DirectX12", "Attempting full D3D12 device recreation.");
+
+	// 1. Release all mapped buffers and hardware resources
+	if (g_vertexBuffer) { g_vertexBuffer->Unmap(0, nullptr); g_vertexBuffer->Release(); g_vertexBuffer = nullptr; }
+	if (g_indexBuffer) { g_indexBuffer->Unmap(0, nullptr); g_indexBuffer->Release(); g_indexBuffer = nullptr; }
+	if (g_constantBuffer) { g_constantBuffer->Unmap(0, nullptr); g_constantBuffer->Release(); g_constantBuffer = nullptr; }
+	if (g_shadowConstantBuffer) { g_shadowConstantBuffer->Unmap(0, nullptr); g_shadowConstantBuffer->Release(); g_shadowConstantBuffer = nullptr; }
+	g_pVertexMapped = nullptr;
+	g_pIndexMapped = nullptr;
+	g_pConstantMapped = nullptr;
+	g_pShadowConstantMapped = nullptr;
+
+	for (auto* tex : g_allocatedTextures) {
+		if (tex) tex->Release();
+	}
+	g_allocatedTextures.clear();
+	g_gpuTextureMap.clear();
+	g_materialDescriptorTables.clear();
+
+	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
+	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
+	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
+
+	for (UINT i = 0; i < FRAME_COUNT; i++)
+	{
+		if (g_commandLists[i]) { g_commandLists[i]->Release(); g_commandLists[i] = nullptr; }
+		if (g_renderTargets[i]) { g_renderTargets[i]->Release(); g_renderTargets[i] = nullptr; }
+		if (g_commandAllocators[i]) { g_commandAllocators[i]->Release(); g_commandAllocators[i] = nullptr; }
+	}
+	g_commandList = nullptr;
+
+	if (g_pipelineState) { g_pipelineState->Release(); g_pipelineState = nullptr; }
+	if (g_rootSignature) { g_rootSignature->Release(); g_rootSignature = nullptr; }
+	if (g_shadowPipelineState) { g_shadowPipelineState->Release(); g_shadowPipelineState = nullptr; }
+	if (g_shadowRootSignature) { g_shadowRootSignature->Release(); g_shadowRootSignature = nullptr; }
+
+	if (g_rtvDescHeap) { g_rtvDescHeap->Release(); g_rtvDescHeap = nullptr; }
+	if (g_dsvDescHeap) { g_dsvDescHeap->Release(); g_dsvDescHeap = nullptr; }
+	if (g_srvDescHeap) { g_srvDescHeap->Release(); g_srvDescHeap = nullptr; }
+
+	if (g_uploadCmdList) { g_uploadCmdList->Release(); g_uploadCmdList = nullptr; }
+	if (g_uploadCmdAlloc) { g_uploadCmdAlloc->Release(); g_uploadCmdAlloc = nullptr; }
+	if (g_uploadFence) { g_uploadFence->Release(); g_uploadFence = nullptr; }
+	if (g_uploadFenceEvent) { CloseHandle(g_uploadFenceEvent); g_uploadFenceEvent = nullptr; }
+
+	if (g_fence) { g_fence->Release(); g_fence = nullptr; }
+	if (g_fenceEvent) { CloseHandle(g_fenceEvent); g_fenceEvent = nullptr; }
+
+	if (g_swapChain) { g_swapChain->Release(); g_swapChain = nullptr; }
+	if (g_commandQueue) { g_commandQueue->Release(); g_commandQueue = nullptr; }
+	if (g_d3dDevice) { g_d3dDevice->Release(); g_d3dDevice = nullptr; }
+	if (g_dxgiFactory) { g_dxgiFactory->Release(); g_dxgiFactory = nullptr; }
+
+	g_srvDescriptorAllocIndex = 0;
+	g_globalFenceValue = 0;
+	g_uploadFenceValue = 0;
+	for (UINT i = 0; i < FRAME_COUNT; i++) g_fenceValues[i] = 0;
+
+	// Shutdown ImGui DX12 backend
+	ImGui_ImplDX12_Shutdown();
+
+	// Brief sleep to allow OS graphics driver reset to complete
+	Sleep(150);
+
+	// 2. Re-create D3D12 device, swap chain, allocators, views
+	if (initD3D12(hwnd) != EXIT_SUCCESS) {
+		std::cerr << "[RECOVERY] initD3D12 failed during recovery!\n";
+		return false;
+	}
+
+	if (createShadersAndPipeline() != EXIT_SUCCESS) {
+		std::cerr << "[RECOVERY] createShadersAndPipeline failed during recovery!\n";
+		return false;
+	}
+
+	if (createDynamicBuffers() != EXIT_SUCCESS) {
+		std::cerr << "[RECOVERY] createDynamicBuffers failed during recovery!\n";
+		return false;
+	}
+
+	// 3. Re-initialize ImGui DX12 backend
+	ImGui_ImplDX12_InitInfo init_info = {};
+	init_info.Device = g_d3dDevice;
+	init_info.CommandQueue = g_commandQueue;
+	init_info.NumFramesInFlight = FRAME_COUNT;
+	init_info.RTVFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+	init_info.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+	init_info.SrvDescriptorHeap = g_srvDescHeap;
+	init_info.SrvDescriptorAllocFn = ImGui_SrvAlloc;
+	init_info.SrvDescriptorFreeFn  = ImGui_SrvFree;
+	ImGui_ImplDX12_Init(&init_info);
+
+	// 4. Reload textures & fallbacks
+	InitFallbackTextures();
+	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
+	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
+
+	// 5. Pre-upload textures & rebuild scene geometry
+	PreRenderUploadTextures();
+	updateSceneGeometry();
+	updateConstantBuffer();
+
+	g_deviceLost = false;
+	std::cerr << "[RECOVERY] D3D12 device successfully recovered and state restored!\n";
+	EngineLogger::Get().LogAction("DEVICE_RECOVERED", "DirectX12", "GPU device recovered from reset. Session restored to exact condition.");
+	g_engineUI.AddLog("LogRecovery", "DirectX 12 graphics device successfully recovered — resumed exact session state.", 0);
+	return true;
 }
 
 int main()
@@ -2788,6 +3003,8 @@ int main()
 	InitFallbackTextures();
 	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
 	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
 	InputSystem::Get().SetupDefaultActions();
 
 	auto lastTime = std::chrono::high_resolution_clock::now();
@@ -2809,9 +3026,10 @@ int main()
 		lastTime = currentTime;
 
 		if (deltaTime > 0.1f) deltaTime = 0.1f;
+		ScreenPrint::System::Get().Update(deltaTime);
 
-		// Process In-Editor Fly Mode (Hold RMB + W, S, A, D, E, Q) (Disabled in Play Mode so behaviours receive game input)
-		if (!g_scene.isPlayMode && s_isRightMouseDown && g_camera.isFlying)
+		// Process Fly Mode (Hold RMB + W, S, A, D, E, Q) - Active in Editor and in Play Mode
+		if (s_isRightMouseDown && g_camera.isFlying)
 		{
 			float speed = g_camera.moveSpeed;
 			if (glfwGetKey(g_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
@@ -2836,6 +3054,7 @@ int main()
 			{
 				deltaMove = glm::normalize(deltaMove) * speed * deltaTime;
 				g_camera.Move(deltaMove);
+				SyncViewportCameraToLevelCamera();
 			}
 		}
 
@@ -2855,8 +3074,11 @@ int main()
 			fpsTimer = 0.0f;
 		}
 
-		// Update 3D Scene animations
+		// Update 3D Scene animations and runtime behaviours
 		g_scene.Update(deltaTime);
+
+		// Synchronize viewport camera dynamically as the level camera moves or rotates
+		SyncLevelCameraToViewportCamera();
 
 		// New ImGui Frame
 		ImGui_ImplDX12_NewFrame();
@@ -2886,30 +3108,37 @@ int main()
 			}
 		}
 
-		// Device Loss Notification Overlay (dev.md Task 3)
-		if (g_deviceLost)
+		static int s_recoveryAttempts = 0;
+
+		// Device Loss Notification Overlay (dev.md Task 3) - Only shown if automatic recovery attempts were exhausted
+		if (g_deviceLost && s_recoveryAttempts >= 3)
 		{
 			ImGui::OpenPopup("GPU Device Lost");
 			ImVec2 center = ImGui::GetMainViewport()->GetCenter();
 			ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-			ImGui::SetNextWindowSize(ImVec2(520, 240), ImGuiCond_Appearing);
+			ImGui::SetNextWindowSize(ImVec2(540, 250), ImGuiCond_Appearing);
 			if (ImGui::BeginPopupModal("GPU Device Lost", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
 			{
 				ImGui::TextColored(ImVec4(1.0f, 0.25f, 0.25f, 1.0f), "CRITICAL: GPU Device Was Lost (Driver Reset)");
 				ImGui::Separator();
 				ImGui::Spacing();
-				ImGui::TextWrapped("The graphics driver reset or the GPU device was removed. 3D rendering has been halted to prevent the editor from freezing.");
+				ImGui::TextWrapped("The graphics driver reset or the GPU device was removed. Automatic recovery was attempted but the driver remained unresponsive.");
 				ImGui::Spacing();
-				ImGui::TextWrapped("You can still save your level to avoid losing changes before restarting the editor.");
+				ImGui::TextWrapped("You can retry recovery or save your level to avoid losing changes before restarting the editor.");
 				ImGui::Spacing();
 				ImGui::Separator();
 				ImGui::Spacing();
-				if (ImGui::Button("Save Current Level", ImVec2(170, 32)))
+				if (ImGui::Button("Retry Recovery", ImVec2(140, 32)))
+				{
+					s_recoveryAttempts = 0;
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Save Current Level", ImVec2(160, 32)))
 				{
 					g_engineUI.SaveLevel(g_scene);
 				}
 				ImGui::SameLine();
-				if (ImGui::Button("Restart / Exit", ImVec2(140, 32)))
+				if (ImGui::Button("Restart / Exit", ImVec2(130, 32)))
 				{
 					glfwSetWindowShouldClose(g_window, GLFW_TRUE);
 				}
@@ -2920,14 +3149,40 @@ int main()
 		ImGui::Render();
 
 		// Update 3D Scene GPU Buffers AFTER gizmo has applied any transform changes
-		// When device is lost, skip 3D scene updates to prevent crashes/stalls
+		// When device is lost, attempt automatic recovery to resume from exact condition
 		if (g_deviceLost)
 		{
-			Sleep(50);
+			HWND hwnd = glfwGetWin32Window(g_window);
+			if (s_recoveryAttempts < 3)
+			{
+				s_recoveryAttempts++;
+				std::cerr << "[RECOVERY] Attempting automatic device recreation (attempt " << s_recoveryAttempts << "/3)...\n";
+				g_engineUI.AddLog("LogRecovery", "Attempting automatic D3D12 device recovery (attempt " + std::to_string(s_recoveryAttempts) + "/3)...", 1);
+				if (RecoverD3D12Device(hwnd))
+				{
+					s_recoveryAttempts = 0;
+					g_engineUI.AddLog("LogRecovery", "DirectX 12 graphics device successfully recovered! Resumed from exact condition.", 0);
+				}
+				else
+				{
+					Sleep(100);
+				}
+			}
+			else
+			{
+				Sleep(50);
+			}
 		}
 		else
 		{
 			try {
+				// Synchronize: wait for the frame that previously used this backbuffer / upload buffers to finish on GPU
+				if (g_fence && g_fenceValues[g_frameIndex] > 0 && g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
+				{
+					g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
+					SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "Frame start buffer sync");
+				}
+
 				updateSceneGeometry();
 				updateConstantBuffer();
 

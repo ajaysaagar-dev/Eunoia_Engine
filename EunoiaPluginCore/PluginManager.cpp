@@ -42,6 +42,7 @@ static EunoiaPluginCategory ParseCategory(const std::string& cat) {
     if (cat == "lights")      return EunoiaPluginCategory::Lights;
     if (cat == "behaviours")  return EunoiaPluginCategory::Behaviours;
     if (cat == "editor")      return EunoiaPluginCategory::Editor;
+    if (cat == "cameras" || cat == "Cameras") return EunoiaPluginCategory::Cameras;
     return EunoiaPluginCategory::Custom;
 }
 

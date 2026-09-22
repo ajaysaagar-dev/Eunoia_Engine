@@ -183,6 +183,15 @@ public:
             file << "      \"lightVolIntensity\": " << obj.light.volumetricIntensity << ",\n";
             file << "      \"lightLayer\": " << obj.light.lightLayer << ",\n";
 
+            // Camera Component Properties
+            file << "      \"isCamera\": " << BoolStr(obj.isCamera) << ",\n";
+            file << "      \"camOrthographic\": " << BoolStr(obj.camera.isOrthographic) << ",\n";
+            file << "      \"camFov\": " << obj.camera.fov << ",\n";
+            file << "      \"camOrthoSize\": " << obj.camera.orthoSize << ",\n";
+            file << "      \"camNearPlane\": " << obj.camera.nearPlane << ",\n";
+            file << "      \"camFarPlane\": " << obj.camera.farPlane << ",\n";
+            file << "      \"camAspectRatio\": " << obj.camera.aspectRatio << ",\n";
+
             // Attached Behaviours (dev.md Section 14)
             file << "      \"behaviours\": [\n";
             for (size_t bi = 0; bi < obj.behaviours.size(); ++bi) {
@@ -232,6 +241,7 @@ public:
 
         // Scene metadata
         file << "  \"nextId\": " << scene.nextId << ",\n";
+        file << "  \"activeLevelCameraId\": " << scene.activeLevelCameraId << ",\n";
         file << "  \"playAnimations\": " << BoolStr(scene.playAnimations) << "\n";
 
         file << "}\n";
@@ -277,6 +287,7 @@ public:
         if (onProgress) onProgress(0.90f, "Finalizing scene metadata", std::to_string(scene.objects.size()) + " actors loaded");
         // Parse metadata
         scene.nextId = ParseInt(content, "\"nextId\"", 1);
+        scene.activeLevelCameraId = ParseInt(content, "\"activeLevelCameraId\"", -1);
         scene.playAnimations = ParseBool(content, "\"playAnimations\"", true);
 
         // Ensure nextId is higher than any existing actor/light ID
@@ -368,6 +379,7 @@ private:
         if (s == "HemisphereLight" || s == "Hemisphere Light") return PrimitiveType::HemisphereLight;
         if (s == "TubeLight" || s == "Tube Light") return PrimitiveType::TubeLight;
         if (s == "DiscLight" || s == "Disc Light") return PrimitiveType::DiscLight;
+        if (s == "Camera") return PrimitiveType::Camera;
         return PrimitiveType::Cube;
     }
 
@@ -807,6 +819,16 @@ private:
             p = actorBlock.find("\"lightVolIntensity\""); if (p != std::string::npos) obj.light.volumetricIntensity = ParseFloatAt(actorBlock, p, 1.0f);
             p = actorBlock.find("\"lightLayer\""); if (p != std::string::npos) obj.light.lightLayer = (uint32_t)ParseIntAt(actorBlock, p, 1);
 
+            // Parse Camera Properties
+            p = actorBlock.find("\"isCamera\""); if (p != std::string::npos) obj.isCamera = ParseBoolAt(actorBlock, p, false);
+            if (obj.type == PrimitiveType::Camera) obj.isCamera = true;
+            p = actorBlock.find("\"camOrthographic\""); if (p != std::string::npos) obj.camera.isOrthographic = ParseBoolAt(actorBlock, p, false);
+            p = actorBlock.find("\"camFov\""); if (p != std::string::npos) obj.camera.fov = ParseFloatAt(actorBlock, p, 60.0f);
+            p = actorBlock.find("\"camOrthoSize\""); if (p != std::string::npos) obj.camera.orthoSize = ParseFloatAt(actorBlock, p, 5.0f);
+            p = actorBlock.find("\"camNearPlane\""); if (p != std::string::npos) obj.camera.nearPlane = ParseFloatAt(actorBlock, p, 0.1f);
+            p = actorBlock.find("\"camFarPlane\""); if (p != std::string::npos) obj.camera.farPlane = ParseFloatAt(actorBlock, p, 1000.0f);
+            p = actorBlock.find("\"camAspectRatio\""); if (p != std::string::npos) obj.camera.aspectRatio = ParseFloatAt(actorBlock, p, 16.0f / 9.0f);
+
             // Parse Attached Behaviours (dev.md Section 14)
             size_t behPos = actorBlock.find("\"behaviours\"");
             if (behPos != std::string::npos) {
@@ -876,7 +898,7 @@ private:
             }
 
             // Rebuild mesh geometry with loaded params for standard primitives
-            if (!obj.isImportedMesh && !obj.isLight && !IsLightPrimitive(obj.type) && obj.type != PrimitiveType::Empty) {
+            if (!obj.isImportedMesh && !obj.isLight && !IsLightPrimitive(obj.type) && !obj.isCamera && !IsCameraPrimitive(obj.type) && obj.type != PrimitiveType::Empty) {
                 obj.RebuildMesh();
             }
 

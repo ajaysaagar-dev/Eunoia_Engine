@@ -158,7 +158,8 @@ enum class PrimitiveType {
     AmbientLight,
     HemisphereLight,
     TubeLight,
-    DiscLight
+    DiscLight,
+    Camera
 };
 
 inline const char* GetPrimitiveTypeName(PrimitiveType type) {
@@ -190,6 +191,7 @@ inline const char* GetPrimitiveTypeName(PrimitiveType type) {
         case PrimitiveType::HemisphereLight:  return "Hemisphere Light";
         case PrimitiveType::TubeLight:        return "Tube Light";
         case PrimitiveType::DiscLight:        return "Disc Light";
+        case PrimitiveType::Camera:           return "Camera";
         default:                              return "Object";
     }
 }
@@ -205,6 +207,19 @@ inline bool IsLightPrimitive(PrimitiveType type) {
            type == PrimitiveType::TubeLight ||
            type == PrimitiveType::DiscLight;
 }
+
+inline bool IsCameraPrimitive(PrimitiveType type) {
+    return type == PrimitiveType::Camera;
+}
+
+struct CameraComponent {
+    bool isOrthographic = false;
+    float fov = 60.0f;             // Vertical FOV in degrees
+    float orthoSize = 5.0f;        // Orthographic half-height
+    float nearPlane = 0.1f;
+    float farPlane = 1000.0f;
+    float aspectRatio = 16.0f / 9.0f;
+};
 
 enum class Mobility {
     Static,
@@ -267,6 +282,8 @@ struct GameObject {
     bool isLight = false;
     int  lightId  = -1;              // index into Scene::pointLights
     LightComponent light;
+    bool isCamera = false;
+    CameraComponent camera;
     PrimitiveParams params;
 
     PrimitiveMesh mesh;
@@ -332,6 +349,8 @@ struct GameObject {
         isLight = other.isLight;
         lightId = other.lightId;
         light = other.light;
+        isCamera = other.isCamera;
+        camera = other.camera;
         params = other.params;
         mesh = other.mesh;
 
@@ -380,6 +399,9 @@ struct GameObject {
 
     GameObject(int objId, const std::string& objName, PrimitiveType objType, glm::vec3 pos, glm::vec3 col = {0.55f, 0.55f, 0.55f})
         : id(objId), name(objName), type(objType), position(pos), color(col) {
+        if (type == PrimitiveType::Camera) {
+            isCamera = true;
+        }
         if (IsLightPrimitive(type)) {
             isLight = true;
             switch (type) {
@@ -468,7 +490,7 @@ struct GameObject {
             case PrimitiveType::ImportedMesh:
             case PrimitiveType::Empty:
             default:
-                if (IsLightPrimitive(type) || type == PrimitiveType::Empty || type == PrimitiveType::ImportedMesh) {
+                if (IsLightPrimitive(type) || IsCameraPrimitive(type) || type == PrimitiveType::Empty || type == PrimitiveType::ImportedMesh) {
                     mesh.vertices.clear();
                     mesh.indices.clear();
                 }

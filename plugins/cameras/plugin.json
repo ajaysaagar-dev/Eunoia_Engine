@@ -1,0 +1,11 @@
+{
+    "name": "cameras",
+    "version": "1.0.0",
+    "description": "Camera system and level camera management",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "cameras",
+    "core": false,
+    "dependencies": ["scene"],
+    "provides": ["ICameraSystem"]
+}

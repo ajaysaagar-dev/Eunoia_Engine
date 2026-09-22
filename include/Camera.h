@@ -13,6 +13,10 @@ public:
     float yaw = 45.0f;    // degrees around Y
     float pitch = 25.0f;  // degrees elevation
     float fov = 45.0f;
+    bool isOrthographic = false;
+    float orthoSize = 5.0f;
+    float nearPlane = 0.1f;
+    float farPlane = 500.0f;
 
     float minDistance = 0.2f;
     float maxDistance = 250.0f;
@@ -59,7 +63,12 @@ public:
     }
 
     glm::mat4 GetProjectionMatrix(float aspectRatio) const {
-        return glm::perspective(glm::radians(fov), aspectRatio, 0.1f, 500.0f);
+        if (isOrthographic) {
+            float halfH = (orthoSize > 0.01f) ? orthoSize : 5.0f;
+            float halfW = halfH * aspectRatio;
+            return glm::ortho(-halfW, halfW, -halfH, halfH, nearPlane, farPlane);
+        }
+        return glm::perspective(glm::radians(fov), aspectRatio, nearPlane, farPlane);
     }
 
     // First-person look around in place (RMB + Mouse movement) - Inverted both horizontal and vertical directions

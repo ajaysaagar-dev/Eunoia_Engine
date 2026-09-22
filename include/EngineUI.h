@@ -239,10 +239,26 @@ public:
     void OpenScriptInCodeEditor(const std::string& path);
     void RenderCodeEditor();
     void RenderBehavioursSection(Scene& scene, GameObject* obj);
-    void EnterPlayMode(Scene& scene);
-    void ExitPlayMode(Scene& scene);
+    void EnterPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
+    void ExitPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
+    void RenderScreenPrintOverlay(float startX, float startY);
 
     uint64_t lightIconGpuHandle = 0;
+    uint64_t cameraIconGpuHandle = 0;
+
+    OrbitCamera* currentCamera = nullptr;
+    bool hasSavedPlayModeCamera = false;
+    glm::vec3 savedCameraTarget{0.0f, 0.4f, 0.0f};
+    float savedCameraDistance = 6.5f;
+    float savedCameraYaw = 45.0f;
+    float savedCameraPitch = 25.0f;
+    float savedCameraFov = 45.0f;
+    bool savedCameraIsOrtho = false;
+    float savedCameraOrthoSize = 5.0f;
+    float savedCameraNearPlane = 0.1f;
+    float savedCameraFarPlane = 500.0f;
+
+    void RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera);
 
     // ========================================================================
     // Futuristic Loading Progress System

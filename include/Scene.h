@@ -33,6 +33,7 @@ public:
     std::vector<GameObject> objects;
     int nextId = 1;
     int selectedId = -1;
+    int activeLevelCameraId = -1;
     bool isInteracting = false;
     std::function<void(const std::string&)> onPreChange = nullptr;
 
@@ -69,6 +70,7 @@ public:
         objects.clear();
         pointLights.clear();
         nextId = 1;
+        activeLevelCameraId = -1;
 
         // Add Default Point Lights
         PointLight pl1;
@@ -771,6 +773,7 @@ public:
     void Clear() {
         objects.clear();
         selectedId = -1;
+        activeLevelCameraId = -1;
     }
 
     // Play Mode State & Runtime Lifecycle (dev.md Section 30-36)
@@ -960,7 +963,7 @@ struct RenderBatch {
 
         // 2. All GameObjects (Rendered with Hardware GPU Shaders & Full 2K Texture Mapping)
         for (const auto& obj : objects) {
-            if (!obj.visible) continue;
+            if (!obj.visible || obj.isCamera || IsCameraPrimitive(obj.type)) continue;
             if (obj.mesh.vertices.empty() || obj.mesh.indices.empty()) continue;
 
             glm::mat4 model = GetWorldMatrix(obj);
@@ -1055,7 +1058,7 @@ struct RenderBatch {
         const glm::vec3& cameraPos,
         const glm::vec3& outlineColor)
     {
-        if (obj.mesh.vertices.empty() || obj.type == PrimitiveType::Empty || obj.isLight || IsLightPrimitive(obj.type)) {
+        if (obj.mesh.vertices.empty() || obj.type == PrimitiveType::Empty || obj.isLight || IsLightPrimitive(obj.type) || obj.isCamera || IsCameraPrimitive(obj.type)) {
             return;
         }
         glm::mat4 model = GetWorldMatrix(obj);

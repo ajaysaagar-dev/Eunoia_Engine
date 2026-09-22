@@ -37,9 +37,14 @@ GameObject* RespectiveObjectAccessor::Transform(void* objRef) const {
     return Entity(objRef);
 }
 
-OrbitCamera* RespectiveObjectAccessor::Camera(void* objRef) const {
+GameObject* RespectiveObjectAccessor::Camera(void* objRef) const {
     if (!objRef) return nullptr;
-    return reinterpret_cast<OrbitCamera*>(objRef);
+    return reinterpret_cast<GameObject*>(objRef);
+}
+
+GameObject* RespectiveObjectAccessor::CameraActor(void* objRef) const {
+    if (!objRef) return nullptr;
+    return reinterpret_cast<GameObject*>(objRef);
 }
 
 // ============================================================================
@@ -300,8 +305,13 @@ void EunoiaBehaviour::ResolveReferences(Scene& scene) {
                 *reinterpret_cast<PrimitiveMesh**>(prop.dataPtr) = &targetObj->mesh;
                 break;
             case ObjectRefType::Camera:
-                // Cameras in Eunoia are view-level or component
-                *reinterpret_cast<void**>(prop.dataPtr) = nullptr;
+                if (targetObj && (targetObj->isCamera || targetObj->type == PrimitiveType::Camera)) {
+                    *reinterpret_cast<GameObject**>(prop.dataPtr) = targetObj;
+                    prop.isMissing = false;
+                } else {
+                    *reinterpret_cast<void**>(prop.dataPtr) = nullptr;
+                    prop.isMissing = true;
+                }
                 break;
             default:
                 *reinterpret_cast<void**>(prop.dataPtr) = targetObj;
