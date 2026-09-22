@@ -1051,21 +1051,83 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                     std::filesystem::path cookedDir = contentRootPath / "Cooked";
                     AssetManager::Get().CookProject(cookedDir, cookLog);
 
-                    // 2. Copy glfw3.dll
-                    std::filesystem::path glfwSrc = "C:\\Projects\\Eunoia-Engine\\deps\\glfw-3.5.1.bin.WIN64\\lib-mingw-w64\\glfw3.dll";
+                    // Helper to copy directory recursively
+                    auto copyDirRecursive = [](const std::filesystem::path& src, const std::filesystem::path& dst) {
+                        std::error_code ec;
+                        if (!std::filesystem::exists(src, ec)) return;
+                        std::filesystem::create_directories(dst, ec);
+                        for (const auto& entry : std::filesystem::recursive_directory_iterator(src, std::filesystem::directory_options::skip_permission_denied, ec)) {
+                            const auto rel = std::filesystem::relative(entry.path(), src, ec);
+                            const auto target = dst / rel;
+                            if (entry.is_directory(ec)) {
+                                std::filesystem::create_directories(target, ec);
+                            } else if (entry.is_regular_file(ec)) {
+                                std::filesystem::create_directories(target.parent_path(), ec);
+                                std::filesystem::copy_file(entry.path(), target, std::filesystem::copy_options::overwrite_existing, ec);
+                            }
+                        }
+                    };
+
+                    // 2. Package game assets and folders: Cooked, Scenes, Levels, Registry, Materials, Models, Behaviours
+                    copyDirRecursive(cookedDir, gameBuildDir / "Cooked");
+                    copyDirRecursive(contentRootPath / "Scenes", gameBuildDir / "Scenes");
+                    copyDirRecursive(contentRootPath / "Levels", gameBuildDir / "Levels");
+                    copyDirRecursive(contentRootPath / "Registry", gameBuildDir / "Registry");
+                    copyDirRecursive(contentRootPath / "Materials", gameBuildDir / "Materials");
+                    copyDirRecursive(contentRootPath / "Models", gameBuildDir / "Models");
+                    copyDirRecursive(contentRootPath / "Behaviours", gameBuildDir / "Behaviours");
+
+                    // 3. Copy project root metadata and asset files (*.emat, *.assetmeta, *.json, etc.)
+                    for (const auto& entry : std::filesystem::directory_iterator(contentRootPath, ec)) {
+                        if (entry.is_regular_file(ec)) {
+                            std::string ext = entry.path().extension().string();
+                            if (ext == ".emat" || ext == ".assetmeta" || ext == ".json" || ext == ".escene" || ext == ".elevel" || ext == ".cpp") {
+                                std::filesystem::copy_file(entry.path(), gameBuildDir / entry.path().filename(), std::filesystem::copy_options::overwrite_existing, ec);
+                            }
+                        }
+                    }
+
+                    // 4. Find and copy engine Shaders and Resources
+                    std::filesystem::path engineRoot = "C:\\Projects\\Eunoia-Engine";
+                    if (!std::filesystem::exists(engineRoot / "Shaders", ec)) {
+                        engineRoot = std::filesystem::current_path();
+                    }
+                    if (std::filesystem::exists(engineRoot / "Shaders", ec)) {
+                        copyDirRecursive(engineRoot / "Shaders", gameBuildDir / "Shaders");
+                    }
+                    if (std::filesystem::exists(engineRoot / "Resources", ec)) {
+                        copyDirRecursive(engineRoot / "Resources", gameBuildDir / "Resources");
+                    }
+
+                    // 5. Copy external runtime DLLs
+                    std::filesystem::path glfwSrc = engineRoot / "deps" / "glfw-3.5.1.bin.WIN64" / "lib-mingw-w64" / "glfw3.dll";
                     if (std::filesystem::exists(glfwSrc, ec)) {
                         std::filesystem::copy_file(glfwSrc, gameBuildDir / "glfw3.dll", std::filesystem::copy_options::overwrite_existing, ec);
                     }
+                    std::filesystem::path primSrc = engineRoot / "Plugins" / "primitives" / "primitives.dll";
+                    if (std::filesystem::exists(primSrc, ec)) {
+                        std::filesystem::copy_file(primSrc, gameBuildDir / "primitives.dll", std::filesystem::copy_options::overwrite_existing, ec);
+                    }
 
-                    // 3. Create game launch script
+                    // 6. Copy or verify game executable
+                    std::string projName = contentRootPath.filename().string();
+                    std::filesystem::path gameExe = gameBuildDir / (projName + ".exe");
+                    if (!std::filesystem::exists(gameExe, ec)) {
+                        if (std::filesystem::exists(gameBuildDir / "test.exe", ec)) {
+                            std::filesystem::copy_file(gameBuildDir / "test.exe", gameExe, std::filesystem::copy_options::overwrite_existing, ec);
+                        } else if (std::filesystem::exists(engineRoot / "Build" / "Runtime" / "test.exe", ec)) {
+                            std::filesystem::copy_file(engineRoot / "Build" / "Runtime" / "test.exe", gameExe, std::filesystem::copy_options::overwrite_existing, ec);
+                        }
+                    }
+
+                    // 7. Create game launch script
                     std::ofstream runScript(gameBuildDir / "Run.bat");
                     if (runScript.is_open()) {
-                        std::string projName = contentRootPath.filename().string();
                         runScript << "@echo off\ncd /d \"%~dp0\"\necho Starting " << projName << "...\nstart \"\" \"" << projName << ".exe\"\n";
                         runScript.close();
                     }
 
-                    AddLog("LogBuild", "Game Project built into: " + gameBuildDir.string(), 2);
+                    AddLog("LogBuild", "Game Project built into: " + gameBuildDir.string() + " (All game data and files packaged)", 2);
                 }
                 ImGui::Separator();
                 if (ImGui::MenuItem("📦 Cook Project Assets")) {

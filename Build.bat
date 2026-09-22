@@ -129,16 +129,40 @@ echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
     -o "%GAME_BUILD_DIR%\test.exe"
 
 if !ERRORLEVEL! equ 0 (
+    :: Copy external runtime DLLs
     if exist "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" (
         copy /y "%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64\glfw3.dll" "%GAME_BUILD_DIR%\" >nul 2>&1
     )
+    if exist "%PROJECT_DIR%\Plugins\primitives\primitives.dll" (
+        copy /y "%PROJECT_DIR%\Plugins\primitives\primitives.dll" "%GAME_BUILD_DIR%\" >nul 2>&1
+    )
+
+    :: Copy engine shaders and resources needed by standalone game
+    xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Shaders" "%GAME_BUILD_DIR%\Shaders\" >nul 2>&1
+    xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Resources" "%GAME_BUILD_DIR%\Resources\" >nul 2>&1
+
+    :: Copy project cooked content, scenes, levels, registry, materials, models, and behaviours
+    if exist "%PROJECT_DIR%\Projects\test\Cooked" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Cooked" "%GAME_BUILD_DIR%\Cooked\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Scenes" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Scenes" "%GAME_BUILD_DIR%\Scenes\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Levels" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Levels" "%GAME_BUILD_DIR%\Levels\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Registry" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Registry" "%GAME_BUILD_DIR%\Registry\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Materials" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Materials" "%GAME_BUILD_DIR%\Materials\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Models" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Models" "%GAME_BUILD_DIR%\Models\" >nul 2>&1
+    if exist "%PROJECT_DIR%\Projects\test\Behaviours" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Behaviours" "%GAME_BUILD_DIR%\Behaviours\" >nul 2>&1
+
+    :: Copy project root files (*.emat, *.assetmeta, *.json, *.cpp)
+    copy /y "%PROJECT_DIR%\Projects\test\*.emat" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECT_DIR%\Projects\test\*.assetmeta" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECT_DIR%\Projects\test\*.json" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECT_DIR%\Projects\test\*.cpp" "%GAME_BUILD_DIR%\" >nul 2>&1
+
     (
     echo @echo off
     echo cd /d "%%~dp0"
     echo echo [INFO] Starting test game...
     echo start "" "test.exe"
     ) > "%GAME_BUILD_DIR%\Run.bat"
-    echo [SUCCESS] Game built successfully into %GAME_BUILD_DIR%.
+    echo [SUCCESS] Game built and packaged successfully into %GAME_BUILD_DIR%.
     echo [INFO] Contents of %GAME_BUILD_DIR%:
     dir /b "%GAME_BUILD_DIR%"
 ) else (
