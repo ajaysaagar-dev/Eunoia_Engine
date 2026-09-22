@@ -1475,10 +1475,43 @@ int createShadersAndPipeline()
 
 		#define M_PI 3.14159265359f
 
-		float CalculateShadow(float4 shadowCoord, float3 N, float3 L)
+		static const float2 poissonDisk16[16] = {
+			float2(-0.94201624f, -0.39906216f),
+			float2( 0.94558609f, -0.76890725f),
+			float2(-0.09418410f, -0.92938870f),
+			float2( 0.34495938f,  0.29387760f),
+			float2(-0.91588581f,  0.45771432f),
+			float2(-0.81544232f, -0.87912464f),
+			float2(-0.38277543f,  0.27676845f),
+			float2( 0.97484398f,  0.75648379f),
+			float2( 0.44323325f, -0.97511554f),
+			float2( 0.53742981f, -0.47373420f),
+			float2(-0.26496911f, -0.41893023f),
+			float2( 0.79197514f,  0.19090188f),
+			float2(-0.24188840f,  0.99706507f),
+			float2(-0.81409955f,  0.91437590f),
+			float2( 0.19984126f,  0.78641367f),
+			float2( 0.14383161f, -0.14100790f)
+		};
+
+		float CalculateShadow(float3 worldPos, float3 N, float3 L)
 		{
 			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
 
+			float cosTheta = saturate(dot(N, L));
+			float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+			// Calculate shadow map world-space texel size from the lightSpaceMatrix scale
+			float lightScale = length(lightSpaceMatrix[0].xyz);
+			float texelSizeWorld = (lightScale > 0.00001f) ? (2.0f / (shadowMapSize * lightScale)) : 0.02f;
+
+			// World-space normal offset bias: geometrically moves the lookup position along the normal,
+			// eliminating self-shadow acne and repetitive interference bands across surfaces and slopes without peter-panning.
+			float normalBias = texelSizeWorld * (1.5f * sinTheta + 0.5f);
+			float3 biasedWorldPos = worldPos + N * normalBias;
+
+			// Compute shadow coordinates per-pixel from biased world position
+			float4 shadowCoord = mul(lightSpaceMatrix, float4(biasedWorldPos, 1.0f));
 			float3 projCoords = shadowCoord.xyz / shadowCoord.w;
 
 			// Outside frustum test
@@ -1502,25 +1535,20 @@ int createShadersAndPipeline()
 			float zBorderDist = min(projCoords.z, 1.0f - projCoords.z);
 			fade = min(fade, saturate(zBorderDist * 10.0f));
 
-			float currentDepth = projCoords.z;
+			// Slope-scaled depth bias as a precision safeguard
+			float depthBias = max(shadowBias * (1.0f - cosTheta), shadowBias * 0.2f);
+			float currentDepth = projCoords.z - depthBias;
 
-			// Slope-scaled normal bias
-			float cosTheta = saturate(dot(N, L));
-			float bias = max(shadowBias * (1.0f - cosTheta), shadowBias * 0.25f);
-
-			// 16-tap PCF kernel for smooth soft shadows
-			float shadow = 0.0f;
+			// 16-tap Poisson Disk PCF for smooth, continuous, stripe-free soft shadows
 			float texelSize = 1.0f / shadowMapSize;
+			float filterRadius = texelSize * max(pcfRadius, 0.5f);
 
+			float shadow = 0.0f;
 			[unroll]
-			for (int x = -1; x <= 2; ++x)
+			for (int i = 0; i < 16; ++i)
 			{
-				[unroll]
-				for (int y = -1; y <= 2; ++y)
-				{
-					float2 offset = float2(x, y) * texelSize * pcfRadius;
-					shadow += g_shadowMap.SampleCmpLevelZero(g_shadowSampler, shadowUV + offset, currentDepth - bias);
-				}
+				float2 offset = poissonDisk16[i] * filterRadius;
+				shadow += g_shadowMap.SampleCmpLevelZero(g_shadowSampler, shadowUV + offset, currentDepth);
 			}
 			shadow /= 16.0f;
 
@@ -1670,7 +1698,7 @@ int createShadersAndPipeline()
 			float3 diffBRDF = kD * albedo;
 
 			// Directional Sun Light with Shadows
-			float shadowFactor = CalculateShadow(input.shadowCoord, N, L);
+			float shadowFactor = CalculateShadow(input.worldPos, N, L);
 			float3 directLit = (diffBRDF + specBRDF) * NdotL * lightColor * shadowFactor;
 
 			float3 ambientDiff = albedo * ambientIntensity * (1.0f - metal) * ao;
