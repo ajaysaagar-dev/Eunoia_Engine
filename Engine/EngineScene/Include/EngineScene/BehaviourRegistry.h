@@ -42,7 +42,7 @@ public:
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
         auto clone = std::make_unique<RotatorBehaviour>(*this);
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 
@@ -73,7 +73,7 @@ public:
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
         auto clone = std::make_unique<LightFlickerBehaviour>(*this);
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 
@@ -110,7 +110,7 @@ public:
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
         auto clone = std::make_unique<DoorController>(*this);
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 
@@ -147,7 +147,7 @@ public:
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
         auto clone = std::make_unique<PlayerController>(*this);
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 
@@ -181,7 +181,7 @@ public:
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
         auto clone = std::make_unique<EnemyController>(*this);
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 
@@ -208,7 +208,7 @@ public:
         clone->MoveSpeed = MoveSpeed;
         clone->IsActive = IsActive;
         clone->WarningLight = WarningLight;
-        clone->RegisterProperties();
+        clone->CopyPropertiesFrom(*this);
         return clone;
     }
 

@@ -227,7 +227,8 @@ static bool s_isRightMouseDown = false;
 static bool s_isMiddleMouseDown = false;
 static bool s_firstMouseAfterCapture = true;
 static double s_lastMouseX = 0.0, s_lastMouseY = 0.0;
-static bool s_pendingPickClick = false;
+bool g_pendingPickClick = false;
+#define s_pendingPickClick g_pendingPickClick
 
 // D3D12 Helper Functions
 inline D3D12_RESOURCE_BARRIER CreateTransitionBarrier(ID3D12Resource* resource, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
@@ -2637,7 +2638,7 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
 			bool isPopupOpen = ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
-			if (!isAlt && !g_camera.isFlying && !io.WantCaptureMouse && !isPopupOpen && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
+			if (!g_scene.isPlayMode && !isAlt && !g_camera.isFlying && !io.WantCaptureMouse && !isPopupOpen && !ImGuizmo::IsOver() && !ImGuizmo::IsUsing())
 			{
 				s_pendingPickClick = true;
 			}

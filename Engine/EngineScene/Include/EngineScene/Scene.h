@@ -785,6 +785,9 @@ public:
     void StartPlayMode() {
         if (isPlayMode) return;
 
+        // Ensure all editor behaviour references are resolved before cloning
+        ResolveAllBehaviourReferences();
+
         // Deep copy editor scene actors to restore cleanly on Stop
         playModePreObjects = objects;
         playModePreSelectedId = selectedId;

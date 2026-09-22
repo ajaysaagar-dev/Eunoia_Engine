@@ -271,6 +271,23 @@ public:
     // Cloning support for deep copying scene snapshots (Undo/Redo & PlayMode)
     virtual std::unique_ptr<EunoiaBehaviour> Clone() const = 0;
 
+    // Copies registered properties and target references from another behaviour instance of the same type
+    void CopyPropertiesFrom(const EunoiaBehaviour& other) {
+        RegisterProperties();
+        for (const auto& src : other.m_properties) {
+            for (auto& dst : m_properties) {
+                if (dst.name == src.name) {
+                    dst.targetId = src.targetId;
+                    dst.isMissing = src.isMissing;
+                    if (dst.type == BehaviourPropertyType::ObjectRef && dst.dataPtr && src.dataPtr) {
+                        *reinterpret_cast<void**>(dst.dataPtr) = *reinterpret_cast<void* const*>(src.dataPtr);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // Reflection & Properties (dev.md Section 7, 8, 23, 24)
     virtual void RegisterProperties() {}
     std::vector<BehaviourProperty>& GetProperties() { return m_properties; }

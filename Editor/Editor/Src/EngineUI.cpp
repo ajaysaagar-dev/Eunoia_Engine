@@ -49,6 +49,8 @@ inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
 }
 
 static EngineUI* g_pEngineUI = nullptr;
+extern bool g_pendingPickClick;
+static bool s_justExitedPlayMode = false;
 
 void AddEngineLog(const std::string& category, const std::string& message, int level) {
     if (g_pEngineUI) {
@@ -706,7 +708,7 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             gizmoUseCenter = !gizmoUseCenter;
             AddLog("LogEditor", gizmoUseCenter ? "Gizmo Position: Center (Z)" : "Gizmo Position: Pivot (Z)", 0);
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete) && scene.selectedId != -1) {
+        if (!s_justExitedPlayMode && ImGui::IsKeyPressed(ImGuiKey_Delete) && scene.selectedId != -1) {
             GameObject* o = scene.GetSelected();
             if (o) {
                 UndoManager::Get().RecordSnapshot(scene, "Delete Actor: " + o->name);
@@ -741,14 +743,15 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
             currentLevelFilePath = "";
             AddLog("LogWorld", "Cleared Level (New Level)", 0);
         }
-        if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        if (!s_justExitedPlayMode && ImGui::IsKeyPressed(ImGuiKey_Escape)) {
             scene.selectedId = -1;
         }
     }
 
-    // Play Mode Presentation & Stop-on-Delete (dev.md Section 32, 34)
+    // Play Mode Presentation & Stop-on-Delete / Stop-on-Escape (dev.md Section 32, 34)
     if (scene.isPlayMode) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || InputSystem::Get().IsKeyPressed(Key::Delete)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            InputSystem::Get().IsKeyPressed(Key::Delete) || InputSystem::Get().IsKeyPressed(Key::Escape)) {
             ExitPlayMode(scene);
             return;
         }
@@ -760,10 +763,12 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         if (ImGui::Begin("##PlayModeBanner", nullptr, playFlags)) {
             ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ GAME VIEW (PLAY MODE)");
             ImGui::SameLine();
-            ImGui::TextDisabled("| Press [DELETE] to Stop");
+            ImGui::TextDisabled("| Press [ESC] or [DELETE] to Stop");
             ImGui::SameLine();
-            if (ImGui::Button("⏹ Stop (DELETE)")) {
+            if (ImGui::Button("⏹ Stop (ESC)")) {
                 ExitPlayMode(scene);
+                ImGui::End();
+                return;
             }
         }
         ImGui::End();
@@ -873,6 +878,8 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
 
     // 10. Futuristic Loading Progress Modal (all loading situations)
     RenderLoadingModal();
+
+    s_justExitedPlayMode = false;
 }
 
 void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
@@ -3825,7 +3832,7 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                                     << "    }\n\n"
                                     << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
                                     << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
-                                    << "        clone->RegisterProperties();\n"
+                                    << "        clone->CopyPropertiesFrom(*this);\n"
                                     << "        return clone;\n"
                                     << "    }\n\n"
                                     << "    void OnCreate() override {\n"
@@ -4960,8 +4967,9 @@ void EngineUI::EnterPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
     showGizmo       = false;
     scene.showGrid  = false;
 
+    g_pendingPickClick = false;
     scene.StartPlayMode();
-    AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press DELETE to stop.", 0);
+    AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press ESC or DELETE to stop.", 0);
 }
 
 void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
@@ -4971,6 +4979,15 @@ void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
     WaitForGpuIdle();
 
     scene.StopPlayMode();
+
+    g_pendingPickClick = false;
+    s_justExitedPlayMode = true;
+
+    // Ensure selected actor is preserved upon exiting Play Mode
+    if (scene.playModePreSelectedId != -1 && scene.FindObject(scene.playModePreSelectedId)) {
+        scene.selectedId = scene.playModePreSelectedId;
+    }
+    scene.ResolveAllBehaviourReferences();
 
     OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
     if (cam && hasSavedPlayModeCamera) {
@@ -4994,7 +5011,7 @@ void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
     showGizmo        = prevShowGizmo;
     scene.showGrid   = prevShowGrid;
 
-    AddLog("LogPlayLevel", "PIE: Play Mode Stopped (DELETE). Editor restored.", 0);
+    AddLog("LogPlayLevel", "PIE: Play Mode Stopped. Editor restored.", 0);
 }
 
 // ============================================================================
