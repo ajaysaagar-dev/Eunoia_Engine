@@ -280,7 +280,21 @@ public:
     void RenderScreenPrintOverlay(float startX, float startY);
 
     uint64_t lightIconGpuHandle = 0;
+    uint64_t directionalLightIconGpuHandle = 0;
+    uint64_t pointLightIconGpuHandle = 0;
+    uint64_t spotLightIconGpuHandle = 0;
+    uint64_t areaLightIconGpuHandle = 0;
     uint64_t cameraIconGpuHandle = 0;
+
+    uint64_t GetLightIconGpuHandle(LightType type) const {
+        switch (type) {
+            case LightType::Directional: return directionalLightIconGpuHandle ? directionalLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Point:       return pointLightIconGpuHandle ? pointLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Spot:        return spotLightIconGpuHandle ? spotLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Area:        return areaLightIconGpuHandle ? areaLightIconGpuHandle : lightIconGpuHandle;
+            default:                     return lightIconGpuHandle;
+        }
+    }
 
     OrbitCamera* currentCamera = nullptr;
     bool hasSavedPlayModeCamera = false;

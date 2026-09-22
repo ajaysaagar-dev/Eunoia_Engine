@@ -2313,7 +2313,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         ImVec2 mousePos = ImGui::GetMousePos();
 
         for (auto& obj : scene.objects) {
-            if (!obj.visible || !obj.isLight) continue;
+            if (!obj.visible || (!obj.isLight && !IsLightPrimitive(obj.type))) continue;
             glm::vec3 worldPos = scene.GetWorldPosition(obj);
             glm::vec4 clip = vpMatrix * glm::vec4(worldPos, 1.0f);
             if (clip.w <= 0.05f) continue;
@@ -2333,9 +2333,17 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
 
             bool isSelected = (scene.selectedId == obj.id);
 
+            LightType lType = obj.light.type;
+            if (obj.type == PrimitiveType::DirectionalLight) lType = LightType::Directional;
+            else if (obj.type == PrimitiveType::PointLight) lType = LightType::Point;
+            else if (obj.type == PrimitiveType::SpotLight) lType = LightType::Spot;
+            else if (obj.type == PrimitiveType::AreaLight) lType = LightType::Area;
+
+            uint64_t iconHandle = GetLightIconGpuHandle(lType);
+
             // Draw Sprite Billboard
-            if (lightIconGpuHandle != 0) {
-                drawList->AddImage((ImTextureID)lightIconGpuHandle, pMin, pMax,
+            if (iconHandle != 0) {
+                drawList->AddImage((ImTextureID)iconHandle, pMin, pMax,
                                    ImVec2(0, 0), ImVec2(1, 1),
                                    isSelected ? IM_COL32(255, 255, 255, 255) : IM_COL32(230, 230, 230, 210));
             } else {
@@ -2911,9 +2919,13 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Lights")) {
+                if (directionalLightIconGpuHandle) { ImGui::Image((ImTextureID)directionalLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Directional Light")) { scene.AddNewLight(PrimitiveType::DirectionalLight); AddLog("LogActor", "Spawned Directional Light", 2); }
+                if (pointLightIconGpuHandle) { ImGui::Image((ImTextureID)pointLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
+                if (spotLightIconGpuHandle) { ImGui::Image((ImTextureID)spotLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
+                if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
                 ImGui::EndMenu();
             }
@@ -2932,9 +2944,13 @@ void EngineUI::RenderOutliner(Scene& scene) {
             ImGui::OpenPopup("AddLightPopup");
         }
         if (ImGui::BeginPopup("AddLightPopup")) {
+            if (directionalLightIconGpuHandle) { ImGui::Image((ImTextureID)directionalLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Directional Light")) { scene.AddNewLight(PrimitiveType::DirectionalLight); AddLog("LogActor", "Spawned Directional Light", 2); }
+            if (pointLightIconGpuHandle) { ImGui::Image((ImTextureID)pointLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
+            if (spotLightIconGpuHandle) { ImGui::Image((ImTextureID)spotLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
+            if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
             ImGui::EndPopup();
         }
@@ -3133,6 +3149,11 @@ void EngineUI::RenderDetails(Scene& scene) {
             char lightHeader[128];
             snprintf(lightHeader, sizeof(lightHeader), "%s Component", GetLightTypeName(obj->light.type));
             if (ImGui::CollapsingHeader(lightHeader, ImGuiTreeNodeFlags_DefaultOpen)) {
+                uint64_t iconHandle = GetLightIconGpuHandle(obj->light.type);
+                if (iconHandle != 0) {
+                    ImGui::Image((ImTextureID)iconHandle, ImVec2(20, 20));
+                    ImGui::SameLine();
+                }
                 ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "[%s]", GetLightTypeName(obj->light.type));
                 ImGui::SameLine();
                 ImGui::Checkbox("Light Enabled", &obj->light.enabled);

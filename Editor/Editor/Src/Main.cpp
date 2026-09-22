@@ -3347,9 +3347,22 @@ bool RecoverD3D12Device(HWND hwnd)
 
 	// 4. Reload textures & fallbacks
 	InitFallbackTextures();
-	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
-	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
-	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	DX12GpuTexture dirLightIcon = GetOrLoadGPUTexture("Resources/Icons/directional_light.png", g_fallbackWhite);
+	g_engineUI.directionalLightIconGpuHandle = dirLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture ptLightIcon = GetOrLoadGPUTexture("Resources/Icons/point_light.png", g_fallbackWhite);
+	g_engineUI.pointLightIconGpuHandle = ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture spotLightIcon = GetOrLoadGPUTexture("Resources/Icons/spot_light.png", g_fallbackWhite);
+	g_engineUI.spotLightIconGpuHandle = spotLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture areaLightIcon = GetOrLoadGPUTexture("Resources/Icons/area_light.png", g_fallbackWhite);
+	g_engineUI.areaLightIconGpuHandle = areaLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
+	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
 
 	// 5. Pre-upload textures & rebuild scene geometry
@@ -3489,9 +3502,22 @@ int main()
 	ImGui_ImplDX12_Init(&init_info);
 
 	InitFallbackTextures();
-	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
-	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
-	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	DX12GpuTexture dirLightIcon = GetOrLoadGPUTexture("Resources/Icons/directional_light.png", g_fallbackWhite);
+	g_engineUI.directionalLightIconGpuHandle = dirLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture ptLightIcon = GetOrLoadGPUTexture("Resources/Icons/point_light.png", g_fallbackWhite);
+	g_engineUI.pointLightIconGpuHandle = ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture spotLightIcon = GetOrLoadGPUTexture("Resources/Icons/spot_light.png", g_fallbackWhite);
+	g_engineUI.spotLightIconGpuHandle = spotLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture areaLightIcon = GetOrLoadGPUTexture("Resources/Icons/area_light.png", g_fallbackWhite);
+	g_engineUI.areaLightIconGpuHandle = areaLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
+	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
 	InputSystem::Get().SetupDefaultActions();
 
