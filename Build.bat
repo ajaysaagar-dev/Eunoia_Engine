@@ -44,6 +44,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "-I%PROJECT_DIR%\Engine\EngineScene\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineAssets\Include" ^
     "-I%PROJECT_DIR%\Engine\EunoiaPluginCore\Include" ^
+    "-I%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Include" ^
     "-I%PROJECT_DIR%\Editor\Editor\Include" ^
     "-I%PROJECT_DIR%\deps\tinyobj" ^
     "-I%PROJECT_DIR%\deps\cgltf" ^
@@ -55,6 +56,9 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "-I%PROJECT_DIR%\deps\json" ^
     "-I%PROJECT_DIR%" ^
     "%PROJECT_DIR%\deps\ufbx\ufbx.c" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\MeshClusterBuilder.cpp" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\MeshClusterCulling.cpp" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\HiZManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\TextureManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetRegistry.cpp" ^

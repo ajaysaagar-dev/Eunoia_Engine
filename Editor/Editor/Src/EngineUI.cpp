@@ -27,6 +27,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <nlohmann/json.hpp>
+#include <MeshClusterCulling/MeshClusterCulling.h>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
     if (a.objects.size() != b.objects.size()) return true;
@@ -1769,6 +1770,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     if (showHelpModal) {
         RenderHelpModal();
     }
+    if (showClusterCullingStats) {
+        RenderClusterCullingStats(scene);
+    }
 
     // 6. Material Editor Window (Opened via double-click on material in Content Browser)
     if (showMaterialEditor) {
@@ -2284,6 +2288,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
             if (ImGui::MenuItem("Grid", nullptr, scene.showGrid)) scene.showGrid = !scene.showGrid;
             if (ImGui::MenuItem("Transform Gizmo", nullptr, showGizmo)) showGizmo = !showGizmo;
             if (ImGui::MenuItem("Light Frustum", nullptr, scene.showLightFrustum)) scene.showLightFrustum = !scene.showLightFrustum;
+            if (ImGui::MenuItem("Mesh Cluster Culling Stats", nullptr, showClusterCullingStats)) showClusterCullingStats = !showClusterCullingStats;
             if (ImGui::MenuItem("Game View [G]", nullptr, isGameView)) ToggleGameView(scene);
             if (ImGui::MenuItem("Immersive Viewport [F11]", nullptr, isImmersiveMode)) ToggleImmersiveMode();
             ImGui::EndPopup();
@@ -3776,6 +3781,32 @@ void EngineUI::RenderDetails(Scene& scene) {
             ImGui::Checkbox("Receive Shadows", &obj->receiveShadows);
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("When enabled, this actor receives shadows from directional sun light.");
+            }
+        }
+
+        // 4.5 Rendering: Mesh Cluster Culling (dev.md Section 2, 3, 12)
+        if (!obj->isLight && obj->type != PrimitiveType::Empty && ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool mcc = obj->meshClusterCulling;
+            if (ImGui::Checkbox("Mesh Cluster Culling", &mcc)) {
+                scene.SetMeshClusterCullingRecursive(obj->id, mcc);
+                if (mcc) {
+                    Eunoia::MeshClusterCullingSystem::Get().EnsureClustersBuilt(*obj);
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enables GPU mesh-cluster visibility culling for this object.\nWhen enabled on a parent, the setting is propagated to its children.");
+            }
+
+            if (obj->meshClusterCulling) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 1.0f), "Cluster Culling Details:");
+                auto cStats = Eunoia::MeshClusterCullingSystem::Get().GetObjectStats(obj->id);
+                ImGui::Text("  Enabled: Yes");
+                ImGui::Text("  Cluster Count: %u", cStats.totalClusters);
+                ImGui::Text("  Visible Clusters: %u", cStats.visibleClusters);
+                ImGui::Text("  Culled Clusters: %u", cStats.culledClusters);
+                ImGui::Text("  Culling Ratio: %.2f%%", cStats.cullingRatio);
             }
         }
 
@@ -5639,6 +5670,98 @@ void EngineUI::RenderHelpModal() {
         }
         ImGui::EndPopup();
     }
+}
+
+void EngineUI::RenderClusterCullingStats(Scene& scene) {
+    ImGui::SetNextWindowSize(ImVec2(520, 480), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Mesh Cluster Culling Statistics", &showClusterCullingStats)) {
+        auto& cullingSys = Eunoia::MeshClusterCullingSystem::Get();
+        auto& cfg = cullingSys.GetConfig();
+        const auto& stats = cullingSys.GetStats();
+
+        ImGui::TextColored(ImVec4(0.2f, 0.85f, 1.0f, 1.0f), "DirectX 12 GPU Mesh Cluster Culling Pipeline");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Enable Cluster Culling System", &cfg.enabled)) {
+            cullingSys.SetConfig(cfg);
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Indirect Rendering", &cfg.enableIndirectRendering)) {
+            cullingSys.SetConfig(cfg);
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Culling Stages:");
+        if (ImGui::Checkbox("Frustum Culling", &cfg.enableFrustumCulling)) cullingSys.SetConfig(cfg);
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Backface / Normal Cone", &cfg.enableBackfaceCulling)) cullingSys.SetConfig(cfg);
+
+        if (ImGui::Checkbox("Hi-Z Occlusion", &cfg.enableHiZOcclusion)) cullingSys.SetConfig(cfg);
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Screen-Space Size", &cfg.enableScreenSizeCulling)) cullingSys.SetConfig(cfg);
+
+        ImGui::Spacing();
+        const char* debugModes[] = {
+            "None (Default)",
+            "Show Clusters",
+            "Show Cluster Bounds",
+            "Show Visible Clusters",
+            "Show Culled Clusters",
+            "Show Hi-Z",
+            "Show Cluster IDs"
+        };
+        if (ImGui::Combo("Debug Mode", &cfg.debugVisualizationMode, debugModes, IM_ARRAYSIZE(debugModes))) {
+            cullingSys.SetConfig(cfg);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), "Real-Time Pipeline Statistics:");
+        ImGui::Spacing();
+
+        if (ImGui::BeginTable("ClusterStatsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Objects Enabled");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.objectsEnabled);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Total Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.totalClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Visible Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "%u", stats.visibleClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Culled Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "%u", stats.culledClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Visibility Ratio");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f%%", stats.visibilityRatio);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Culling Ratio");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f%%", stats.cullingRatio);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("CPU Culling Time");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f ms", stats.cpuCullingTimeMs);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Indirect Draws");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.indirectDraws);
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        if (stats.objectsEnabled == 0) {
+            ImGui::TextDisabled("ℹ Select an actor in Outliner -> Details panel -> Rendering -> check 'Mesh Cluster Culling' to enable.");
+        }
+    }
+    ImGui::End();
 }
 
 void EngineUI::RenderLoadingModal() {

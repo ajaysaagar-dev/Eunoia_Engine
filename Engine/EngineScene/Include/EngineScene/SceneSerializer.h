@@ -106,6 +106,7 @@ public:
             file << "        \"twoSided\": " << BoolStr(obj.twoSided) << ",\n";
             file << "        \"castShadows\": " << BoolStr(obj.castShadows) << ",\n";
             file << "        \"receiveShadows\": " << BoolStr(obj.receiveShadows) << ",\n";
+            file << "        \"meshClusterCulling\": " << BoolStr(obj.meshClusterCulling) << ",\n";
             file << "        \"opacity\": " << obj.opacity << ",\n";
             file << "        \"opacityMaskClipValue\": " << obj.opacityMaskClipValue << ",\n";
             file << "        \"uvScale\": [" << obj.uvScale.x << ", " << obj.uvScale.y << "],\n";
@@ -722,6 +723,7 @@ private:
                 p = matBlock.find("\"twoSided\""); if (p != std::string::npos) obj.twoSided = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"castShadows\""); if (p != std::string::npos) obj.castShadows = ParseBoolAt(matBlock, p, true);
                 p = matBlock.find("\"receiveShadows\""); if (p != std::string::npos) obj.receiveShadows = ParseBoolAt(matBlock, p, true);
+                p = matBlock.find("\"meshClusterCulling\""); if (p != std::string::npos) obj.meshClusterCulling = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"opacity\""); if (p != std::string::npos) obj.opacity = ParseFloatAt(matBlock, p, 1.0f);
                 p = matBlock.find("\"opacityMaskClipValue\""); if (p != std::string::npos) obj.opacityMaskClipValue = ParseFloatAt(matBlock, p, 0.333f);
                 p = matBlock.find("\"uvScale\"");

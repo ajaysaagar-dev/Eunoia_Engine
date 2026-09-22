@@ -4,6 +4,9 @@ cmake_minimum_required(VERSION 3.15)
 set(EDITOR_SOURCES
     Src/Main.cpp
     Src/EngineUI.cpp
+    ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/MeshClusterBuilder.cpp
+    ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/MeshClusterCulling.cpp
+    ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Source/HiZManager.cpp
     # ImGui
     ${EUNOIA_DEPS}/imgui/imgui.cpp
     ${EUNOIA_DEPS}/imgui/imgui_draw.cpp
@@ -18,6 +21,7 @@ add_executable(Eunoia-Editor ${EDITOR_SOURCES})
 
 target_include_directories(Eunoia-Editor PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Include
+    ${EUNOIA_ROOT}/Plugins/Mesh-Cluster-Culling/Include
     ${EUNOIA_DEPS}/imgui
     ${EUNOIA_DEPS}/imgui/backends
     ${EUNOIA_GLFW_ROOT}/include

@@ -663,6 +663,16 @@ public:
         return false;
     }
 
+    // Dev.md Section 3: When enabling on a parent object, automatically propagate to all descendants/children recursively
+    void SetMeshClusterCullingRecursive(int objId, bool enabled) {
+        GameObject* obj = FindObject(objId);
+        if (!obj) return;
+        obj->meshClusterCulling = enabled;
+        for (int childId : obj->childIds) {
+            SetMeshClusterCullingRecursive(childId, enabled);
+        }
+    }
+
     void RemoveObject(int id) {
         static bool s_inRemove = false;
         bool isRootRemove = !s_inRemove;
@@ -981,6 +991,9 @@ struct RenderBatch {
     bool isUnlit = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    bool meshClusterCulling = false;
+    int objectId = -1;
+    uint32_t vertexOffset = 0;
     glm::vec2 uvScale{1.0f, 1.0f};
 };
 
@@ -1078,6 +1091,9 @@ struct RenderBatch {
             b.isUnlit = (obj.shadingModel == 1);
             b.castShadows = obj.castShadows;
             b.receiveShadows = obj.receiveShadows;
+            b.meshClusterCulling = obj.meshClusterCulling;
+            b.objectId = obj.id;
+            b.vertexOffset = vertexOffset;
             b.uvScale = obj.uvScale;
             outBatches.push_back(b);
         }

@@ -76,6 +76,9 @@ public:
     bool showViewportOverlay = true;
     bool showHelpModal = false;
     bool showUndoHistory = false;
+    bool showClusterCullingStats = false;
+
+    void RenderClusterCullingStats(Scene& scene);
 
     // Bottom drawer active tab: 0=Content Browser, 1=Output Log
     int bottomDrawerTab = 0;

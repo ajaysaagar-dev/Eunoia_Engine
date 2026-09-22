@@ -38,6 +38,7 @@
 #include <EnginePlatform/InputSystem.h>
 #include <EngineCore/EngineLogger.h>
 #include <EngineScene/ScreenPrint.h>
+#include <MeshClusterCulling/MeshClusterCulling.h>
 
 extern "C" {
     unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);
@@ -1511,6 +1512,9 @@ int initD3D12(HWND hwnd)
 	g_uploadFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	g_uploadFenceValue = 0;
 
+	// 12. Initialize Mesh Cluster Culling Pipeline (dev.md Plugin)
+	Eunoia::MeshClusterCullingSystem::Get().Initialize(g_d3dDevice, g_commandQueue, (UINT)g_currentWidth, (UINT)g_currentHeight);
+
 	return EXIT_SUCCESS;
 }
 
@@ -2428,6 +2432,27 @@ void updateConstantBuffer()
 	glm::mat4 view  = g_camera.GetViewMatrix();
 	glm::mat4 proj  = g_camera.GetProjectionMatrix(aspect);
 
+	// Update Mesh Cluster Culling Camera (dev.md Section 6, 15, 16)
+	if (Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		glm::mat4 vp = proj * view;
+		glm::vec4 frustumPlanes[6];
+		frustumPlanes[0] = glm::vec4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // Left
+		frustumPlanes[1] = glm::vec4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // Right
+		frustumPlanes[2] = glm::vec4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // Bottom
+		frustumPlanes[3] = glm::vec4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // Top
+		frustumPlanes[4] = glm::vec4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                                 // Near
+		frustumPlanes[5] = glm::vec4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // Far
+		for (int p = 0; p < 6; ++p)
+		{
+			float len = glm::length(glm::vec3(frustumPlanes[p]));
+			if (len > 1e-6f) frustumPlanes[p] /= len;
+		}
+		Eunoia::MeshClusterCullingSystem::Get().UpdateCamera(
+			view, proj, g_camera.GetPosition(), frustumPlanes, vpRect.width, vpRect.height
+		);
+	}
+
 	// Light View-Projection for Directional Sun Light
 	glm::vec3 lightDir = g_scene.lightDirection;
 	float lLen = glm::length(lightDir);
@@ -2806,6 +2831,17 @@ void renderFrame()
 	}
 
 	// ----------------------------------------------------
+	// PASS 1.9: Mesh Cluster Culling GPU Compute Pass (dev.md Sections 5, 8, 9, 10)
+	// ----------------------------------------------------
+	if (!g_deviceLost && Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		RecordGpuBreadcrumbOp("[Compute] MeshClusterCulling ExecuteCullingPass");
+		Eunoia::MeshClusterCullingSystem::Get().ExecuteCullingPass(
+			g_commandList, g_scene, g_depthStencilBuffer, D3D12_RESOURCE_STATE_DEPTH_WRITE
+		);
+	}
+
+	// ----------------------------------------------------
 	// PASS 2: Main Scene PBR Lit Pass with Shadows & Point Lights
 	// ----------------------------------------------------
 	D3D12_RESOURCE_BARRIER barrier = CreateTransitionBarrier(
@@ -2915,7 +2951,27 @@ void renderFrame()
 			RecordGpuBreadcrumbOp(bufSceneDraw);
 
 			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
-			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+
+			// GPU Mesh Cluster Culling branch (dev.md Sections 10, 11)
+			if (batch.meshClusterCulling && Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+			{
+				char bufSceneIndirect[160];
+				snprintf(bufSceneIndirect, sizeof(bufSceneIndirect), "[SceneDraw-ClusterCull] Batch %zu (%s) ExecuteIndirect",
+					bIdx, batch.albedoTex.empty() ? "untextured" : batch.albedoTex.c_str());
+				RecordGpuBreadcrumbOp(bufSceneIndirect);
+
+				bool rendered = Eunoia::MeshClusterCullingSystem::Get().RenderClusteredBatch(g_commandList, batch);
+				if (!rendered)
+				{
+					// Safe fallback to standard rasterization if cluster execution is skipped or has no visible clusters
+					g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+				}
+			}
+			else
+			{
+				// Standard rasterization path for objects with Mesh Cluster Culling OFF (zero overhead)
+				g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+			}
 		}
 	}
 
@@ -2967,12 +3023,19 @@ void renderFrame()
 	{
 		SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "renderFrame frame fence");
 	}
+
+	// Update non-stalling readback statistics for Mesh Cluster Culling (dev.md Section 14)
+	if (Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		Eunoia::MeshClusterCullingSystem::Get().FetchStatistics();
+	}
 }
 
 void cleanUpD3D12()
 {
 	WaitForGpuIdle();
 	FlushDeferredReleases();
+	Eunoia::MeshClusterCullingSystem::Get().Shutdown();
 
 	ImGui_ImplDX12_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
@@ -3041,6 +3104,7 @@ static void frameBufferResizeCallback(GLFWwindow* window, int width, int height)
 	g_currentWidth = width;
 	g_currentHeight = height;
 	resizeBuffers(width, height);
+	Eunoia::MeshClusterCullingSystem::Get().Resize((UINT)width, (UINT)height);
 }
 
 static bool RayTriangleIntersect(

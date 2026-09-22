@@ -242,6 +242,7 @@ struct GameObject {
     bool twoSided = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    bool meshClusterCulling = false; // dev.md: Mesh Cluster Culling (OFF by default)
     glm::vec2 uvScale{1.0f, 1.0f};
 
     bool visible = true;
@@ -317,6 +318,7 @@ struct GameObject {
         twoSided = other.twoSided;
         castShadows = other.castShadows;
         receiveShadows = other.receiveShadows;
+        meshClusterCulling = other.meshClusterCulling;
         uvScale = other.uvScale;
         visible = other.visible;
         autoRotate = other.autoRotate;
