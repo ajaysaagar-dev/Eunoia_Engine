@@ -1,0 +1,30 @@
+name: CI Build & Test
+
+on:
+  push:
+    branches: [ main, refactor/clean-architecture ]
+  pull_request:
+    branches: [ main, refactor/clean-architecture ]
+
+jobs:
+  build-windows:
+    name: Windows MSVC & MinGW Build
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure CMake
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DEUNOIA_BUILD_TESTS=ON
+
+      - name: Build Engine & Editor
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Run Unit Tests
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
