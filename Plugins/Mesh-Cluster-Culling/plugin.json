@@ -1,0 +1,11 @@
+{
+    "name": "Mesh-Cluster-Culling",
+    "version": "1.0.0",
+    "description": "GPU-Driven Mesh Cluster & Meshlet Visibility Culling Pipeline for DirectX 12",
+    "author": "Eunoia Team",
+    "api_version": 1,
+    "category": "rendering",
+    "core": true,
+    "dependencies": ["rhi", "rendering", "scene"],
+    "provides": ["IMeshClusterCulling"]
+}

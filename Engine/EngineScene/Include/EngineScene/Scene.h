@@ -14,18 +14,37 @@
 #include <EngineAssets/TextureManager.h>
 #include <EngineAssets/MeshImporter.h>
 #include <filesystem>
+#include <EngineScene/BehaviourRegistry.h>
 
 void AddEngineLog(const std::string& category, const std::string& message, int level);
 
 struct PointLight {
     int id = 0;
     std::string name = "Point Light";
+    LightType type = LightType::Point;
     glm::vec3 position{0.0f, 2.5f, 0.0f};
+    glm::vec3 direction{0.0f, -1.0f, 0.0f};
     glm::vec3 color{1.0f, 0.95f, 0.85f};
     float intensity = 2.0f;
     float range = 10.0f;
+    float attenuation = 2.0f;
     bool enabled = true;
     bool castShadows = true;
+    float shadowStrength = 0.85f;
+    float shadowBias = 0.0012f;
+    int shadowResolution = 1024;
+
+    // Spot Light
+    float innerConeAngle = 20.0f;
+    float outerConeAngle = 45.0f;
+    float coneFalloff = 1.0f;
+
+    // Area Light
+    int areaShape = 0;
+    float width = 1.0f;
+    float height = 1.0f;
+    float radius = 0.5f;
+    bool twoSided = false;
 };
 
 class Scene {
@@ -42,13 +61,18 @@ public:
     glm::vec3 lightColor{1.0f, 0.98f, 0.92f};
     float lightIntensity = 1.0f;
     float ambientIntensity = 0.0f;
+    glm::vec3 ambientColor{0.15f, 0.15f, 0.18f};
     glm::vec4 clearColor{0.07f, 0.07f, 0.08f, 1.0f};
 
     // Shadow Mapping Parameters (Hardware D32_FLOAT 2048x2048 PCF)
     bool enableShadows = true;
     float shadowStrength = 0.85f;
     float shadowBias = 0.0012f;
+    int shadowResolution = 2048;
     float pcfRadius = 1.2f;
+    bool showLightFrustum = false;
+    bool hasLightFrustumCorners = false;
+    glm::vec3 lightFrustumCorners[8] = {};
 
     // Multiple Point Lights Support
     std::vector<PointLight> pointLights;
@@ -63,77 +87,11 @@ public:
     bool playAnimations = true;
 
     Scene() {
-        LoadDefaultScene();
+        Clear();
     }
 
     void LoadDefaultScene() {
-        objects.clear();
-        pointLights.clear();
-        nextId = 1;
-        activeLevelCameraId = -1;
-
-        // Add Default Point Lights
-        PointLight pl1;
-        pl1.id = 1;
-        pl1.name = "Key Fill Light";
-        pl1.position = glm::vec3(-2.5f, 3.0f, 2.0f);
-        pl1.color = glm::vec3(1.0f, 0.85f, 0.65f);
-        pl1.intensity = 2.2f;
-        pl1.range = 12.0f;
-        pl1.enabled = true;
-        pl1.castShadows = true;
-        pointLights.push_back(pl1);
-
-        PointLight pl2;
-        pl2.id = 2;
-        pl2.name = "Rim Accent Light";
-        pl2.position = glm::vec3(2.5f, 2.2f, -2.0f);
-        pl2.color = glm::vec3(0.4f, 0.7f, 1.0f);
-        pl2.intensity = 1.6f;
-        pl2.range = 10.0f;
-        pl2.enabled = true;
-        pl2.castShadows = true;
-        pointLights.push_back(pl2);
-
-        glm::vec3 defaultGray{0.55f, 0.55f, 0.55f};
-
-        // Ground Plane
-        GameObject& plane = AddObject(PrimitiveType::Plane, {0.0f, -0.01f, 0.0f}, defaultGray);
-        plane.name = "Ground Plane";
-        plane.scale = {4.0f, 1.0f, 4.0f};
-        plane.roughness = 0.6f;
-
-        // Center Cube
-        GameObject& cube = AddObject(PrimitiveType::Cube, {-1.4f, 0.5f, 0.0f}, defaultGray);
-        cube.name = "Cube";
-        cube.autoRotate = true;
-        cube.autoRotateSpeed = {0.0f, 45.0f, 0.0f};
-        cube.roughness = 0.4f;
-
-        // Sphere
-        GameObject& sphere = AddObject(PrimitiveType::Sphere, {1.4f, 0.6f, 0.0f}, defaultGray);
-        sphere.name = "Sphere";
-        sphere.autoRotate = true;
-        sphere.autoRotateSpeed = {30.0f, 40.0f, 0.0f};
-        sphere.roughness = 0.25f;
-        sphere.metallic = 0.2f;
-
-        // Cylinder
-        GameObject& cyl = AddObject(PrimitiveType::Cylinder, {0.0f, 0.6f, 1.5f}, defaultGray);
-        cyl.name = "Cylinder";
-        cyl.roughness = 0.5f;
-
-        // Torus
-        GameObject& torus = AddObject(PrimitiveType::Torus, {0.0f, 0.8f, -1.5f}, defaultGray);
-        torus.name = "Torus";
-        torus.autoRotate = true;
-        torus.autoRotateSpeed = {40.0f, 0.0f, 40.0f};
-        torus.roughness = 0.3f;
-        torus.metallic = 0.5f;
-
-        SyncLightActors();
-
-        selectedId = cube.id;
+        Clear();
     }
 
     GameObject* FindObject(int id) {
@@ -204,6 +162,56 @@ public:
             return GetWorldPosition(obj); // worldMat itself was bad — fall back
         }
         return worldCenter;
+    }
+
+    bool GetSceneAABB(glm::vec3& outMin, glm::vec3& outMax) const {
+        glm::vec3 minB(1e9f), maxB(-1e9f);
+        bool hasValidGeom = false;
+        for (const auto& obj : objects) {
+            if (!obj.visible || obj.isLight || obj.type == PrimitiveType::Empty) continue;
+            if (obj.mesh.vertices.empty()) continue;
+
+            glm::mat4 worldMat = GetWorldMatrix(obj);
+            glm::vec3 objMin(1e9f), objMax(-1e9f);
+            bool objValid = false;
+            for (const auto& v : obj.mesh.vertices) {
+                if (std::isnan(v.pos.x) || std::isnan(v.pos.y) || std::isnan(v.pos.z) ||
+                    !std::isfinite(v.pos.x) || !std::isfinite(v.pos.y) || !std::isfinite(v.pos.z)) {
+                    continue;
+                }
+                objMin = glm::min(objMin, v.pos);
+                objMax = glm::max(objMax, v.pos);
+                objValid = true;
+            }
+            if (!objValid) continue;
+
+            glm::vec3 corners[8] = {
+                {objMin.x, objMin.y, objMin.z},
+                {objMax.x, objMin.y, objMin.z},
+                {objMin.x, objMax.y, objMin.z},
+                {objMax.x, objMax.y, objMin.z},
+                {objMin.x, objMin.y, objMax.z},
+                {objMax.x, objMin.y, objMax.z},
+                {objMin.x, objMax.y, objMax.z},
+                {objMax.x, objMax.y, objMax.z}
+            };
+            for (int i = 0; i < 8; ++i) {
+                glm::vec4 wp = worldMat * glm::vec4(corners[i], 1.0f);
+                if (std::isfinite(wp.x) && std::isfinite(wp.y) && std::isfinite(wp.z)) {
+                    minB = glm::min(minB, glm::vec3(wp));
+                    maxB = glm::max(maxB, glm::vec3(wp));
+                    hasValidGeom = true;
+                }
+            }
+        }
+        if (!hasValidGeom) {
+            outMin = glm::vec3(-10.0f, -1.0f, -10.0f);
+            outMax = glm::vec3(10.0f, 10.0f, 10.0f);
+            return false;
+        }
+        outMin = minB;
+        outMax = maxB;
+        return true;
     }
 
     static void DecomposeMatrix(const glm::mat4& m, glm::vec3& translation, glm::vec3& rotation, glm::vec3& scale) {
@@ -296,12 +304,17 @@ public:
         std::string name = std::string(GetPrimitiveTypeName(lightType)) + " " + std::to_string(id);
         glm::vec3 col(1.0f, 0.95f, 0.85f);
         if (lightType == PrimitiveType::DirectionalLight) col = glm::vec3(1.0f, 0.98f, 0.92f);
-        else if (lightType == PrimitiveType::SkyLight) col = glm::vec3(0.6f, 0.75f, 1.0f);
-        else if (lightType == PrimitiveType::AmbientLight) col = glm::vec3(0.8f, 0.85f, 1.0f);
+        else if (lightType == PrimitiveType::SkyLight) col = glm::vec3(0.65f, 0.8f, 1.0f);
 
         objects.emplace_back(id, name, lightType, pos, col);
         GameObject& obj = objects.back();
-        obj.light.castShadows = true;
+        if (lightType == PrimitiveType::SkyLight) {
+            obj.light.type = LightType::Sky;
+            obj.light.castShadows = false;
+            obj.light.intensity = 1.0f;
+        } else {
+            obj.light.castShadows = true;
+        }
         obj.parentId = parentId;
         if (parentId != -1) {
             GameObject* parent = FindObject(parentId);
@@ -309,17 +322,30 @@ public:
         }
 
         if (lightType == PrimitiveType::PointLight || lightType == PrimitiveType::SpotLight ||
-            lightType == PrimitiveType::TubeLight || lightType == PrimitiveType::DiscLight ||
             lightType == PrimitiveType::AreaLight) {
             PointLight pl;
             pl.id = id;
             pl.name = name;
+            pl.type = obj.light.type;
             pl.position = pos;
+            pl.direction = obj.light.direction;
             pl.color = col;
-            pl.intensity = 2.0f;
-            pl.range = 10.0f;
+            pl.intensity = obj.light.intensity;
+            pl.range = obj.light.range;
+            pl.attenuation = obj.light.attenuation;
             pl.enabled = true;
             pl.castShadows = true;
+            pl.shadowStrength = obj.light.shadowStrength;
+            pl.shadowBias = obj.light.shadowBias;
+            pl.shadowResolution = obj.light.shadowResolution;
+            pl.innerConeAngle = obj.light.innerConeAngle;
+            pl.outerConeAngle = obj.light.outerConeAngle;
+            pl.coneFalloff = obj.light.coneFalloff;
+            pl.areaShape = obj.light.areaShape;
+            pl.width = obj.light.width;
+            pl.height = obj.light.height;
+            pl.radius = obj.light.radius;
+            pl.twoSided = obj.light.twoSided;
             pointLights.push_back(pl);
             obj.lightId = (int)pointLights.size() - 1;
         }
@@ -344,6 +370,10 @@ public:
     // Keep all lights synced from their GameObjects (called each frame)
     void SyncLightPositionsFromActors() {
         ambientIntensity = 0.0f;
+        ambientColor = glm::vec3(0.0f);
+        bool hasDirectional = false;
+        bool hasSkyLight = false;
+        pointLights.clear();
         for (auto& obj : objects) {
             if (obj.isLight || IsLightPrimitive(obj.type)) {
                 obj.isLight = true;
@@ -363,46 +393,58 @@ public:
                     enableShadows = obj.light.castShadows;
                     shadowStrength = obj.light.shadowStrength;
                     shadowBias = obj.light.shadowBias;
-                }
-
-                if (obj.light.type == LightType::Ambient && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
+                    shadowResolution = obj.light.shadowResolution;
+                    hasDirectional = true;
                 }
                 else if (obj.light.type == LightType::Sky && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.ambientContribution * obj.light.intensity, 0.0f, 2.0f);
+                    glm::vec3 sCol = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
+                    ambientColor += sCol * obj.light.intensity;
+                    ambientIntensity += obj.light.intensity;
+                    hasSkyLight = true;
                 }
-                else if (obj.light.type == LightType::Hemisphere && obj.light.enabled) {
-                    ambientIntensity = glm::clamp(obj.light.intensity * 0.25f, 0.0f, 2.0f);
-                }
-
-                if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
+                else if (obj.light.type == LightType::Point || obj.type == PrimitiveType::PointLight ||
                     obj.light.type == LightType::Spot || obj.type == PrimitiveType::SpotLight ||
-                    obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight ||
-                    obj.light.type == LightType::Tube || obj.type == PrimitiveType::TubeLight ||
-                    obj.light.type == LightType::Disc || obj.type == PrimitiveType::DiscLight) {
-                    if (obj.lightId < 0 || obj.lightId >= (int)pointLights.size()) {
+                    obj.light.type == LightType::Area || obj.type == PrimitiveType::AreaLight) {
+                    if (obj.light.enabled) {
                         PointLight pl;
                         pl.id = obj.id;
                         pl.name = obj.name;
+                        pl.type = obj.light.type;
                         pl.position = worldPos;
+                        pl.direction = obj.light.direction;
                         pl.color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
                         pl.intensity = obj.light.intensity;
                         pl.range = obj.light.range;
+                        pl.attenuation = obj.light.attenuation;
                         pl.enabled = obj.light.enabled;
                         pl.castShadows = obj.light.castShadows;
+                        pl.shadowStrength = obj.light.shadowStrength;
+                        pl.shadowBias = obj.light.shadowBias;
+                        pl.shadowResolution = obj.light.shadowResolution;
+                        pl.innerConeAngle = obj.light.innerConeAngle;
+                        pl.outerConeAngle = obj.light.outerConeAngle;
+                        pl.coneFalloff = obj.light.coneFalloff;
+                        pl.areaShape = obj.light.areaShape;
+                        pl.width = obj.light.width;
+                        pl.height = obj.light.height;
+                        pl.radius = obj.light.radius;
+                        pl.twoSided = obj.light.twoSided;
                         pointLights.push_back(pl);
                         obj.lightId = (int)pointLights.size() - 1;
-                    } else {
-                        pointLights[obj.lightId].position = worldPos;
-                        pointLights[obj.lightId].name = obj.name;
-                        pointLights[obj.lightId].color = obj.light.useTemperature ? (obj.light.color * ColorTemperatureToRGB(obj.light.temperature)) : obj.light.color;
-                        pointLights[obj.lightId].intensity = obj.light.intensity;
-                        pointLights[obj.lightId].range = obj.light.range;
-                        pointLights[obj.lightId].enabled = obj.light.enabled;
-                        pointLights[obj.lightId].castShadows = obj.light.castShadows;
                     }
                 }
             }
+        }
+        if (!hasDirectional) {
+            lightIntensity = 0.0f;
+        }
+        if (hasSkyLight) {
+            if (ambientIntensity > 0.0001f) {
+                ambientColor /= ambientIntensity;
+            }
+        } else {
+            ambientColor = glm::vec3(0.0f);
+            ambientIntensity = 0.0f;
         }
     }
 
@@ -622,6 +664,16 @@ public:
         return false;
     }
 
+    // Dev.md Section 3: When enabling on a parent object, automatically propagate to all descendants/children recursively
+    void SetMeshClusterCullingRecursive(int objId, bool enabled) {
+        GameObject* obj = FindObject(objId);
+        if (!obj) return;
+        obj->meshClusterCulling = enabled;
+        for (int childId : obj->childIds) {
+            SetMeshClusterCullingRecursive(childId, enabled);
+        }
+    }
+
     void RemoveObject(int id) {
         static bool s_inRemove = false;
         bool isRootRemove = !s_inRemove;
@@ -772,8 +824,14 @@ public:
 
     void Clear() {
         objects.clear();
+        pointLights.clear();
         selectedId = -1;
         activeLevelCameraId = -1;
+        nextId = 1;
+        lightIntensity = 0.0f;
+        ambientIntensity = 0.0f;
+        playModePreObjects.clear();
+        playModePreSelectedId = -1;
     }
 
     // Play Mode State & Runtime Lifecycle (dev.md Section 30-36)
@@ -784,6 +842,31 @@ public:
 
     void StartPlayMode() {
         if (isPlayMode) return;
+
+        // Ensure all registered script behaviours are upgraded to DynamicScriptBehaviour and properties refreshed from source
+        const auto& allRegistry = BehaviourRegistry::Get().GetAll();
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (!b) continue;
+                auto regIt = allRegistry.find(b->GetClassName());
+                if (regIt != allRegistry.end() && !regIt->second.sourceCpp.empty()) {
+                    if (regIt->second.isNative) {
+                        // Native compiled behaviour: retain native instance
+                        b->RefreshPropertiesFromSource();
+                    } else if (b->GetSourceCppPath().empty() || b->GetProperties().empty()) {
+                        auto dynB = std::make_unique<DynamicScriptBehaviour>(b->GetClassName(), regIt->second.sourceCpp);
+                        dynB->SetScene(this);
+                        dynB->SetOwner(&obj);
+                        dynB->SetEnabled(b->IsEnabled());
+                        dynB->CopyPropertiesFrom(*b);
+                        dynB->ResolveReferences(*this);
+                        b = std::move(dynB);
+                    } else {
+                        b->RefreshPropertiesFromSource();
+                    }
+                }
+            }
+        }
 
         // Ensure all editor behaviour references are resolved before cloning
         ResolveAllBehaviourReferences();
@@ -875,6 +958,16 @@ public:
         SyncLightPositionsFromActors();
 
         if (isPlayMode) {
+            // Update global World Delta Seconds (dev.md: "the global var called 'World Delta Seconds' use as a DeltaTime")
+            WorldDeltaSeconds = dt;
+            World_Delta_Seconds = dt;
+            worldDeltaSeconds = dt;
+            WorldDeltaTime = dt;
+
+            for (auto& obj : objects) {
+                obj.scene = this;
+            }
+
             // 1. FixedUpdate
             fixedTimeAccumulator += dt;
             const float fixedStep = 1.0f / 60.0f;
@@ -902,6 +995,14 @@ public:
                 }
             }
             return;
+        }
+
+        WorldDeltaSeconds = dt;
+        World_Delta_Seconds = dt;
+        worldDeltaSeconds = dt;
+        WorldDeltaTime = dt;
+        for (auto& obj : objects) {
+            obj.scene = this;
         }
 
         if (!playAnimations) return;
@@ -934,7 +1035,15 @@ struct RenderBatch {
     bool isUnlit = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    bool meshClusterCulling = false;
+    int objectId = -1;
+    uint32_t vertexOffset = 0;
     glm::vec2 uvScale{1.0f, 1.0f};
+    bool normalMapYFlip = false;
+    int metallicChannel = 0;
+    int roughnessChannel = 1;
+    int aoChannel = 0;
+    int materialDebugMode = 0;
 };
 
     void BuildSceneMesh(
@@ -975,6 +1084,12 @@ struct RenderBatch {
             float det = glm::determinant(m3);
             if (std::abs(det) > 1e-6f && !std::isnan(det)) {
                 normalMatrix = glm::transpose(glm::inverse(m3));
+            } else {
+                // Robust orthonormal fallback for degenerate scales (e.g. 0-scale axes)
+                glm::vec3 c0 = glm::length(m3[0]) > 1e-5f ? glm::normalize(m3[0]) : glm::vec3(1.0f, 0.0f, 0.0f);
+                glm::vec3 c1 = glm::length(m3[1]) > 1e-5f ? glm::normalize(m3[1]) : glm::vec3(0.0f, 1.0f, 0.0f);
+                glm::vec3 c2 = glm::length(m3[2]) > 1e-5f ? glm::normalize(m3[2]) : glm::vec3(0.0f, 0.0f, 1.0f);
+                normalMatrix = glm::mat3(c0, c1, c2);
             }
 
             uint32_t vertexOffset = (uint32_t)outVertices.size();
@@ -991,7 +1106,13 @@ struct RenderBatch {
                 glm::vec3 n = normalMatrix * mv.normal;
                 float nLen = glm::length(n);
                 glm::vec3 worldNormal = (nLen > 1e-6f && !std::isnan(nLen)) ? (n / nLen) : glm::vec3(0.0f, 1.0f, 0.0f);
-                outVertices.push_back({ glm::vec3(worldPos), worldNormal, mv.uv, glm::vec3(1.0f, 1.0f, 1.0f) });
+
+                glm::vec3 t = glm::mat3(model) * glm::vec3(mv.tangent);
+                float tLen = glm::length(t);
+                glm::vec3 worldTangent = (tLen > 1e-6f && !std::isnan(tLen)) ? (t / tLen) : glm::vec3(1.0f, 0.0f, 0.0f);
+                glm::vec4 outTangent = glm::vec4(worldTangent, mv.tangent.w);
+
+                outVertices.push_back({ glm::vec3(worldPos), worldNormal, mv.uv, glm::vec3(1.0f, 1.0f, 1.0f), outTangent });
             }
 
             for (uint32_t idx : obj.mesh.indices) {
@@ -1025,7 +1146,15 @@ struct RenderBatch {
             b.isUnlit = (obj.shadingModel == 1);
             b.castShadows = obj.castShadows;
             b.receiveShadows = obj.receiveShadows;
+            b.meshClusterCulling = obj.meshClusterCulling;
+            b.objectId = obj.id;
+            b.vertexOffset = vertexOffset;
             b.uvScale = obj.uvScale;
+            b.normalMapYFlip = obj.normalMapYFlip;
+            b.metallicChannel = obj.metallicChannel;
+            b.roughnessChannel = obj.roughnessChannel;
+            b.aoChannel = obj.aoChannel;
+            b.materialDebugMode = obj.materialDebugMode;
             outBatches.push_back(b);
         }
 
@@ -1045,6 +1174,63 @@ struct RenderBatch {
                     b.baseColor = {1.0f, 1.0f, 1.0f};
                     outBatches.push_back(b);
                 }
+            }
+        }
+
+        // 4. Debug Visualization of Light Frustum (dev.md Step 2)
+        if (showLightFrustum && hasLightFrustumCorners) {
+            uint32_t frustumStart = (uint32_t)outIndices.size();
+            glm::vec3 frustumColor{1.0f, 0.85f, 0.1f}; // bright yellow
+
+            auto AppendLine = [&](const glm::vec3& p0, const glm::vec3& p1) {
+                uint32_t baseIdx = (uint32_t)outVertices.size();
+                glm::vec3 dir = p1 - p0;
+                float len = glm::length(dir);
+                if (len < 1e-4f) return;
+                glm::vec3 side = glm::normalize(glm::cross(dir, glm::vec3(0, 1, 0)));
+                if (glm::length(side) < 1e-3f) side = glm::vec3(1, 0, 0);
+                float halfW = 0.035f;
+                outVertices.push_back({ p0 - side * halfW, glm::vec3(0, 1, 0), glm::vec2(0, 0), frustumColor });
+                outVertices.push_back({ p0 + side * halfW, glm::vec3(0, 1, 0), glm::vec2(1, 0), frustumColor });
+                outVertices.push_back({ p1 + side * halfW, glm::vec3(0, 1, 0), glm::vec2(1, 1), frustumColor });
+                outVertices.push_back({ p1 - side * halfW, glm::vec3(0, 1, 0), glm::vec2(0, 1), frustumColor });
+
+                outIndices.push_back(baseIdx + 0);
+                outIndices.push_back(baseIdx + 1);
+                outIndices.push_back(baseIdx + 2);
+                outIndices.push_back(baseIdx + 0);
+                outIndices.push_back(baseIdx + 2);
+                outIndices.push_back(baseIdx + 3);
+            };
+
+            // Near plane (0, 1, 2, 3)
+            AppendLine(lightFrustumCorners[0], lightFrustumCorners[1]);
+            AppendLine(lightFrustumCorners[1], lightFrustumCorners[2]);
+            AppendLine(lightFrustumCorners[2], lightFrustumCorners[3]);
+            AppendLine(lightFrustumCorners[3], lightFrustumCorners[0]);
+
+            // Far plane (4, 5, 6, 7)
+            AppendLine(lightFrustumCorners[4], lightFrustumCorners[5]);
+            AppendLine(lightFrustumCorners[5], lightFrustumCorners[6]);
+            AppendLine(lightFrustumCorners[6], lightFrustumCorners[7]);
+            AppendLine(lightFrustumCorners[7], lightFrustumCorners[4]);
+
+            // Connecting edges (0-4, 1-5, 2-6, 3-7)
+            AppendLine(lightFrustumCorners[0], lightFrustumCorners[4]);
+            AppendLine(lightFrustumCorners[1], lightFrustumCorners[5]);
+            AppendLine(lightFrustumCorners[2], lightFrustumCorners[6]);
+            AppendLine(lightFrustumCorners[3], lightFrustumCorners[7]);
+
+            uint32_t frustumCount = (uint32_t)outIndices.size() - frustumStart;
+            if (frustumCount > 0) {
+                RenderBatch b;
+                b.startIndex = frustumStart;
+                b.indexCount = frustumCount;
+                b.isUnlit = true;
+                b.castShadows = false;
+                b.receiveShadows = false;
+                b.baseColor = {1.0f, 1.0f, 1.0f};
+                outBatches.push_back(b);
             }
         }
     }

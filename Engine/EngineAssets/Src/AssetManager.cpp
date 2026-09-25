@@ -145,18 +145,19 @@ void AssetManager::Clear() {
 }
 
 bool AssetManager::CookProject(const std::filesystem::path& outputDir, std::string& outLog, AssetCookProgressFn onProgress) {
+    std::filesystem::path projRoot = (m_projectRoot.filename() == "Content") ? m_projectRoot.parent_path() : m_projectRoot;
     std::filesystem::path targetDir;
     if (outputDir.empty()) {
-        targetDir = m_projectRoot / "Cooked";
+        targetDir = projRoot / "Cooked";
     } else if (outputDir.is_relative()) {
-        targetDir = m_projectRoot / outputDir;
+        targetDir = projRoot / outputDir;
     } else {
         targetDir = outputDir;
     }
 
     std::stringstream log;
     log << "=== COOKING PROJECT ASSETS ===\n";
-    log << "Project Root: " << m_projectRoot.string() << "\n";
+    log << "Project Root: " << projRoot.string() << "\n";
     log << "Target Cooked Directory: " << targetDir.string() << "\n";
 
     if (onProgress) onProgress(0.05f, "Initializing target output directory...", targetDir.string());

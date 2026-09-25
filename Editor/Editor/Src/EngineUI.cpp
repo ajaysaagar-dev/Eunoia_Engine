@@ -1,5 +1,6 @@
 #include <Editor/EngineUI.h>
 #include <Editor/UndoManager.h>
+#include <Editor/EditorGizmoSystem.h>
 #include "imgui.h"
 #include "ImGuizmo.h"
 #include <glm/gtc/type_ptr.hpp>
@@ -25,6 +26,9 @@
 #include <EnginePlatform/InputSystem.h>
 #include <EngineScene/ScreenPrint.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <nlohmann/json.hpp>
+#include <MeshClusterCulling/MeshClusterCulling.h>
 
 inline bool HasSceneStateChanged(const Scene& a, const Scene& b) {
     if (a.objects.size() != b.objects.size()) return true;
@@ -126,31 +130,202 @@ static void SyncRegistryWithUIProgress(const std::filesystem::path& path) {
     EngineUI::FinishLoadingTask("Asset Registry synchronized (" + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets)");
 }
 
-static void LaunchVSCodeWorkspace(const std::string& filePath) {
-    try {
-        std::filesystem::path currentDir = std::filesystem::current_path();
-        std::filesystem::path vscodeDir = currentDir / ".vscode";
-        std::filesystem::path propPath = vscodeDir / "c_cpp_properties.json";
-        if (!std::filesystem::exists(propPath)) {
-            std::error_code ec;
-            std::filesystem::create_directories(vscodeDir, ec);
-            std::ofstream pf(propPath);
-            if (pf.is_open()) {
-                pf << "{\n  \"configurations\": [\n    {\n      \"name\": \"Eunoia-Engine\",\n"
-                   << "      \"includePath\": [\"${workspaceFolder}/**\", \"${workspaceFolder}/include\", \"${workspaceFolder}/Content/**\"],\n"
-                   << "      \"defines\": [\"_DEBUG\", \"UNICODE\", \"_UNICODE\", \"WIN32_LEAN_AND_MEAN\"],\n"
-                   << "      \"cStandard\": \"c11\",\n      \"cppStandard\": \"c++17\",\n"
-                   << "      \"intelliSenseMode\": \"windows-gcc-x64\"\n    }\n  ],\n  \"version\": 4\n}\n";
+static std::filesystem::path FindEngineSourceRoot() {
+    std::error_code ec;
+    std::vector<std::filesystem::path> candidates = {
+        std::filesystem::current_path(),
+        std::filesystem::current_path().parent_path(),
+        std::filesystem::current_path().parent_path().parent_path(),
+        "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine"
+    };
+    for (const auto& c : candidates) {
+        if (std::filesystem::exists(c / "Engine" / "EngineScene" / "Include", ec) &&
+            std::filesystem::exists(c / "deps" / "glm", ec)) {
+            return std::filesystem::canonical(c, ec);
+        }
+    }
+    return "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine";
+}
+
+static std::filesystem::path FindCompilerPath(const std::filesystem::path& engineRoot) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> candidates = {
+        engineRoot / "tools" / "w64devkit" / "bin" / "g++.exe",
+        "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine\\tools\\w64devkit\\bin\\g++.exe"
+    };
+    for (const auto& c : candidates) {
+        if (std::filesystem::exists(c, ec)) {
+            return c;
+        }
+    }
+    return "g++";
+}
+
+static void CopyHeadersRecursive(const std::filesystem::path& src, const std::filesystem::path& dst) {
+    std::error_code ec;
+    if (!std::filesystem::exists(src, ec)) return;
+    for (auto it = std::filesystem::recursive_directory_iterator(src, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".h" || ext == ".hpp" || ext == ".inl" || ext == ".c") {
+                std::filesystem::path rel = std::filesystem::relative(it->path(), src, ec);
+                std::filesystem::path target = dst / rel;
+                std::filesystem::create_directories(target.parent_path(), ec);
+                std::filesystem::copy_file(it->path(), target, std::filesystem::copy_options::overwrite_existing, ec);
             }
         }
-    } catch (...) {}
+    }
+}
 
-    std::filesystem::path cur = std::filesystem::current_path();
-    std::string projectDir = cur.string();
+void EngineUI::SetupProjectDependencies(const std::filesystem::path& projectRoot) {
+    std::error_code ec;
+    if (projectRoot.empty() || !std::filesystem::exists(projectRoot, ec)) return;
+
+    std::filesystem::path engineRoot = FindEngineSourceRoot();
+    std::filesystem::path compilerPath = FindCompilerPath(engineRoot);
+
+    std::filesystem::path depDir = projectRoot / "Dependencies";
+    std::filesystem::path depEngineDir = depDir / "Engine";
+    std::filesystem::path depDepsDir = depDir / "deps";
+
+    // 1. Copy Engine Include headers
+    std::vector<std::string> engineModules = {
+        "EngineCore", "EnginePlatform", "EngineRHI", "EngineRenderer",
+        "EngineScene", "EngineAssets", "EunoiaPluginCore"
+    };
+    for (const auto& mod : engineModules) {
+        std::filesystem::path srcInc = engineRoot / "Engine" / mod / "Include";
+        std::filesystem::path dstInc = depEngineDir / mod / "Include";
+        if (std::filesystem::exists(srcInc, ec) && !std::filesystem::exists(dstInc, ec)) {
+            CopyHeadersRecursive(srcInc, dstInc);
+        }
+    }
+
+    // 2. Copy third-party headers (GLFW, GLM, JSON, ImGui)
+    std::filesystem::path glfwSrc = engineRoot / "deps" / "glfw-3.5.1.bin.WIN64" / "include";
+    std::filesystem::path glfwDst = depDepsDir / "glfw-3.5.1.bin.WIN64" / "include";
+    if (std::filesystem::exists(glfwSrc, ec) && !std::filesystem::exists(glfwDst, ec)) {
+        CopyHeadersRecursive(glfwSrc, glfwDst);
+    }
+
+    std::filesystem::path glmSrc = engineRoot / "deps" / "glm";
+    std::filesystem::path glmDst = depDepsDir / "glm";
+    if (std::filesystem::exists(glmSrc, ec) && !std::filesystem::exists(glmDst, ec)) {
+        CopyHeadersRecursive(glmSrc, glmDst);
+    }
+
+    std::filesystem::path jsonSrc = engineRoot / "deps" / "json";
+    std::filesystem::path jsonDst = depDepsDir / "json";
+    if (std::filesystem::exists(jsonSrc, ec) && !std::filesystem::exists(jsonDst, ec)) {
+        CopyHeadersRecursive(jsonSrc, jsonDst);
+    }
+
+    std::filesystem::path imguiSrc = engineRoot / "deps" / "imgui";
+    std::filesystem::path imguiDst = depDepsDir / "imgui";
+    if (std::filesystem::exists(imguiSrc, ec) && !std::filesystem::exists(imguiDst, ec)) {
+        CopyHeadersRecursive(imguiSrc, imguiDst);
+    }
+
+    // 3. Write projectRoot/.vscode/c_cpp_properties.json
+    std::filesystem::path vscodeDir = projectRoot / ".vscode";
+    std::filesystem::create_directories(vscodeDir, ec);
+
+    std::string compStr = compilerPath.generic_string();
+    std::string engStr = engineRoot.generic_string();
+
+    std::filesystem::path propPath = vscodeDir / "c_cpp_properties.json";
+    std::ofstream pf(propPath);
+    if (pf.is_open()) {
+        pf << "{\n"
+           << "  \"configurations\": [\n"
+           << "    {\n"
+           << "      \"name\": \"Eunoia-Engine\",\n"
+           << "      \"includePath\": [\n"
+           << "        \"${workspaceFolder}/**\",\n"
+           << "        \"${workspaceFolder}/Content/**\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineCore/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EnginePlatform/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineRHI/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineRenderer/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineScene/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineAssets/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EunoiaPluginCore/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/glfw-3.5.1.bin.WIN64/include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/glm\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/json\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/imgui\",\n"
+           << "        \"" << engStr << "/Engine/EngineCore/Include\",\n"
+           << "        \"" << engStr << "/Engine/EnginePlatform/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineRHI/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineRenderer/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineScene/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineAssets/Include\",\n"
+           << "        \"" << engStr << "/Engine/EunoiaPluginCore/Include\",\n"
+           << "        \"" << engStr << "/deps/glfw-3.5.1.bin.WIN64/include\",\n"
+           << "        \"" << engStr << "/deps/glm\",\n"
+           << "        \"" << engStr << "/deps/json\",\n"
+           << "        \"" << engStr << "/deps/imgui\"\n"
+           << "      ],\n"
+           << "      \"defines\": [\n"
+           << "        \"_DEBUG\",\n"
+           << "        \"UNICODE\",\n"
+           << "        \"_UNICODE\",\n"
+           << "        \"WIN32_LEAN_AND_MEAN\",\n"
+           << "        \"NOMINMAX\"\n"
+           << "      ],\n"
+           << "      \"compilerPath\": \"" << compStr << "\",\n"
+           << "      \"cStandard\": \"c11\",\n"
+           << "      \"cppStandard\": \"c++17\",\n"
+           << "      \"intelliSenseMode\": \"windows-gcc-x64\"\n"
+           << "    }\n"
+           << "  ],\n"
+           << "  \"version\": 4\n"
+           << "}\n";
+        pf.close();
+    }
+
+    // 4. Write projectRoot/.vscode/settings.json
+    std::filesystem::path settingsPath = vscodeDir / "settings.json";
+    std::ofstream sf(settingsPath);
+    if (sf.is_open()) {
+        sf << "{\n"
+           << "  \"files.exclude\": {\n"
+           << "    \"**/*.assetmeta\": true,\n"
+           << "    \"**/*.meta\": true\n"
+           << "  }\n"
+           << "}\n";
+        sf.close();
+    }
+}
+
+static void LaunchVSCodeWorkspace(const std::string& filePath) {
     std::filesystem::path absFilePath = std::filesystem::absolute(filePath);
+    std::filesystem::path targetWorkspace;
+    if (g_pEngineUI && !g_pEngineUI->activeProjectRoot.empty()) {
+        targetWorkspace = g_pEngineUI->activeProjectRoot;
+    } else {
+        std::filesystem::path p = absFilePath.parent_path();
+        while (p.has_parent_path() && p != p.parent_path()) {
+            if (std::filesystem::exists(p / "Content") || std::filesystem::exists(p / ".vscode")) {
+                targetWorkspace = p;
+                break;
+            }
+            p = p.parent_path();
+        }
+    }
+    if (targetWorkspace.empty()) {
+        targetWorkspace = std::filesystem::current_path();
+    }
 
-    // Launch: code "<projectDir>" "<absFilePath>"
-    std::string cmdParams = "/c code \"" + projectDir + "\" \"" + absFilePath.string() + "\"";
+    if (g_pEngineUI) {
+        g_pEngineUI->SetupProjectDependencies(targetWorkspace);
+    }
+
+    // Launch: code "<targetWorkspace>" "<absFilePath>"
+    std::string cmdParams = "/c code \"" + targetWorkspace.string() + "\" \"" + absFilePath.string() + "\"";
     HINSTANCE hInst = ShellExecuteA(NULL, "open", "cmd.exe", cmdParams.c_str(), NULL, SW_HIDE);
     if ((INT_PTR)hInst <= 32) {
         ShellExecuteA(NULL, "open", absFilePath.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
@@ -161,42 +336,712 @@ EngineUI::EngineUI() {
     g_pEngineUI = this;
     AddLog("LogInit", "Eunoia-Editor Initialized (DirectX 12)", 2);
     AddLog("LogD3D12", "Hardware Adapter: NVIDIA GeForce RTX 3060 Laptop GPU (Feature Level 12_1)", 0);
-    AddLog("LogWorld", "Default Level loaded with 5 initial Actors", 0);
 
-    // Set C:\Projects\Eunoia-Engine\Projects\test as root of project for Content Browser
-    std::filesystem::path targetRoot = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    // Setup default projects directory path for the project browser
+    std::filesystem::path defaultProjectsDir = "C:\\Projects\\Eunoia-Engine\\Projects";
     std::error_code ec;
-    if (!std::filesystem::exists(targetRoot, ec)) {
-        std::filesystem::create_directories(targetRoot, ec);
+    if (!std::filesystem::exists(defaultProjectsDir, ec)) {
+        std::filesystem::path altProjectsDir = std::filesystem::current_path() / "Projects";
+        if (std::filesystem::exists(altProjectsDir, ec)) {
+            defaultProjectsDir = altProjectsDir;
+        } else {
+            std::filesystem::create_directories(defaultProjectsDir, ec);
+        }
     }
-    contentRootPath = targetRoot;
-    currentContentPath = targetRoot;
-    TextureManager::Get().SetProjectRoot(contentRootPath);
+    strncpy(newProjectPathBuf, defaultProjectsDir.string().c_str(), sizeof(newProjectPathBuf) - 1);
 
-    // Ensure Materials folder exists in project
-    std::filesystem::path materialsDir = contentRootPath / "Materials";
-    if (!std::filesystem::exists(materialsDir, ec)) {
+    // Load recent projects list (needed by both standalone browser and in-editor browser)
+    LoadRecentProjects();
+
+    // Project Browser is NOT shown on startup — the standalone window handles it before the editor opens
+    showProjectBrowser = false;
+}
+
+void EngineUI::InitWithProject(const std::filesystem::path& projectPath, Scene& scene, OrbitCamera& camera) {
+    if (projectPath.empty()) {
+        // No project selected — show in-editor project browser as fallback
+        showProjectBrowser = true;
+
+        // Set a default project path so the editor doesn't crash
+        std::filesystem::path defaultProjectsDir = "C:\\Projects\\Eunoia-Engine\\Projects";
+        std::error_code ec;
+        if (!std::filesystem::exists(defaultProjectsDir, ec)) {
+            defaultProjectsDir = std::filesystem::current_path() / "Projects";
+        }
+        activeProjectRoot = defaultProjectsDir / "Default";
+        activeProjectName = "Default";
+        contentRootPath = activeProjectRoot / "Content";
+        std::filesystem::create_directories(contentRootPath, ec);
+        currentContentPath = contentRootPath;
+        TextureManager::Get().SetProjectRoot(contentRootPath);
+        AssetManager::Get().Initialize(contentRootPath);
+        LoadEditorConfig();
+        return;
+    }
+
+    // Load the selected project
+    LoadProject(projectPath, scene, camera);
+    AddLog("LogWorld", "Project loaded from standalone browser: " + activeProjectName, 2);
+}
+
+void EngineUI::LoadEditorConfig() {
+    if (activeProjectRoot.empty()) return;
+    std::filesystem::path configPath = activeProjectRoot / "Configs.Editor.econfigs";
+    std::error_code ec;
+    if (!std::filesystem::exists(configPath, ec)) {
+        // If config doesn't exist yet, save current defaults to create it in the project root
+        SaveEditorConfig();
+        return;
+    }
+
+    std::ifstream file(configPath);
+    if (!file.is_open()) return;
+
+    std::string line;
+    while (std::getline(file, line)) {
+        size_t eqPos = line.find('=');
+        if (eqPos == std::string::npos) continue;
+
+        std::string key = line.substr(0, eqPos);
+        std::string val = line.substr(eqPos + 1);
+
+        auto Trim = [](std::string& s) {
+            s.erase(0, s.find_first_not_of(" \t\r\n"));
+            size_t last = s.find_last_not_of(" \t\r\n");
+            if (last != std::string::npos) s.erase(last + 1);
+        };
+        Trim(key);
+        Trim(val);
+
+        try {
+            float fVal = std::stof(val);
+            if (key == "LeftSidebarWidth" || key == "leftSidebarWidth") {
+                leftSidebarWidth = std::clamp(fVal, 180.0f, 800.0f);
+            } else if (key == "RightSidebarWidth" || key == "rightSidebarWidth") {
+                rightSidebarWidth = std::clamp(fVal, 200.0f, 900.0f);
+            } else if (key == "BottomDockHeight" || key == "bottomDockHeight" || key == "BottomContentHeight") {
+                bottomDockHeight = std::clamp(fVal, 100.0f, 800.0f);
+            }
+        } catch (...) {
+            // Ignore format errors
+        }
+    }
+}
+
+void EngineUI::SaveEditorConfig() {
+    if (activeProjectRoot.empty()) return;
+    std::error_code ec;
+    if (!std::filesystem::exists(activeProjectRoot, ec)) return;
+
+    std::filesystem::path configPath = activeProjectRoot / "Configs.Editor.econfigs";
+    std::ofstream file(configPath);
+    if (!file.is_open()) return;
+
+    file << "[EditorLayout]\n";
+    file << "LeftSidebarWidth=" << leftSidebarWidth << "\n";
+    file << "RightSidebarWidth=" << rightSidebarWidth << "\n";
+    file << "BottomDockHeight=" << bottomDockHeight << "\n";
+    file.close();
+}
+
+// ================================================================================
+// STANDALONE PROJECT BROWSER WINDOW
+// Opens as a separate GLFW+OpenGL3 window BEFORE the main D3D12 editor.
+// Returns the selected/created project path, or empty if user closed without selecting.
+// ================================================================================
+
+// Forward-declare OpenGL and GLFW ImGui backends (compiled in Build.bat)
+#ifndef GLFW_EXPOSE_NATIVE_WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#endif
+#include <GLFW/glfw3.h>
+#include <GLFW/glfw3native.h>
+#include "backends/imgui_impl_glfw.h"
+#include "backends/imgui_impl_opengl3.h"
+
+// Helper: Apply the same dark theme as the editor
+static void ApplyProjectBrowserTheme() {
+    ImGuiStyle& style = ImGui::GetStyle();
+    style.WindowRounding = 0.0f;
+    style.FrameRounding = 4.0f;
+    style.GrabRounding = 3.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.TabRounding = 4.0f;
+    style.WindowPadding = ImVec2(16.0f, 14.0f);
+    style.FramePadding = ImVec2(8.0f, 5.0f);
+    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+
+    ImVec4* colors = style.Colors;
+    colors[ImGuiCol_WindowBg]       = ImVec4(0.10f, 0.10f, 0.13f, 1.00f);
+    colors[ImGuiCol_ChildBg]        = ImVec4(0.085f, 0.085f, 0.115f, 1.00f);
+    colors[ImGuiCol_Border]         = ImVec4(0.12f, 0.60f, 0.95f, 0.55f);
+    colors[ImGuiCol_FrameBg]        = ImVec4(0.14f, 0.14f, 0.18f, 1.00f);
+    colors[ImGuiCol_FrameBgHovered] = ImVec4(0.18f, 0.18f, 0.24f, 1.00f);
+    colors[ImGuiCol_FrameBgActive]  = ImVec4(0.22f, 0.22f, 0.30f, 1.00f);
+    colors[ImGuiCol_TitleBg]        = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+    colors[ImGuiCol_TitleBgActive]  = ImVec4(0.06f, 0.35f, 0.70f, 1.00f);
+    colors[ImGuiCol_Button]         = ImVec4(0.16f, 0.16f, 0.20f, 1.00f);
+    colors[ImGuiCol_ButtonHovered]  = ImVec4(0.10f, 0.50f, 0.90f, 0.80f);
+    colors[ImGuiCol_ButtonActive]   = ImVec4(0.08f, 0.50f, 0.90f, 1.00f);
+    colors[ImGuiCol_Header]         = ImVec4(0.14f, 0.14f, 0.14f, 0.80f);
+    colors[ImGuiCol_HeaderHovered]  = ImVec4(0.20f, 0.20f, 0.20f, 0.90f);
+    colors[ImGuiCol_HeaderActive]   = ImVec4(0.08f, 0.50f, 0.90f, 1.00f);
+    colors[ImGuiCol_Separator]      = ImVec4(0.12f, 0.12f, 0.12f, 0.80f);
+    colors[ImGuiCol_Text]           = ImVec4(0.92f, 0.93f, 0.95f, 1.00f);
+    colors[ImGuiCol_TextDisabled]   = ImVec4(0.45f, 0.47f, 0.50f, 1.00f);
+    colors[ImGuiCol_ScrollbarBg]    = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+    colors[ImGuiCol_ScrollbarGrab]  = ImVec4(0.25f, 0.25f, 0.30f, 1.00f);
+    colors[ImGuiCol_Tab]            = ImVec4(0.135f, 0.135f, 0.135f, 0.85f);
+    colors[ImGuiCol_TabHovered]     = ImVec4(0.210f, 0.210f, 0.210f, 0.95f);
+    colors[ImGuiCol_TabActive]      = ImVec4(0.080f, 0.500f, 0.900f, 1.00f);
+    colors[ImGuiCol_PopupBg]        = ImVec4(0.09f, 0.09f, 0.12f, 0.98f);
+}
+
+std::filesystem::path EngineUI::RunStandaloneProjectBrowser() {
+    // GLFW must already be initialized before calling this
+
+    // Create a dedicated OpenGL window for the project browser
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_API);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+
+    const int BROWSER_W = 860;
+    const int BROWSER_H = 580;
+
+    GLFWwindow* browserWindow = glfwCreateWindow(BROWSER_W, BROWSER_H, "Eunoia Engine - Project Browser", nullptr, nullptr);
+    if (!browserWindow) {
+        std::cerr << "[ProjectBrowser] Failed to create GLFW OpenGL window!\n";
+        return {};
+    }
+
+    glfwMakeContextCurrent(browserWindow);
+    glfwSwapInterval(1); // VSync on
+
+#ifdef _WIN32
+    HWND browserHwnd = glfwGetWin32Window(browserWindow);
+    if (browserHwnd) {
+        HICON hIconBig = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+        HICON hIconSmall = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+        if (!hIconBig) hIconBig = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1));
+        if (!hIconSmall) {
+            hIconSmall = (HICON)LoadImageA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1), IMAGE_ICON, 16, 16, 0);
+            if (!hIconSmall) hIconSmall = hIconBig;
+        }
+        if (hIconBig) SendMessageA(browserHwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+        if (hIconSmall) SendMessageA(browserHwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+    }
+#endif
+
+    // Center the window on the primary monitor
+    GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+    if (monitor) {
+        const GLFWvidmode* mode = glfwGetVideoMode(monitor);
+        if (mode) {
+            glfwSetWindowPos(browserWindow, (mode->width - BROWSER_W) / 2, (mode->height - BROWSER_H) / 2);
+        }
+    }
+
+    // Create a separate ImGui context for the project browser
+    IMGUI_CHECKVERSION();
+    ImGuiContext* browserCtx = ImGui::CreateContext();
+    ImGui::SetCurrentContext(browserCtx);
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
+
+    // Load font
+    ImFontConfig fontConfig;
+    fontConfig.OversampleH = 2;
+    fontConfig.OversampleV = 2;
+    ImFont* mainFont = nullptr;
+    if (std::filesystem::exists("C:\\Windows\\Fonts\\segoeui.ttf")) {
+        mainFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f, &fontConfig);
+    } else if (std::filesystem::exists("C:\\Windows\\Fonts\\arial.ttf")) {
+        mainFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\arial.ttf", 18.0f, &fontConfig);
+    }
+    if (mainFont && std::filesystem::exists("C:\\Windows\\Fonts\\seguisym.ttf")) {
+        ImFontConfig symbolConfig;
+        symbolConfig.MergeMode = true;
+        symbolConfig.OversampleH = 2;
+        symbolConfig.OversampleV = 2;
+        static const ImWchar symbolRanges[] = { 0x2000, 0x2BFF, 0 };
+        io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", 18.0f, &symbolConfig, symbolRanges);
+    }
+    if (!mainFont) {
+        io.Fonts->AddFontDefault();
+        io.FontGlobalScale = 1.25f;
+    }
+
+    ApplyProjectBrowserTheme();
+
+    ImGui_ImplGlfw_InitForOpenGL(browserWindow, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
+    // Project browser state
+    std::vector<ProjectEntry> projects;
+    char searchBuf[64] = "";
+    char newNameBuf[64] = "MyProject";
+    char newPathBuf[260] = "";
+    int selectedIdx = 0;
+    int activeTab = 0; // 0 = Recent, 1 = New
+
+    // Setup default path
+    std::filesystem::path defaultDir = "C:\\Projects\\Eunoia-Engine\\Projects";
+    std::error_code ec;
+    if (!std::filesystem::exists(defaultDir, ec)) {
+        defaultDir = std::filesystem::current_path() / "Projects";
+    }
+    strncpy(newPathBuf, defaultDir.string().c_str(), sizeof(newPathBuf) - 1);
+
+    // Load recent projects from config
+    std::filesystem::path cfgPath;
+    {
+        char* appdata = getenv("LOCALAPPDATA");
+        if (appdata) {
+            cfgPath = std::filesystem::path(appdata) / "EunoiaEngine" / "RecentProjects.json";
+        } else {
+            cfgPath = "RecentProjects.json";
+        }
+    }
+
+    if (std::filesystem::exists(cfgPath, ec)) {
+        std::ifstream f(cfgPath);
+        if (f.is_open()) {
+            try {
+                nlohmann::json j;
+                f >> j;
+                if (j.is_array()) {
+                    for (const auto& item : j) {
+                        if (item.contains("rootPath")) {
+                            ProjectEntry pe;
+                            pe.rootPath = item["rootPath"].get<std::string>();
+                            pe.name = item.value("name", std::filesystem::path(pe.rootPath).filename().string());
+                            pe.lastOpened = item.value("lastOpened", "");
+                            if (std::filesystem::exists(pe.rootPath, ec)) {
+                                projects.push_back(pe);
+                            }
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // Discover projects on disk
+    std::vector<std::filesystem::path> searchDirs = {
+        "C:\\Projects\\Eunoia-Engine\\Projects",
+        std::filesystem::current_path() / "Projects",
+        std::filesystem::current_path().parent_path() / "Projects"
+    };
+    for (const auto& dir : searchDirs) {
+        if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_directory(ec)) {
+                std::filesystem::path pRoot = entry.path();
+                bool alreadyIn = false;
+                for (const auto& r : projects) {
+                    if (std::filesystem::equivalent(std::filesystem::path(r.rootPath), pRoot, ec) || r.rootPath == pRoot.string()) {
+                        alreadyIn = true;
+                        break;
+                    }
+                }
+                if (!alreadyIn) {
+                    bool isProj = false;
+                    for (const auto& sub : std::filesystem::directory_iterator(pRoot, ec)) {
+                        if (sub.path().extension() == ".eproject" || sub.path().filename() == "Content") {
+                            isProj = true;
+                            break;
+                        }
+                    }
+                    if (isProj) {
+                        ProjectEntry pe;
+                        pe.name = pRoot.filename().string();
+                        pe.rootPath = pRoot.string();
+                        pe.lastOpened = "Discovered on disk";
+                        projects.push_back(pe);
+                    }
+                }
+            }
+        }
+    }
+
+    std::filesystem::path selectedProject;
+    bool shouldCreateNew = false;
+    std::string createParentDir, createProjName;
+
+    // Main event loop for the standalone project browser window
+    while (!glfwWindowShouldClose(browserWindow) && selectedProject.empty() && !shouldCreateNew) {
+        glfwPollEvents();
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        // Full-window project browser UI
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImVec2((float)BROWSER_W, (float)BROWSER_H));
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24.0f, 20.0f));
+
+        if (ImGui::Begin("##StandaloneProjectBrowser", nullptr, flags)) {
+            // Title Header
+            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "EUNOIA ENGINE");
+            ImGui::SameLine();
+            ImGui::TextDisabled(" Project Browser");
+            ImGui::Spacing();
+            ImGui::TextWrapped("Select an existing project or create a new empty game project to get started.");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Tab buttons
+            float tabW = 180.0f;
+            bool tab0Active = (activeTab == 0);
+            if (tab0Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+            std::string recentLabel = "Recent Projects (" + std::to_string(projects.size()) + ")";
+            if (ImGui::Button(recentLabel.c_str(), ImVec2(tabW, 32))) {
+                activeTab = 0;
+            }
+            if (tab0Active) ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            bool tab1Active = (activeTab == 1);
+            if (tab1Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+            if (ImGui::Button("New Project", ImVec2(tabW, 32))) {
+                activeTab = 1;
+            }
+            if (tab1Active) ImGui::PopStyleColor();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("|");
+            ImGui::SameLine();
+            if (ImGui::Button("Browse for Project...", ImVec2(170, 32))) {
+                std::string folder = ShowSelectFolderDialog(nullptr, "Select Existing Project Folder");
+                if (!folder.empty()) {
+                    selectedProject = folder;
+                }
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (activeTab == 0) {
+                // ============= RECENT PROJECTS TAB =============
+                ImGui::SetNextItemWidth((float)BROWSER_W - 230.0f);
+                ImGui::InputTextWithHint("##Filter", "Filter projects...", searchBuf, sizeof(searchBuf));
+                ImGui::SameLine();
+                if (ImGui::Button("Refresh", ImVec2(100, 0))) {
+                    // Re-scan (simplified)
+                }
+                ImGui::Spacing();
+
+                ImGui::BeginChild("ProjectList", ImVec2(0, (float)BROWSER_H - 280.0f), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+                if (projects.empty()) {
+                    ImGui::Spacing();
+                    ImGui::TextDisabled("No recent projects found.");
+                    ImGui::Text("Click 'New Project' to create your first game project!");
+                } else {
+                    for (size_t i = 0; i < projects.size(); ++i) {
+                        const auto& p = projects[i];
+
+                        // Search filter
+                        if (strlen(searchBuf) > 0) {
+                            std::string sLower = searchBuf;
+                            std::string nLower = p.name;
+                            for (auto& c : sLower) c = (char)tolower(c);
+                            for (auto& c : nLower) c = (char)tolower(c);
+                            if (nLower.find(sLower) == std::string::npos && p.rootPath.find(searchBuf) == std::string::npos)
+                                continue;
+                        }
+
+                        ImGui::PushID((int)i);
+                        bool isSelected = (selectedIdx == (int)i);
+
+                        if (isSelected) {
+                            ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.12f, 0.45f, 0.85f, 0.45f));
+                            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.16f, 0.52f, 0.95f, 0.65f));
+                        }
+
+                        if (ImGui::Selectable("##ProjSel", isSelected, ImGuiSelectableFlags_AllowDoubleClick, ImVec2(0, 48))) {
+                            selectedIdx = (int)i;
+                        }
+
+                        // Double-click to open
+                        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                            selectedProject = p.rootPath;
+                        }
+
+                        if (isSelected) {
+                            ImGui::PopStyleColor(2);
+                        }
+
+                        ImGui::SameLine(12.0f);
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(ImVec4(0.20f, 0.80f, 1.00f, 1.0f), "%s", p.name.c_str());
+                        ImGui::TextDisabled("Path: %s", p.rootPath.c_str());
+                        ImGui::EndGroup();
+
+                        if (!p.lastOpened.empty()) {
+                            ImGui::SameLine((float)BROWSER_W - 220.0f);
+                            ImGui::TextDisabled("%s", p.lastOpened.c_str());
+                        }
+
+                        ImGui::Separator();
+                        ImGui::PopID();
+                    }
+                }
+                ImGui::EndChild();
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                // Bottom actions
+                bool hasSelection = (selectedIdx >= 0 && selectedIdx < (int)projects.size());
+                if (!hasSelection) ImGui::BeginDisabled();
+                if (ImGui::Button("Open Selected Project", ImVec2(200, 34))) {
+                    if (hasSelection) {
+                        selectedProject = projects[selectedIdx].rootPath;
+                    }
+                }
+                if (!hasSelection) ImGui::EndDisabled();
+
+                ImGui::SameLine();
+                ImGui::TextDisabled("(Double-click a project to open immediately)");
+
+                ImGui::SameLine((float)BROWSER_W - 140.0f);
+                if (ImGui::Button("Quit", ImVec2(100, 34))) {
+                    glfwSetWindowShouldClose(browserWindow, GLFW_TRUE);
+                }
+
+            } else {
+                // ============= NEW PROJECT TAB =============
+                ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "Create New Game Project");
+                ImGui::TextDisabled("Set the project name and location. An empty project with Content folder will be created.");
+                ImGui::Spacing();
+
+                ImGui::Text("Project Name:");
+                ImGui::SetNextItemWidth(360.0f);
+                ImGui::InputText("##NewName", newNameBuf, sizeof(newNameBuf));
+                ImGui::Spacing();
+
+                ImGui::Text("Project Location (Parent Folder):");
+                ImGui::SetNextItemWidth(540.0f);
+                ImGui::InputText("##NewLoc", newPathBuf, sizeof(newPathBuf));
+                ImGui::SameLine();
+                if (ImGui::Button("Browse...", ImVec2(120, 0))) {
+                    std::string picked = ShowSelectFolderDialog(nullptr, "Select Folder for New Project");
+                    if (!picked.empty()) {
+                        strncpy(newPathBuf, picked.c_str(), sizeof(newPathBuf) - 1);
+                    }
+                }
+                ImGui::Spacing();
+
+                // Preview
+                std::filesystem::path targetDir = std::filesystem::path(newPathBuf) / newNameBuf;
+                ImGui::BeginChild("Preview", ImVec2(0, 140), true);
+                ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.25f, 1.0f), "Project Structure:");
+                ImGui::BulletText("Project Directory: %s", targetDir.string().c_str());
+                ImGui::BulletText("Content Root: %s", (targetDir / "Content").string().c_str());
+                ImGui::BulletText("Cooked Assets: %s", (targetDir / "Cooked").string().c_str());
+                ImGui::BulletText("Build Output: %s", (targetDir / "Build").string().c_str());
+                ImGui::BulletText("Template: Empty Project (Default Scene & Material)");
+                ImGui::EndChild();
+                ImGui::Spacing();
+
+                // Validation
+                bool nameValid = strlen(newNameBuf) > 0;
+                bool pathValid = strlen(newPathBuf) > 0;
+                bool targetExists = std::filesystem::exists(targetDir, ec);
+
+                if (!nameValid) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Please enter a project name.");
+                } else if (!pathValid) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Please select a valid directory.");
+                } else if (targetExists) {
+                    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "Folder already exists. Will initialize/load project.");
+                } else {
+                    ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "Ready to create empty project.");
+                }
+
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                bool canCreate = nameValid && pathValid;
+                if (!canCreate) ImGui::BeginDisabled();
+                if (ImGui::Button("Create Project", ImVec2(160, 36))) {
+                    shouldCreateNew = true;
+                    createParentDir = newPathBuf;
+                    createProjName = newNameBuf;
+                }
+                if (!canCreate) ImGui::EndDisabled();
+
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(100, 36))) {
+                    activeTab = 0;
+                }
+
+                ImGui::SameLine((float)BROWSER_W - 140.0f);
+                if (ImGui::Button("Quit", ImVec2(100, 36))) {
+                    glfwSetWindowShouldClose(browserWindow, GLFW_TRUE);
+                }
+            }
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+
+        ImGui::Render();
+
+        int fbW, fbH;
+        glfwGetFramebufferSize(browserWindow, &fbW, &fbH);
+
+        // We need the OpenGL functions. Since we use the ImGui OpenGL3 loader, gl functions are available.
+        typedef void (*PFNGLVIEWPORTPROC)(int, int, int, int);
+        typedef void (*PFNGLCLEARCOLORPROC)(float, float, float, float);
+        typedef void (*PFNGLCLEARPROC)(unsigned int);
+        auto glViewportFn = (PFNGLVIEWPORTPROC)glfwGetProcAddress("glViewport");
+        auto glClearColorFn = (PFNGLCLEARCOLORPROC)glfwGetProcAddress("glClearColor");
+        auto glClearFn = (PFNGLCLEARPROC)glfwGetProcAddress("glClear");
+
+        if (glViewportFn) glViewportFn(0, 0, fbW, fbH);
+        if (glClearColorFn) glClearColorFn(0.08f, 0.08f, 0.10f, 1.00f);
+        if (glClearFn) glClearFn(0x00004000); // GL_COLOR_BUFFER_BIT
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(browserWindow);
+    }
+
+    // Cleanup the standalone project browser window
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext(browserCtx);
+    glfwDestroyWindow(browserWindow);
+
+    // Reset GLFW hints for the main editor D3D12 window
+    glfwDefaultWindowHints();
+
+    // If user chose to create a new project, create the directory structure and return the path
+    if (shouldCreateNew && !createProjName.empty() && !createParentDir.empty()) {
+        std::filesystem::path root = std::filesystem::path(createParentDir) / createProjName;
+        std::filesystem::path contentDir = root / "Content";
+        std::filesystem::path materialsDir = contentDir / "Materials";
+        std::filesystem::path scenesDir = contentDir / "Scenes";
+        std::filesystem::path cookedDir = root / "Cooked";
+        std::filesystem::path buildDir = root / "Build";
+
+        std::filesystem::create_directories(contentDir, ec);
         std::filesystem::create_directories(materialsDir, ec);
+        std::filesystem::create_directories(scenesDir, ec);
+        std::filesystem::create_directories(cookedDir, ec);
+        std::filesystem::create_directories(buildDir, ec);
+
+        // Project descriptor file
+        std::filesystem::path projFile = root / (createProjName + ".eproject");
+        if (!std::filesystem::exists(projFile, ec)) {
+            std::ofstream pf(projFile);
+            if (pf.is_open()) {
+                nlohmann::json j;
+                j["name"] = createProjName;
+                j["version"] = "1.0.0";
+                j["engineVersion"] = "0.1.0";
+                j["contentDirectory"] = "Content";
+                j["defaultScene"] = "Content/Scenes/Main.escene";
+                pf << j.dump(4);
+                pf.close();
+            }
+        }
+
+        // Starter scene in Content/Scenes/Main.escene
+        // Starter scene in Content/Scenes/Main.escene (completely empty - no objects, no lights)
+        std::filesystem::path starterScenePath = scenesDir / "Main.escene";
+        if (!std::filesystem::exists(starterScenePath, ec)) {
+            Scene starterScene;
+            starterScene.Clear();
+            SceneSerializer::SaveScene(starterScene, starterScenePath.string());
+        }
+
+        // Starter material in Content/Materials/Default_Material.emat
+        std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
+        if (!std::filesystem::exists(defaultMatPath, ec)) {
+            MaterialAsset defaultMat;
+            defaultMat.name = "Default_Material";
+            defaultMat.filePath = defaultMatPath.string();
+            defaultMat.baseColor = glm::vec3(0.55f, 0.55f, 0.55f);
+            defaultMat.metallic = 0.0f;
+            defaultMat.roughness = 0.5f;
+            defaultMat.specular = 0.5f;
+            defaultMat.assetId = AssetID::CreateRandom();
+            defaultMat.virtualPath = "/Game/Materials/Default_Material";
+            SaveMaterialFile(defaultMatPath.string(), defaultMat);
+        }
+
+        // 4. Initial Configs.Editor.econfigs in project root
+        std::filesystem::path cfgPath = root / "Configs.Editor.econfigs";
+        if (!std::filesystem::exists(cfgPath, ec)) {
+            std::ofstream cf(cfgPath);
+            if (cf.is_open()) {
+                cf << "[EditorLayout]\n";
+                cf << "LeftSidebarWidth=280.0\n";
+                cf << "RightSidebarWidth=320.0\n";
+                cf << "BottomDockHeight=260.0\n";
+                cf.close();
+            }
+        }
+
+        // Update recent projects config
+        {
+            time_t now = time(nullptr);
+            char timeBuf[64];
+            strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M", localtime(&now));
+
+            // Read existing, prepend new entry, save
+            nlohmann::json arr = nlohmann::json::array();
+            nlohmann::json newEntry;
+            newEntry["name"] = createProjName;
+            newEntry["rootPath"] = root.string();
+            newEntry["lastOpened"] = timeBuf;
+            arr.push_back(newEntry);
+
+            // Copy over existing entries (skip duplicates)
+            if (std::filesystem::exists(cfgPath, ec)) {
+                std::ifstream existingFile(cfgPath);
+                if (existingFile.is_open()) {
+                    try {
+                        nlohmann::json existing;
+                        existingFile >> existing;
+                        if (existing.is_array()) {
+                            for (const auto& e : existing) {
+                                if (e.contains("rootPath") && e["rootPath"].get<std::string>() != root.string()) {
+                                    arr.push_back(e);
+                                }
+                            }
+                        }
+                    } catch (...) {}
+                }
+            }
+
+            std::filesystem::create_directories(cfgPath.parent_path(), ec);
+            std::ofstream cfgOut(cfgPath);
+            if (cfgOut.is_open()) {
+                cfgOut << arr.dump(4);
+                cfgOut.close();
+            }
+        }
+
+        selectedProject = root;
     }
 
-    // Ensure Default_Material.emat exists in gray color
-    std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
-    if (!std::filesystem::exists(defaultMatPath, ec)) {
-        MaterialAsset defaultMat;
-        defaultMat.name = "Default_Material";
-        defaultMat.filePath = defaultMatPath.string();
-        defaultMat.baseColor = glm::vec3(0.55f, 0.55f, 0.55f);
-        defaultMat.metallic = 0.0f;
-        defaultMat.roughness = 0.5f;
-        defaultMat.specular = 0.5f;
-        defaultMat.assetId = AssetID::CreateRandom();
-        defaultMat.virtualPath = "/Game/Materials/Default_Material";
-        SaveMaterialFile(defaultMatPath.string(), defaultMat);
-    }
-
-    // Initialize Asset System (dev.md Section 7, 9)
-    AssetManager::Get().Initialize(contentRootPath);
-    AddLog("LogAsset", "Asset Registry initialized: " + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets registered with stable AssetIDs", 2);
+    return selectedProject;
 }
 
 void EngineUI::OpenReferenceViewer(const AssetID& id) {
@@ -307,6 +1152,313 @@ bool EngineUI::OpenLevelFromPath(Scene& level, const std::string& filePath) {
     }
 }
 
+std::string EngineUI::ShowSelectFolderDialog(void* owner, const std::string& title) {
+    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    BROWSEINFOA bi = { 0 };
+    bi.hwndOwner = (HWND)owner;
+    bi.lpszTitle = title.c_str();
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    LPITEMIDLIST pidl = SHBrowseForFolderA(&bi);
+    std::string result = "";
+    if (pidl != 0) {
+        char path[MAX_PATH];
+        if (SHGetPathFromIDListA(pidl, path)) {
+            result = std::string(path);
+        }
+        IMalloc* imalloc = nullptr;
+        if (SUCCEEDED(SHGetMalloc(&imalloc)) && imalloc) {
+            imalloc->Free(pidl);
+            imalloc->Release();
+        }
+    }
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
+    }
+    return result;
+}
+
+std::string EngineUI::ShowOpenProjectFileDialog() {
+    OPENFILENAMEA ofn;
+    char szFile[260] = {0};
+    ZeroMemory(&ofn, sizeof(ofn));
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = szFile;
+    ofn.nMaxFile = sizeof(szFile);
+    ofn.lpstrFilter = "Eunoia Project (*.eproject)\0*.eproject\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 1;
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->activeProjectRoot.empty()) ? g_pEngineUI->activeProjectRoot.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameA(&ofn) == TRUE) {
+        return std::string(ofn.lpstrFile);
+    }
+    return "";
+}
+
+static std::filesystem::path GetRecentProjectsConfigPath() {
+    char* appdata = getenv("LOCALAPPDATA");
+    if (appdata) {
+        std::filesystem::path p = std::filesystem::path(appdata) / "EunoiaEngine" / "RecentProjects.json";
+        std::error_code ec;
+        std::filesystem::create_directories(p.parent_path(), ec);
+        return p;
+    }
+    return "RecentProjects.json";
+}
+
+void EngineUI::LoadRecentProjects() {
+    recentProjects.clear();
+    std::error_code ec;
+
+    // 1. Try reading from config file
+    std::filesystem::path cfgPath = GetRecentProjectsConfigPath();
+    if (std::filesystem::exists(cfgPath, ec)) {
+        std::ifstream f(cfgPath);
+        if (f.is_open()) {
+            try {
+                nlohmann::json j;
+                f >> j;
+                if (j.is_array()) {
+                    for (const auto& item : j) {
+                        if (item.contains("rootPath")) {
+                            ProjectEntry pe;
+                            pe.rootPath = item["rootPath"].get<std::string>();
+                            pe.name = item.value("name", std::filesystem::path(pe.rootPath).filename().string());
+                            pe.lastOpened = item.value("lastOpened", "");
+                            if (std::filesystem::exists(pe.rootPath, ec)) {
+                                recentProjects.push_back(pe);
+                            }
+                        }
+                    }
+                }
+            } catch (...) {}
+        }
+    }
+
+    // 2. Discover existing projects in known directories
+    std::vector<std::filesystem::path> searchDirs = {
+        "C:\\Projects\\Eunoia-Engine\\Projects",
+        std::filesystem::current_path() / "Projects",
+        std::filesystem::current_path().parent_path() / "Projects"
+    };
+
+    for (const auto& dir : searchDirs) {
+        if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) continue;
+        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+            if (entry.is_directory(ec)) {
+                std::filesystem::path pRoot = entry.path();
+                bool alreadyIn = false;
+                for (const auto& r : recentProjects) {
+                    if (std::filesystem::equivalent(std::filesystem::path(r.rootPath), pRoot, ec) || r.rootPath == pRoot.string()) {
+                        alreadyIn = true;
+                        break;
+                    }
+                }
+                if (!alreadyIn) {
+                    bool isProj = false;
+                    for (const auto& sub : std::filesystem::directory_iterator(pRoot, ec)) {
+                        if (sub.path().extension() == ".eproject" || sub.path().filename() == "Content" || sub.path().filename() == "Scenes" || sub.path().filename() == "Materials") {
+                            isProj = true;
+                            break;
+                        }
+                    }
+                    if (isProj) {
+                        ProjectEntry pe;
+                        pe.name = pRoot.filename().string();
+                        pe.rootPath = pRoot.string();
+                        pe.lastOpened = "Discovered on disk";
+                        recentProjects.push_back(pe);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void EngineUI::SaveRecentProjects() {
+    std::filesystem::path cfgPath = GetRecentProjectsConfigPath();
+    std::ofstream f(cfgPath);
+    if (!f.is_open()) return;
+
+    nlohmann::json arr = nlohmann::json::array();
+    for (const auto& p : recentProjects) {
+        nlohmann::json item;
+        item["name"] = p.name;
+        item["rootPath"] = p.rootPath;
+        item["lastOpened"] = p.lastOpened;
+        arr.push_back(item);
+    }
+    f << arr.dump(4);
+    f.close();
+}
+
+bool EngineUI::CreateNewProject(const std::string& parentDir, const std::string& projName, Scene& scene, OrbitCamera& camera) {
+    if (projName.empty()) {
+        AddLog("LogProject", "Failed to create project: Project name cannot be empty!", 3);
+        return false;
+    }
+    if (parentDir.empty()) {
+        AddLog("LogProject", "Failed to create project: Directory path cannot be empty!", 3);
+        return false;
+    }
+
+    std::filesystem::path root = std::filesystem::path(parentDir) / projName;
+    std::error_code ec;
+
+    // 1. Create project directories
+    // Content browser root is inside project folder called Content
+    std::filesystem::path contentDir = root / "Content";
+    std::filesystem::path materialsDir = contentDir / "Materials";
+    std::filesystem::path scenesDir = contentDir / "Scenes";
+    std::filesystem::path cookedDir = root / "Cooked";
+    std::filesystem::path buildDir = root / "Build";
+
+    std::filesystem::create_directories(contentDir, ec);
+    std::filesystem::create_directories(materialsDir, ec);
+    std::filesystem::create_directories(scenesDir, ec);
+    std::filesystem::create_directories(cookedDir, ec);
+    std::filesystem::create_directories(buildDir, ec);
+
+    // 2. Starter material in Content/Materials
+    std::filesystem::path defaultMatPath = materialsDir / "Default_Material.emat";
+    if (!std::filesystem::exists(defaultMatPath, ec)) {
+        MaterialAsset defaultMat;
+        defaultMat.name = "Default_Material";
+        defaultMat.filePath = defaultMatPath.string();
+        defaultMat.baseColor = glm::vec3(0.55f, 0.55f, 0.55f);
+        defaultMat.metallic = 0.0f;
+        defaultMat.roughness = 0.5f;
+        defaultMat.specular = 0.5f;
+        defaultMat.assetId = AssetID::CreateRandom();
+        defaultMat.virtualPath = "/Game/Materials/Default_Material";
+        SaveMaterialFile(defaultMatPath.string(), defaultMat);
+    }
+
+    // 3. Starter scene in Content/Scenes (completely empty - no objects, no lights)
+    std::filesystem::path starterScenePath = scenesDir / "Main.escene";
+    if (!std::filesystem::exists(starterScenePath, ec)) {
+        Scene starterScene;
+        starterScene.Clear();
+        SceneSerializer::SaveScene(starterScene, starterScenePath.string());
+    }
+
+    // 4. Project descriptor file <ProjectName>.eproject
+    std::filesystem::path projFile = root / (projName + ".eproject");
+    std::ofstream pf(projFile);
+    if (pf.is_open()) {
+        nlohmann::json j;
+        j["name"] = projName;
+        j["version"] = "1.0.0";
+        j["engineVersion"] = "0.1.0";
+        j["contentDirectory"] = "Content";
+        j["defaultScene"] = "Content/Scenes/Main.escene";
+        pf << j.dump(4);
+        pf.close();
+    }
+
+    // 5. Setup Project Dependencies & VS Code configuration
+    SetupProjectDependencies(root);
+
+    AddLog("LogProject", "Created new empty project: " + projName + " at " + root.string(), 2);
+    return LoadProject(root, scene, camera);
+}
+
+bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, OrbitCamera& camera) {
+    std::error_code ec;
+    if (!std::filesystem::exists(projRoot, ec)) {
+        AddLog("LogProject", "Failed to open project: directory does not exist: " + projRoot.string(), 3);
+        return false;
+    }
+
+    activeProjectRoot = std::filesystem::absolute(projRoot);
+    activeProjectName = activeProjectRoot.filename().string();
+    LoadEditorConfig();
+    SetupProjectDependencies(activeProjectRoot);
+
+    // The in-engine-editor content browser root is inside project's folder called Content!
+    contentRootPath = activeProjectRoot / "Content";
+    if (!std::filesystem::exists(contentRootPath, ec)) {
+        std::filesystem::create_directories(contentRootPath, ec);
+    }
+    currentContentPath = contentRootPath;
+    currentVirtualDir = "/Game";
+    selectedContentItem = "";
+
+    // Re-initialize subsystems with new content root
+    TextureManager::Get().SetProjectRoot(contentRootPath);
+    AssetManager::Get().Initialize(contentRootPath);
+    AssetRegistry::Get().ScanDirectory(contentRootPath);
+
+    // Scan and register all behaviour scripts in Content before loading the scene
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(contentRootPath, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (!entry.is_directory(ec) && entry.path().extension() == ".cpp") {
+            std::string pStr = entry.path().string();
+            std::string pLower = pStr;
+            std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+            if (pLower.find(".assetmeta") == std::string::npos && pLower.find(".meta") == std::string::npos) {
+                std::string stem = entry.path().stem().string();
+                if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" &&
+                    stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
+                    BehaviourRegistry::Get().RegisterScriptFile(stem, pStr);
+                }
+            }
+        }
+    }
+
+    // Load project's initial scene
+    std::filesystem::path mainScene = contentRootPath / "Scenes" / "Main.escene";
+    if (std::filesystem::exists(mainScene, ec)) {
+        OpenLevelFromPath(scene, mainScene.string());
+    } else {
+        bool found = false;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(contentRootPath, std::filesystem::directory_options::skip_permission_denied, ec)) {
+            if (entry.is_regular_file(ec)) {
+                std::string ext = entry.path().extension().string();
+                if (ext == ".escene" || ext == ".elevel") {
+                    OpenLevelFromPath(scene, entry.path().string());
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            scene.Clear();
+            currentLevelFilePath = "";
+        }
+    }
+
+    camera.target = glm::vec3(0.0f, 0.5f, 0.0f);
+    camera.distance = 7.0f;
+    camera.yaw = 45.0f;
+    camera.pitch = 25.0f;
+
+    // Update recent projects history
+    time_t now = time(nullptr);
+    char timeBuf[64];
+    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M", localtime(&now));
+
+    for (auto it = recentProjects.begin(); it != recentProjects.end();) {
+        if (std::filesystem::equivalent(std::filesystem::path(it->rootPath), activeProjectRoot, ec) || it->rootPath == activeProjectRoot.string()) {
+            it = recentProjects.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    ProjectEntry pe;
+    pe.name = activeProjectName;
+    pe.rootPath = activeProjectRoot.string();
+    pe.lastOpened = timeBuf;
+    recentProjects.insert(recentProjects.begin(), pe);
+    SaveRecentProjects();
+
+    showProjectBrowser = false;
+    AddLog("LogProject", "Opened project '" + activeProjectName + "' [Content Root: " + contentRootPath.string() + "]", 2);
+
+    return true;
+}
+
 std::string EngineUI::ShowSaveFileDialog() {
     OPENFILENAMEA ofn;
     char szFile[260] = {0};
@@ -319,7 +1471,8 @@ std::string EngineUI::ShowSaveFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
     if (GetSaveFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -339,7 +1492,8 @@ std::string EngineUI::ShowOpenFileDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -359,7 +1513,8 @@ std::string EngineUI::ShowOpenMeshDialog() {
     ofn.nFilterIndex = 1;
     ofn.lpstrFileTitle = NULL;
     ofn.nMaxFileTitle = 0;
-    ofn.lpstrInitialDir = "C:\\Projects\\Eunoia-Engine\\Projects\\test";
+    std::string initDir = (g_pEngineUI && !g_pEngineUI->contentRootPath.empty()) ? g_pEngineUI->contentRootPath.string() : "C:\\Projects\\Eunoia-Engine\\Projects";
+    ofn.lpstrInitialDir = initDir.c_str();
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
     if (GetOpenFileNameA(&ofn) == TRUE) {
         return std::string(ofn.lpstrFile);
@@ -640,6 +1795,30 @@ void EngineUI::SetupTheme() {
 }
 
 void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit) {
+    if (isGameOnlyWindow) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            outShouldExit = true;
+        }
+
+        // Render on-screen prints / HUD in game window
+        RenderScreenPrintOverlay(24.0f, 24.0f);
+
+        // Render subtle top-right exit hint
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        if (vp) {
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 260.0f, vp->WorkPos.y + 16.0f));
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGuiWindowFlags hintFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+            if (ImGui::Begin("##GameWindowHint", nullptr, hintFlags)) {
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.92f, 0.75f), "Game Mode | Press ESC to Exit");
+            }
+            ImGui::End();
+        }
+        return;
+    }
+
     currentCamera = &camera;
     if (!scene.onPreChange) {
         scene.onPreChange = [&scene](const std::string& action) {
@@ -649,9 +1828,32 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
 
     ImGuizmo::BeginFrame();
 
+    // Flush asynchronous compilation logs
+    {
+        std::lock_guard<std::mutex> lock(asyncLogMutex);
+        if (!pendingAsyncLogs.empty()) {
+            for (const auto& logEntry : pendingAsyncLogs) {
+                AddLog(logEntry.category, logEntry.message, logEntry.level);
+            }
+            pendingAsyncLogs.clear();
+        }
+    }
+
+    // Periodic check for behaviour script modifications (User Request: ask as compile or later)
+    scriptWatchTimer += (frameTimeMs * 0.001f);
+    if (scriptWatchTimer >= 0.5f) {
+        scriptWatchTimer = 0.0f;
+        CheckForScriptChanges();
+    }
+
     // Unreal Keyboard Shortcuts (when not typing and not currently in free fly mode)
     // During Play Mode, suppress editor shortcuts so gameplay input is uninterrupted (dev.md §54)
     if (!ImGui::GetIO().WantTextInput && !camera.isFlying && !scene.isPlayMode) {
+        // F7: Compile Behaviour Scripts
+        if (ImGui::IsKeyPressed(ImGuiKey_F7) && !isCompilingScripts) {
+            TriggerCompileScripts(&scene);
+        }
+
         // F: Focus selected actor
         if (ImGui::IsKeyPressed(ImGuiKey_F) && scene.selectedId != -1) {
             GameObject* obj = scene.GetSelected();
@@ -748,10 +1950,10 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         }
     }
 
-    // Play Mode Presentation & Stop-on-Delete / Stop-on-Escape (dev.md Section 32, 34)
+    // Play Mode Presentation & Stop-on-Delete (User Request: ESC does not exit game mode)
     if (scene.isPlayMode) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
-            InputSystem::Get().IsKeyPressed(Key::Delete) || InputSystem::Get().IsKeyPressed(Key::Escape)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) ||
+            InputSystem::Get().IsKeyPressed(Key::Delete)) {
             ExitPlayMode(scene);
             return;
         }
@@ -763,9 +1965,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         if (ImGui::Begin("##PlayModeBanner", nullptr, playFlags)) {
             ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ GAME VIEW (PLAY MODE)");
             ImGui::SameLine();
-            ImGui::TextDisabled("| Press [ESC] or [DELETE] to Stop");
+            ImGui::TextDisabled("| Press [DELETE] or click Stop to exit");
             ImGui::SameLine();
-            if (ImGui::Button("⏹ Stop (ESC)")) {
+            if (ImGui::Button("⏹ Stop")) {
                 ExitPlayMode(scene);
                 ImGui::End();
                 return;
@@ -814,6 +2016,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         RenderContentBrowser(scene);
     }
 
+    // Dynamic splitters to resize Left Sidebar, Right Sidebar, and Bottom Content Browser
+    RenderLayoutSplitters();
+
     // 5. Central 3D Viewport Overlay & Drop Target
     if (showViewportOverlay) {
         RenderViewportOverlay(scene, camera, fps, frameTimeMs);
@@ -822,6 +2027,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
 
     if (showHelpModal) {
         RenderHelpModal();
+    }
+    if (showClusterCullingStats) {
+        RenderClusterCullingStats(scene);
     }
 
     // 6. Material Editor Window (Opened via double-click on material in Content Browser)
@@ -843,6 +2051,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     if (showCodeEditor) {
         RenderCodeEditor();
     }
+
+    // 10. Behaviour Script Change & Compilation Prompt (User Request: ask as compile or later)
+    RenderScriptCompileModal(scene);
 
     // Undo History Window (52 steps capacity)
     if (showUndoHistory) {
@@ -879,30 +2090,237 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     // 10. Futuristic Loading Progress Modal (all loading situations)
     RenderLoadingModal();
 
+    // 11. Project Browser Dialog Window (Startup & On-Demand)
+    RenderProjectBrowser(scene, camera);
+
+    // 12. Custom Window Frame Perimeter Border (when not maximized and not in immersive mode)
+    bool isMax = false;
+#ifdef _WIN32
+    if (m_window) {
+        HWND hwnd = glfwGetWin32Window(m_window);
+        if (hwnd) isMax = (IsZoomed(hwnd) != 0);
+    }
+#endif
+    if (!isMax && !isImmersiveMode) {
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        fg->AddRect(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y),
+                    IM_COL32(48, 52, 64, 255), 0.0f, 0, 1.0f);
+    }
+
     s_justExitedPlayMode = false;
 }
 
 void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
+    RenderCustomTitleBar(scene, outShouldExit);
+    RenderMainMenuBar(scene, camera, outShouldExit);
+}
+
+void EngineUI::RenderCustomTitleBar(Scene& scene, bool& outShouldExit) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
+    float titleBarH = 32.0f;
     float topBarW = vp->Size.x;
 
     ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(topBarW, topBarHeight), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(topBarW, titleBarH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                            ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.065f, 0.070f, 0.088f, 1.0f));
+
+    if (ImGui::Begin("##CustomTitleBar", nullptr, flags)) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImVec2 mousePos = ImGui::GetIO().MousePos;
+        bool mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        bool mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+
+        HWND hwnd = nullptr;
+        bool isMaximized = false;
+#ifdef _WIN32
+        if (m_window) {
+            hwnd = glfwGetWin32Window(m_window);
+            if (hwnd) {
+                isMaximized = (IsZoomed(hwnd) != 0);
+            }
+        }
+#endif
+
+        // Vertically center content in 32px title bar
+        ImGui::SetCursorPosY(5.0f);
+
+        // 1. Engine Logo & Brand Badge
+        if (engineIconGpuHandle) {
+            ImGui::Image((ImTextureID)engineIconGpuHandle, ImVec2(18.0f, 18.0f));
+            ImGui::SameLine(0.0f, 6.0f);
+        }
+        ImGui::TextColored(ImVec4(0.12f, 0.72f, 1.00f, 1.0f), "[Eunoia]");
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        // 2. Project Name & Active Level
+        std::string titleStr = "Eunoia Engine";
+        if (!activeProjectName.empty()) {
+            titleStr += "  —  " + activeProjectName;
+        }
+        if (!currentLevelFilePath.empty()) {
+            std::string lvl = std::filesystem::path(currentLevelFilePath).stem().string();
+            titleStr += "  [" + lvl + (levelUnsaved ? " *" : "") + "]";
+        } else {
+            titleStr += "  [Untitled Level" + std::string(levelUnsaved ? " *" : "") + "]";
+        }
+        ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.92f, 1.0f), "%s", titleStr.c_str());
+
+        // 3. Play Mode Indicator
+        if (scene.isPlayMode) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.20f, 0.88f, 0.40f, 1.0f), "● PLAY MODE");
+        }
+
+        // 4. Custom Window Frame Control Buttons (Minimize, Maximize/Restore, Close)
+        float btnAreaW = 138.0f;
+        float btnY = vp->Pos.y;
+        float btnH = titleBarH;
+
+        // Button bounding boxes
+        ImVec2 minMin(vp->Pos.x + topBarW - btnAreaW, btnY);
+        ImVec2 minMax(minMin.x + 44.0f, btnY + btnH);
+        bool minHovered = (mousePos.x >= minMin.x && mousePos.x < minMax.x &&
+                           mousePos.y >= minMin.y && mousePos.y < minMax.y);
+
+        ImVec2 maxMin(minMin.x + 44.0f, btnY);
+        ImVec2 maxMax(maxMin.x + 44.0f, btnY + btnH);
+        bool maxHovered = (mousePos.x >= maxMin.x && mousePos.x < maxMax.x &&
+                           mousePos.y >= maxMin.y && mousePos.y < maxMax.y);
+
+        ImVec2 clsMin(maxMin.x + 44.0f, btnY);
+        ImVec2 clsMax(clsMin.x + 50.0f, btnY + btnH);
+        bool clsHovered = (mousePos.x >= clsMin.x && mousePos.x < clsMax.x &&
+                           mousePos.y >= clsMin.y && mousePos.y < clsMax.y);
+
+        bool anyBtnHovered = minHovered || maxHovered || clsHovered;
+
+        // --- Minimize Button ---
+        if (minHovered) {
+            dl->AddRectFilled(minMin, minMax, mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200));
+        }
+        float minCx = (minMin.x + minMax.x) * 0.5f;
+        float minCy = (minMin.y + minMax.y) * 0.5f;
+        dl->AddLine(ImVec2(minCx - 5.0f, minCy), ImVec2(minCx + 5.0f, minCy), IM_COL32(210, 215, 225, 255), 1.5f);
+
+        if (minHovered && mouseClicked) {
+            if (m_window) {
+                glfwIconifyWindow(m_window);
+            }
+        }
+
+        // --- Maximize / Restore Button ---
+        if (maxHovered) {
+            dl->AddRectFilled(maxMin, maxMax, mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200));
+        }
+        float maxCx = (maxMin.x + maxMax.x) * 0.5f;
+        float maxCy = (maxMin.y + maxMax.y) * 0.5f;
+        if (isMaximized) {
+            // Overlapping boxes (Restore icon)
+            dl->AddRect(ImVec2(maxCx - 3.0f, maxCy - 6.0f), ImVec2(maxCx + 5.0f, maxCy + 2.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.2f);
+            ImU32 fillCol = maxHovered ? (mouseDown ? IM_COL32(40, 44, 55, 255) : IM_COL32(55, 60, 75, 200)) : IM_COL32(17, 18, 23, 255);
+            dl->AddRectFilled(ImVec2(maxCx - 5.0f, maxCy - 3.0f), ImVec2(maxCx + 3.0f, maxCy + 5.0f), fillCol);
+            dl->AddRect(ImVec2(maxCx - 5.0f, maxCy - 3.0f), ImVec2(maxCx + 3.0f, maxCy + 5.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.2f);
+        } else {
+            // Single square box (Maximize icon)
+            dl->AddRect(ImVec2(maxCx - 5.0f, maxCy - 5.0f), ImVec2(maxCx + 5.0f, maxCy + 5.0f), IM_COL32(210, 215, 225, 255), 0.0f, 0, 1.5f);
+        }
+
+        if (maxHovered && mouseClicked) {
+#ifdef _WIN32
+            if (hwnd) {
+                if (isMaximized) ShowWindow(hwnd, SW_RESTORE);
+                else ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+#else
+            if (m_window) {
+                if (isMaximized) glfwRestoreWindow(m_window);
+                else glfwMaximizeWindow(m_window);
+            }
+#endif
+        }
+
+        // --- Close Button ---
+        if (clsHovered) {
+            dl->AddRectFilled(clsMin, clsMax, mouseDown ? IM_COL32(190, 15, 25, 255) : IM_COL32(232, 17, 35, 255));
+        }
+        float clsCx = (clsMin.x + clsMax.x) * 0.5f;
+        float clsCy = (clsMin.y + clsMax.y) * 0.5f;
+        ImU32 crossColor = clsHovered ? IM_COL32(255, 255, 255, 255) : IM_COL32(210, 215, 225, 255);
+        dl->AddLine(ImVec2(clsCx - 5.0f, clsCy - 5.0f), ImVec2(clsCx + 5.0f, clsCy + 5.0f), crossColor, 1.5f);
+        dl->AddLine(ImVec2(clsCx + 5.0f, clsCy - 5.0f), ImVec2(clsCx - 5.0f, clsCy + 5.0f), crossColor, 1.5f);
+
+        if (clsHovered && mouseClicked) {
+            outShouldExit = true;
+        }
+
+        // --- Window Dragging & Double-Click Maximize ---
+#ifdef _WIN32
+        bool titleBarHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+        if (titleBarHovered && !anyBtnHovered && !ImGui::IsAnyItemHovered() && !ImGui::IsAnyItemActive()) {
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (hwnd) {
+                    if (isMaximized) ShowWindow(hwnd, SW_RESTORE);
+                    else ShowWindow(hwnd, SW_MAXIMIZE);
+                }
+            } else if (mouseClicked) {
+                if (hwnd) {
+                    ReleaseCapture();
+                    SendMessage(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    ImGui::GetIO().MouseDown[0] = false;
+                }
+            }
+        }
+#endif
+
+        // Subtle bottom border line under title bar
+        dl->AddLine(ImVec2(vp->Pos.x, vp->Pos.y + titleBarH),
+                    ImVec2(vp->Pos.x + topBarW, vp->Pos.y + titleBarH),
+                    IM_COL32(35, 38, 48, 255), 1.0f);
+    }
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(3);
+}
+
+void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit) {
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    float topBarW = vp->Size.x;
+    float titleBarH = 32.0f;
+    float menuBarH = topBarHeight - titleBarH;
+
+    ImGui::SetNextWindowPos(ImVec2(vp->Pos.x, vp->Pos.y + titleBarH), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(topBarW, menuBarH), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                             ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_MenuBar;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 4.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
     if (ImGui::Begin("Menu Bar", nullptr, flags)) {
         if (ImGui::BeginMenuBar()) {
-            // Eunoia Brand Badge
-            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "[Eunoia]");
-            ImGui::SameLine();
 
             // Menu Bar Dropdowns
             if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("📁 Project Browser...", "Ctrl+Shift+P")) {
+                    showProjectBrowser = true;
+                    projectBrowserTab = 0;
+                }
+                if (ImGui::MenuItem("➕ New Project...")) {
+                    showProjectBrowser = true;
+                    projectBrowserTab = 1;
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("New Level", "Ctrl+N")) {
                     scene.Clear();
                     currentLevelFilePath = "";
@@ -980,6 +2398,24 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 ImGui::MenuItem("Details (Right Sidebar)", nullptr, &showDetails);
                 ImGui::MenuItem("Content Browser (Bottom Dock)", nullptr, &showBottomDrawer);
                 ImGui::MenuItem("Viewport Overlay", nullptr, &showViewportOverlay);
+                if (ImGui::BeginMenu("Editor Gizmos")) {
+                    ImGui::MenuItem("Show Light Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightGizmos);
+                    ImGui::MenuItem("Show Camera Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraGizmos);
+                    ImGui::Separator();
+                    ImGui::MenuItem("Show Light Ranges", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightRanges);
+                    ImGui::MenuItem("Show Light Directions", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightDirections);
+                    ImGui::MenuItem("Show Camera Frustums", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraFrustums);
+                    ImGui::MenuItem("Show Clip Planes", nullptr, &Eunoia::EditorGizmoSystem::Get().showClipPlanes);
+                    ImGui::EndMenu();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("↺ Reset Layout to Default")) {
+                    leftSidebarWidth = 280.0f;
+                    rightSidebarWidth = 320.0f;
+                    bottomDockHeight = 260.0f;
+                    SaveEditorConfig();
+                    AddLog("LogEditor", "Reset editor layout to defaults (280 / 320 / 260)", 0);
+                }
                 ImGui::Separator();
                 ImGui::MenuItem("📜 Undo History (52 Steps)", nullptr, &showUndoHistory);
                 ImGui::MenuItem("🎨 Material Editor", nullptr, &showMaterialEditor);
@@ -1041,14 +2477,19 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
             }
 
             if (ImGui::BeginMenu("Build")) {
+                if (ImGui::MenuItem("⚡ Compile Behaviour Scripts", "F7", false, !isCompilingScripts)) {
+                    TriggerCompileScripts(&scene);
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("🎮 Build Game Project (Stand-Alone)")) {
-                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+                    std::filesystem::path gameBuildDir = projectBase / "Build";
                     std::error_code ec;
                     std::filesystem::create_directories(gameBuildDir, ec);
 
                     // 1. Cook assets to <Project>/Cooked
                     std::string cookLog;
-                    std::filesystem::path cookedDir = contentRootPath / "Cooked";
+                    std::filesystem::path cookedDir = projectBase / "Cooked";
                     AssetManager::Get().CookProject(cookedDir, cookLog);
 
                     // Helper to copy directory recursively
@@ -1110,7 +2551,7 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                     }
 
                     // 6. Copy or verify game executable
-                    std::string projName = contentRootPath.filename().string();
+                    std::string projName = projectBase.filename().string();
                     std::filesystem::path gameExe = gameBuildDir / (projName + ".exe");
                     if (!std::filesystem::exists(gameExe, ec)) {
                         if (std::filesystem::exists(gameBuildDir / "test.exe", ec)) {
@@ -1133,8 +2574,12 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
                 if (ImGui::MenuItem("📦 Cook Project Assets")) {
                     OpenCookModal();
                 }
+                if (ImGui::MenuItem("🖥️ Launch Game in Separate Window")) {
+                    LaunchGameSeparateWindow(scene);
+                }
                 if (ImGui::MenuItem("📂 Open Project Build Folder")) {
-                    std::filesystem::path gameBuildDir = contentRootPath / "Build";
+                    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+                    std::filesystem::path gameBuildDir = projectBase / "Build";
                     ShellExecuteA(NULL, "open", gameBuildDir.string().c_str(), NULL, NULL, SW_SHOW);
                 }
                 ImGui::EndMenu();
@@ -1216,19 +2661,36 @@ void EngineUI::RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShou
 
             ImGui::TextDisabled("|");
 
-            // PIE Controls (Play In Editor) (dev.md Section 30-36)
-            ImGui::PushStyleColor(ImGuiCol_Button, scene.isPlayMode ? ImVec4(0.18f, 0.75f, 0.32f, 1.0f) : ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
-            if (ImGui::Button("▶ Play")) {
-                EnterPlayMode(scene);
+            // External Window Game Mode Controls (User Request: Only external window supported)
+            bool isExternalGameRunning = IsExternalGameRunning();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, isExternalGameRunning ? ImVec4(0.18f, 0.75f, 0.32f, 1.0f) : ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
+            if (ImGui::Button(isExternalGameRunning ? "▶ Playing in Window" : "▶ Play")) {
+                if (!isExternalGameRunning) {
+                    LaunchGameSeparateWindow(scene);
+                }
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enter Play Mode (Runs Behaviours & Simulation; Press DELETE to stop)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Launch Game Mode in a separate external window");
             ImGui::PopStyleColor();
 
-            if (scene.isPlayMode) {
+            if (isExternalGameRunning) {
                 ImGui::SameLine();
-                if (ImGui::Button("⏹ Stop (DELETE)")) {
-                    ExitPlayMode(scene);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+                if (ImGui::Button("⏹ Stop Game")) {
+                    StopExternalGame();
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close external game window");
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::SameLine();
+            if (isCompilingScripts) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "⏳ Compiling...");
+            } else {
+                if (ImGui::Button("⚡ Compile")) {
+                    TriggerCompileScripts(&scene);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compile Behaviour Scripts and update standalone game binary (F7)");
             }
 
             if (ImGui::Button("Reset View")) {
@@ -1317,6 +2779,16 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         if (ImGui::BeginPopup("ShowPopup")) {
             if (ImGui::MenuItem("Grid", nullptr, scene.showGrid)) scene.showGrid = !scene.showGrid;
             if (ImGui::MenuItem("Transform Gizmo", nullptr, showGizmo)) showGizmo = !showGizmo;
+            ImGui::Separator();
+            ImGui::MenuItem("Show Light Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightGizmos);
+            ImGui::MenuItem("Show Camera Gizmos", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraGizmos);
+            ImGui::MenuItem("Show Light Ranges", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightRanges);
+            ImGui::MenuItem("Show Light Directions", nullptr, &Eunoia::EditorGizmoSystem::Get().showLightDirections);
+            ImGui::MenuItem("Show Camera Frustums", nullptr, &Eunoia::EditorGizmoSystem::Get().showCameraFrustums);
+            ImGui::MenuItem("Show Clip Planes", nullptr, &Eunoia::EditorGizmoSystem::Get().showClipPlanes);
+            ImGui::Separator();
+            if (ImGui::MenuItem("Light Frustum", nullptr, scene.showLightFrustum)) scene.showLightFrustum = !scene.showLightFrustum;
+            if (ImGui::MenuItem("Mesh Cluster Culling Stats", nullptr, showClusterCullingStats)) showClusterCullingStats = !showClusterCullingStats;
             if (ImGui::MenuItem("Game View [G]", nullptr, isGameView)) ToggleGameView(scene);
             if (ImGui::MenuItem("Immersive Viewport [F11]", nullptr, isImmersiveMode)) ToggleImmersiveMode();
             ImGui::EndPopup();
@@ -1346,7 +2818,7 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
         ImVec2 mousePos = ImGui::GetMousePos();
 
         for (auto& obj : scene.objects) {
-            if (!obj.visible || !obj.isLight) continue;
+            if (!obj.visible || (!obj.isLight && !IsLightPrimitive(obj.type))) continue;
             glm::vec3 worldPos = scene.GetWorldPosition(obj);
             glm::vec4 clip = vpMatrix * glm::vec4(worldPos, 1.0f);
             if (clip.w <= 0.05f) continue;
@@ -1366,9 +2838,18 @@ void EngineUI::RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fp
 
             bool isSelected = (scene.selectedId == obj.id);
 
+            LightType lType = obj.light.type;
+            if (obj.type == PrimitiveType::DirectionalLight) lType = LightType::Directional;
+            else if (obj.type == PrimitiveType::PointLight) lType = LightType::Point;
+            else if (obj.type == PrimitiveType::SpotLight) lType = LightType::Spot;
+            else if (obj.type == PrimitiveType::AreaLight) lType = LightType::Area;
+            else if (obj.type == PrimitiveType::SkyLight) lType = LightType::Sky;
+
+            uint64_t iconHandle = GetLightIconGpuHandle(lType);
+
             // Draw Sprite Billboard
-            if (lightIconGpuHandle != 0) {
-                drawList->AddImage((ImTextureID)lightIconGpuHandle, pMin, pMax,
+            if (iconHandle != 0) {
+                drawList->AddImage((ImTextureID)iconHandle, pMin, pMax,
                                    ImVec2(0, 0), ImVec2(1, 1),
                                    isSelected ? IM_COL32(255, 255, 255, 255) : IM_COL32(230, 230, 230, 210));
             } else {
@@ -1510,34 +2991,53 @@ void EngineUI::RenderScreenPrintOverlay(float startX, float startY) {
 }
 
 void EngineUI::RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera) {
-    if (isGameView || scene.selectedId == -1) return;
+    if (isGameView || scene.isPlayMode || isGameOnlyWindow || scene.selectedId == -1) return;
 
     GameObject* selObj = scene.FindObject(scene.selectedId);
     if (!selObj || (!selObj->isCamera && selObj->type != PrimitiveType::Camera)) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    auto pipRect = GetCameraPipRect(vp->Size.x, vp->Size.y, scene);
+    if (!pipRect.active) return;
 
-    float pipW = 280.0f;
-    float pipH = 196.0f;
-    float pipX = vp->Pos.x + vpRect.x + vpRect.width - pipW - 14.0f;
-    float pipY = vp->Pos.y + vpRect.y + vpRect.height - pipH - 14.0f;
+    float canvasX = vp->Pos.x + pipRect.x;
+    float canvasY = vp->Pos.y + pipRect.y;
+    float canvasW = pipRect.width;
+    float canvasH = pipRect.height;
 
-    ImGui::SetNextWindowPos(ImVec2(pipX, pipY), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(pipW, pipH), ImGuiCond_Always);
+    float winX = canvasX - 4.0f;
+    float winY = canvasY - 28.0f;
+    float winW = canvasW + 8.0f;
+    float winH = canvasH + 32.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(winX, winY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                              ImGuiWindowFlags_NoSavedSettings;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 4.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.11f, 0.95f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.55f, 0.90f, 0.85f));
+    // Transparent window background so the D3D12 hardware rendering of the camera view shines through
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 
     if (ImGui::Begin("##CameraPiPWindow", nullptr, flags)) {
-        // Header
-        ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 1.0f), "📷 %s", selObj->name.c_str());
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // 1. Header background (dark blue/slate with rounded top corners)
+        dl->AddRectFilled(ImVec2(winX, winY), ImVec2(winX + winW, winY + 28.0f), IM_COL32(16, 20, 28, 240), 6.0f, ImDrawFlags_RoundCornersTop);
+
+        // 2. Full window perimeter border
+        dl->AddRect(ImVec2(winX, winY), ImVec2(winX + winW, winY + winH), IM_COL32(40, 130, 230, 220), 6.0f, 0, 1.5f);
+
+        // 3. Viewport canvas inner border (accent framing D3D12 hardware preview)
+        dl->AddRect(ImVec2(canvasX, canvasY), ImVec2(canvasX + canvasW, canvasY + canvasH), IM_COL32(65, 75, 95, 255), 0.0f, 0, 1.0f);
+
+        // Header controls
+        ImGui::SetCursorPos(ImVec2(8.0f, 4.0f));
+        ImGui::TextColored(ImVec4(0.30f, 0.85f, 1.0f, 1.0f), "📷 %s", selObj->name.c_str());
         ImGui::SameLine();
         bool isLevelCam = (scene.activeLevelCameraId == selObj->id);
         if (isLevelCam) {
@@ -1558,137 +3058,33 @@ void EngineUI::RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera) {
             AddLog("LogCamera", "Aligned Viewport to " + selObj->name, 0);
         }
 
-        // Viewport canvas
-        ImVec2 canvasP0 = ImGui::GetCursorScreenPos();
-        ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-        float cW = canvasSize.x;
-        float cH = canvasSize.y;
+        // Crosshair on camera view
+        float midX = canvasX + canvasW * 0.5f;
+        float midY = canvasY + canvasH * 0.5f;
+        dl->AddLine(ImVec2(midX - 7.0f, midY), ImVec2(midX + 7.0f, midY), IM_COL32(255, 255, 255, 100));
+        dl->AddLine(ImVec2(midX, midY - 7.0f), ImVec2(midX, midY + 7.0f), IM_COL32(255, 255, 255, 100));
 
-        if (cW > 10.0f && cH > 10.0f) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->PushClipRect(canvasP0, ImVec2(canvasP0.x + cW, canvasP0.y + cH), true);
+        // Action Safe Area (90% rectangle)
+        dl->AddRect(ImVec2(canvasX + canvasW * 0.05f, canvasY + canvasH * 0.05f),
+                    ImVec2(canvasX + canvasW * 0.95f, canvasY + canvasH * 0.95f),
+                    IM_COL32(255, 255, 255, 45));
 
-            float targetAspect = (selObj->camera.aspectRatio > 0.1f) ? selObj->camera.aspectRatio : (16.0f / 9.0f);
-            float viewW = cW;
-            float viewH = cW / targetAspect;
-            if (viewH > cH) {
-                viewH = cH;
-                viewW = cH * targetAspect;
-            }
-            float viewX = canvasP0.x + (cW - viewW) * 0.5f;
-            float viewY = canvasP0.y + (cH - viewH) * 0.5f;
-
-            // Background of camera view
-            dl->AddRectFilled(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(14, 15, 18, 255));
-
-            // Camera VP Matrix
-            glm::vec3 camWorldPos = scene.GetWorldPosition(*selObj);
-            float rYaw = glm::radians(selObj->rotation.y);
-            float rPitch = glm::radians(selObj->rotation.x);
-            glm::vec3 camFwd = glm::normalize(glm::vec3(-std::cos(rPitch) * std::sin(rYaw), -std::sin(rPitch), -std::cos(rPitch) * std::cos(rYaw)));
-            glm::mat4 camViewMat = glm::lookAt(camWorldPos, camWorldPos + camFwd, glm::vec3(0, 1, 0));
-            glm::mat4 camProjMat;
-            if (!selObj->camera.isOrthographic) {
-                camProjMat = glm::perspective(glm::radians(std::clamp(selObj->camera.fov, 10.0f, 150.0f)), targetAspect, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
-            } else {
-                float halfH = std::max(0.1f, selObj->camera.orthoSize);
-                float halfW = halfH * targetAspect;
-                camProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
-            }
-            glm::mat4 camVP = camProjMat * camViewMat;
-
-            // Project Ground Grid lines
-            auto ProjectPoint = [&](const glm::vec3& pt, ImVec2& outPt) -> bool {
-                glm::vec4 c = camVP * glm::vec4(pt, 1.0f);
-                if (c.w <= 0.05f) return false;
-                glm::vec3 ndc = glm::vec3(c) / c.w;
-                if (ndc.z < -1.0f || ndc.z > 1.0f) return false;
-                outPt.x = viewX + (ndc.x * 0.5f + 0.5f) * viewW;
-                outPt.y = viewY + ((1.0f - ndc.y) * 0.5f) * viewH;
-                return true;
-            };
-
-            // Ground grid lines
-            for (int gz = -6; gz <= 6; gz += 2) {
-                ImVec2 pA, pB;
-                if (ProjectPoint(glm::vec3(-6.0f, 0.0f, (float)gz), pA) && ProjectPoint(glm::vec3(6.0f, 0.0f, (float)gz), pB)) {
-                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
-                }
-            }
-            for (int gx = -6; gx <= 6; gx += 2) {
-                ImVec2 pA, pB;
-                if (ProjectPoint(glm::vec3((float)gx, 0.0f, -6.0f), pA) && ProjectPoint(glm::vec3((float)gx, 0.0f, 6.0f), pB)) {
-                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
-                }
-            }
-
-            // Project Scene Objects
-            int drawnTriangles = 0;
-            for (const auto& otherObj : scene.objects) {
-                if (!otherObj.visible || otherObj.id == selObj->id || otherObj.isCamera || otherObj.isLight) continue;
-                if (otherObj.mesh.vertices.empty() || otherObj.mesh.indices.empty()) continue;
-
-                glm::mat4 model = scene.GetWorldMatrix(otherObj);
-                glm::mat4 mvp = camVP * model;
-
-                size_t indCount = otherObj.mesh.indices.size();
-                size_t step = (indCount > 300) ? 6 : 3;
-
-                for (size_t i = 0; i + 2 < indCount; i += step) {
-                    if (drawnTriangles > 350) break;
-
-                    const auto& v0 = otherObj.mesh.vertices[otherObj.mesh.indices[i]];
-                    const auto& v1 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 1]];
-                    const auto& v2 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 2]];
-
-                    glm::vec4 c0 = mvp * glm::vec4(v0.pos, 1.0f);
-                    glm::vec4 c1 = mvp * glm::vec4(v1.pos, 1.0f);
-                    glm::vec4 c2 = mvp * glm::vec4(v2.pos, 1.0f);
-
-                    if (c0.w <= 0.05f || c1.w <= 0.05f || c2.w <= 0.05f) continue;
-
-                    ImVec2 p0(viewX + (c0.x / c0.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c0.y / c0.w) * 0.5f) * viewH);
-                    ImVec2 p1(viewX + (c1.x / c1.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c1.y / c1.w) * 0.5f) * viewH);
-                    ImVec2 p2(viewX + (c2.x / c2.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c2.y / c2.w) * 0.5f) * viewH);
-
-                    // 2D Backface test
-                    float cp = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
-                    if (cp < 0.0f) {
-                        int cr = std::clamp((int)(otherObj.color.r * 180.0f), 20, 255);
-                        int cg = std::clamp((int)(otherObj.color.g * 180.0f), 20, 255);
-                        int cb = std::clamp((int)(otherObj.color.b * 180.0f), 20, 255);
-                        dl->AddTriangleFilled(p0, p1, p2, IM_COL32(cr, cg, cb, 230));
-                        dl->AddTriangle(p0, p1, p2, IM_COL32(30, 32, 40, 150), 1.0f);
-                        drawnTriangles++;
-                    }
-                }
-            }
-
-            // Frame and overlays
-            dl->AddRect(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(70, 75, 88, 255), 0.0f, 0, 1.0f);
-
-            // Crosshair
-            float midX = viewX + viewW * 0.5f;
-            float midY = viewY + viewH * 0.5f;
-            dl->AddLine(ImVec2(midX - 7.0f, midY), ImVec2(midX + 7.0f, midY), IM_COL32(255, 255, 255, 80));
-            dl->AddLine(ImVec2(midX, midY - 7.0f), ImVec2(midX, midY + 7.0f), IM_COL32(255, 255, 255, 80));
-
-            // Dotted Action Safe Area (90%)
-            dl->AddRect(ImVec2(viewX + viewW * 0.05f, viewY + viewH * 0.05f),
-                        ImVec2(viewX + viewW * 0.95f, viewY + viewH * 0.95f),
-                        IM_COL32(255, 255, 255, 35));
-
-            // Camera info overlay
-            char camInfo[64];
-            if (!selObj->camera.isOrthographic) {
-                snprintf(camInfo, sizeof(camInfo), "FOV: %.1f° | Persp", selObj->camera.fov);
-            } else {
-                snprintf(camInfo, sizeof(camInfo), "Size: %.1f | Ortho", selObj->camera.orthoSize);
-            }
-            dl->AddText(ImVec2(viewX + 6.0f, viewY + viewH - 16.0f), IM_COL32(180, 200, 220, 190), camInfo);
-
-            dl->PopClipRect();
+        // Camera info overlay badge (bottom-left)
+        char camInfo[64];
+        if (!selObj->camera.isOrthographic) {
+            snprintf(camInfo, sizeof(camInfo), "FOV: %.1f° | Persp", selObj->camera.fov);
+        } else {
+            snprintf(camInfo, sizeof(camInfo), "Size: %.1f | Ortho", selObj->camera.orthoSize);
         }
+        ImVec2 badgePos(canvasX + 6.0f, canvasY + canvasH - 22.0f);
+        dl->AddRectFilled(badgePos, ImVec2(badgePos.x + 130.0f, badgePos.y + 18.0f), IM_COL32(12, 14, 18, 200), 4.0f);
+        dl->AddText(ImVec2(badgePos.x + 6.0f, badgePos.y + 2.0f), IM_COL32(200, 225, 255, 230), camInfo);
+
+        // Game Mode appearance indicator (bottom-right)
+        const char* previewTag = "GAME PREVIEW";
+        ImVec2 tagPos(canvasX + canvasW - 100.0f, canvasY + canvasH - 22.0f);
+        dl->AddRectFilled(tagPos, ImVec2(tagPos.x + 94.0f, tagPos.y + 18.0f), IM_COL32(20, 60, 40, 210), 4.0f);
+        dl->AddText(ImVec2(tagPos.x + 6.0f, tagPos.y + 2.0f), IM_COL32(80, 240, 140, 230), previewTag);
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
@@ -1907,10 +3303,6 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
                 if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-                if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-                if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-                if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-                if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -1949,15 +3341,16 @@ void EngineUI::RenderOutliner(Scene& scene) {
                 ImGui::EndMenu();
             }
             if (ImGui::BeginMenu("Lights")) {
+                if (directionalLightIconGpuHandle) { ImGui::Image((ImTextureID)directionalLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Directional Light")) { scene.AddNewLight(PrimitiveType::DirectionalLight); AddLog("LogActor", "Spawned Directional Light", 2); }
+                if (pointLightIconGpuHandle) { ImGui::Image((ImTextureID)pointLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
+                if (spotLightIconGpuHandle) { ImGui::Image((ImTextureID)spotLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
+                if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
+                if (skyLightIconGpuHandle) { ImGui::Image((ImTextureID)skyLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
                 if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-                if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-                if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-                if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-                if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
                 ImGui::EndMenu();
             }
             if (ImGui::MenuItem("Camera")) {
@@ -1975,15 +3368,16 @@ void EngineUI::RenderOutliner(Scene& scene) {
             ImGui::OpenPopup("AddLightPopup");
         }
         if (ImGui::BeginPopup("AddLightPopup")) {
+            if (directionalLightIconGpuHandle) { ImGui::Image((ImTextureID)directionalLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Directional Light")) { scene.AddNewLight(PrimitiveType::DirectionalLight); AddLog("LogActor", "Spawned Directional Light", 2); }
+            if (pointLightIconGpuHandle) { ImGui::Image((ImTextureID)pointLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Point Light"))       { scene.AddNewLight(PrimitiveType::PointLight); AddLog("LogActor", "Spawned Point Light", 2); }
+            if (spotLightIconGpuHandle) { ImGui::Image((ImTextureID)spotLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Spot Light"))        { scene.AddNewLight(PrimitiveType::SpotLight); AddLog("LogActor", "Spawned Spot Light", 2); }
+            if (areaLightIconGpuHandle) { ImGui::Image((ImTextureID)areaLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Area Light"))        { scene.AddNewLight(PrimitiveType::AreaLight); AddLog("LogActor", "Spawned Area Light", 2); }
+            if (skyLightIconGpuHandle) { ImGui::Image((ImTextureID)skyLightIconGpuHandle, ImVec2(16, 16)); ImGui::SameLine(); }
             if (ImGui::MenuItem("Sky Light"))         { scene.AddNewLight(PrimitiveType::SkyLight); AddLog("LogActor", "Spawned Sky Light", 2); }
-            if (ImGui::MenuItem("Ambient Light"))     { scene.AddNewLight(PrimitiveType::AmbientLight); AddLog("LogActor", "Spawned Ambient Light", 2); }
-            if (ImGui::MenuItem("Hemisphere Light"))  { scene.AddNewLight(PrimitiveType::HemisphereLight); AddLog("LogActor", "Spawned Hemisphere Light", 2); }
-            if (ImGui::MenuItem("Tube Light"))        { scene.AddNewLight(PrimitiveType::TubeLight); AddLog("LogActor", "Spawned Tube Light", 2); }
-            if (ImGui::MenuItem("Disc Light"))        { scene.AddNewLight(PrimitiveType::DiscLight); AddLog("LogActor", "Spawned Disc Light", 2); }
             ImGui::EndPopup();
         }
 
@@ -2181,6 +3575,11 @@ void EngineUI::RenderDetails(Scene& scene) {
             char lightHeader[128];
             snprintf(lightHeader, sizeof(lightHeader), "%s Component", GetLightTypeName(obj->light.type));
             if (ImGui::CollapsingHeader(lightHeader, ImGuiTreeNodeFlags_DefaultOpen)) {
+                uint64_t iconHandle = GetLightIconGpuHandle(obj->light.type);
+                if (iconHandle != 0) {
+                    ImGui::Image((ImTextureID)iconHandle, ImVec2(20, 20));
+                    ImGui::SameLine();
+                }
                 ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "[%s]", GetLightTypeName(obj->light.type));
                 ImGui::SameLine();
                 ImGui::Checkbox("Light Enabled", &obj->light.enabled);
@@ -2196,10 +3595,12 @@ void EngineUI::RenderDetails(Scene& scene) {
                     }
                     if (obj->light.type == LightType::Directional) {
                         scene.lightColor = obj->light.color;
+                    } else if (obj->light.type == LightType::Sky) {
+                        scene.ambientColor = obj->light.color;
                     }
                 }
 
-                ImGui::DragFloat("Intensity##LightIntensity", &obj->light.intensity, 0.05f, 0.0f, 200.0f, "%.2f");
+                ImGui::DragFloat("Intensity##LightIntensity", &obj->light.intensity, 1.0f, 0.0f, 100000000.0f, "%.2f");
 
                 ImGui::Checkbox("Use Temperature (Kelvin)##UseTemp", &obj->light.useTemperature);
                 if (obj->light.useTemperature) {
@@ -2214,9 +3615,16 @@ void EngineUI::RenderDetails(Scene& scene) {
                                         kelvinCol.b * obj->light.color.b);
                 }
 
-                if (obj->light.type != LightType::Directional && obj->light.type != LightType::Ambient && obj->light.type != LightType::Sky) {
-                    ImGui::DragFloat("Range / Radius", &obj->light.range, 0.1f, 0.1f, 500.0f, "%.1f m");
-                    ImGui::SliderFloat("Attenuation Exp", &obj->light.attenuation, 0.5f, 4.0f, "%.2f");
+                if (obj->light.type != LightType::Directional && obj->light.type != LightType::Sky) {
+                    ImGui::DragFloat("Range / Radius", &obj->light.range, 1.0f, 0.1f, 10000000.0f, "%.1f m");
+                    ImGui::DragFloat("Attenuation Exp", &obj->light.attenuation, 0.05f, 0.0f, 1000.0f, "%.2f");
+                }
+
+                if (obj->light.type == LightType::Sky) {
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Sky Light / Ambient System");
+                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 1.0f, 1.0f), "Sky Light provides omnidirectional ambient scene illumination.");
+                    ImGui::TextDisabled("Note: Sky light produces pure ambient light and does not cast shadows.");
                 }
 
                 if (obj->light.type == LightType::Spot) {
@@ -2224,81 +3632,45 @@ void EngineUI::RenderDetails(Scene& scene) {
                     ImGui::TextDisabled("Spot Cone Settings");
                     ImGui::SliderFloat("Inner Cone Angle", &obj->light.innerConeAngle, 0.0f, 89.0f, "%.1f deg");
                     if (obj->light.outerConeAngle < obj->light.innerConeAngle) obj->light.outerConeAngle = obj->light.innerConeAngle;
-                    ImGui::SliderFloat("Outer Cone Angle", &obj->light.outerConeAngle, obj->light.innerConeAngle, 90.0f, "%.1f deg");
-                    ImGui::SliderFloat("Cone Falloff", &obj->light.coneFalloff, 0.1f, 5.0f, "%.2f");
+                    ImGui::SliderFloat("Outer Cone Angle", &obj->light.outerConeAngle, obj->light.innerConeAngle, 89.9f, "%.1f deg");
+                    ImGui::DragFloat("Cone Falloff", &obj->light.coneFalloff, 0.05f, 0.1f, 100.0f, "%.2f");
                 }
 
                 if (obj->light.type == LightType::Area) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Area Light Shape");
-                    const char* areaShapes[] = { "Rectangle", "Disk", "Sphere", "Tube" };
-                    ImGui::Combo("Shape", &obj->light.areaShape, areaShapes, 4);
+                    const char* areaShapes[] = { "Rectangle", "Disk" };
+                    ImGui::Combo("Shape", &obj->light.areaShape, areaShapes, 2);
                     if (obj->light.areaShape == 0) {
-                        ImGui::DragFloat("Width", &obj->light.width, 0.05f, 0.01f, 50.0f, "%.2f m");
-                        ImGui::DragFloat("Height", &obj->light.height, 0.05f, 0.01f, 50.0f, "%.2f m");
-                    } else if (obj->light.areaShape == 1 || obj->light.areaShape == 2) {
-                        ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 25.0f, "%.2f m");
-                    } else if (obj->light.areaShape == 3) {
-                        ImGui::DragFloat("Length", &obj->light.length, 0.05f, 0.01f, 50.0f, "%.2f m");
-                        ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 10.0f, "%.2f m");
+                        ImGui::DragFloat("Width", &obj->light.width, 0.1f, 0.01f, 1000000.0f, "%.2f m");
+                        ImGui::DragFloat("Height", &obj->light.height, 0.1f, 0.01f, 1000000.0f, "%.2f m");
+                    } else {
+                        ImGui::DragFloat("Radius", &obj->light.radius, 0.1f, 0.01f, 1000000.0f, "%.2f m");
                     }
                     ImGui::Checkbox("Two Sided", &obj->light.twoSided);
                 }
 
-                if (obj->light.type == LightType::Tube) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Tube Dimensions");
-                    ImGui::DragFloat("Length", &obj->light.length, 0.05f, 0.01f, 50.0f, "%.2f m");
-                    ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 10.0f, "%.2f m");
-                }
-
-                if (obj->light.type == LightType::Disc) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Disc Dimensions");
-                    ImGui::DragFloat("Radius", &obj->light.radius, 0.05f, 0.01f, 25.0f, "%.2f m");
-                    ImGui::Checkbox("Two Sided", &obj->light.twoSided);
-                }
-
-                if (obj->light.type == LightType::Hemisphere) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Hemisphere Colors");
-                    ImGui::ColorEdit3("Sky Color##HemiSkyCol", &obj->light.skyColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                    ImGui::ColorEdit3("Ground Color##HemiGndCol", &obj->light.groundColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                }
-
-                if (obj->light.type == LightType::Sky) {
-                    ImGui::Separator();
-                    ImGui::TextDisabled("Environment & Sky");
-                    char envBuf[260];
-                    strncpy(envBuf, obj->light.envMapTexture.c_str(), sizeof(envBuf));
-                    if (ImGui::InputText("Environment HDRI##SkyHDRI", envBuf, sizeof(envBuf))) {
-                        obj->light.envMapTexture = envBuf;
-                    }
-                    ImGui::SliderFloat("HDRI Rotation##SkyRot", &obj->light.envRotation, 0.0f, 360.0f, "%.1f deg");
-                    ImGui::SliderFloat("Diffuse Contribution##SkyDiff", &obj->light.diffuseContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Specular Contribution##SkySpec", &obj->light.specularContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Ambient Contribution##SkyAmb", &obj->light.ambientContribution, 0.0f, 2.0f);
-                    ImGui::SliderFloat("Mip Level##SkyMip", &obj->light.mipLevel, 0.0f, 8.0f);
-                    ImGui::ColorEdit3("Lower Hemisphere Color##SkyLowerHemiCol", &obj->light.lowerHemisphereColor.r,
-                                      ImGuiColorEditFlags_PickerHueBar | ImGuiColorEditFlags_DisplayRGB);
-                }
-
-                if (obj->light.type == LightType::Directional || obj->light.type == LightType::Point || obj->light.type == LightType::Spot) {
+                if (obj->light.type == LightType::Directional || obj->light.type == LightType::Point ||
+                    obj->light.type == LightType::Spot || obj->light.type == LightType::Area) {
                     ImGui::Separator();
                     ImGui::TextDisabled("Shadows");
                     ImGui::Checkbox("Cast Shadows", &obj->light.castShadows);
                     if (obj->light.castShadows) {
                         ImGui::SliderFloat("Shadow Strength", &obj->light.shadowStrength, 0.0f, 1.0f);
-                        ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.00001f, 0.05f, "%.5f");
-                        const char* resOptions[] = { "512", "1024", "2048", "4096" };
-                        int curResIdx = (obj->light.shadowResolution >= 4096) ? 3 : (obj->light.shadowResolution >= 2048) ? 2 : (obj->light.shadowResolution >= 1024) ? 1 : 0;
-                        if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 4)) {
-                            int resVals[] = { 512, 1024, 2048, 4096 };
+                        ImGui::DragFloat("Shadow Bias", &obj->light.shadowBias, 0.0001f, 0.000001f, 1.0f, "%.6f");
+                        const char* resOptions[] = { "256", "512", "1024", "2048", "4096" };
+                        int resVals[] = { 256, 512, 1024, 2048, 4096 };
+                        int curResIdx = 0;
+                        for (int r = 0; r < 5; ++r) {
+                            if (obj->light.shadowResolution == resVals[r]) { curResIdx = r; break; }
+                        }
+                        if (ImGui::Combo("Shadow Resolution", &curResIdx, resOptions, 5)) {
                             obj->light.shadowResolution = resVals[curResIdx];
                         }
-                        ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 5.0f, 1000.0f, "%.1f m");
+                        ImGui::DragFloat("Shadow Distance", &obj->light.shadowDistance, 1.0f, 1.0f, 1000000.0f, "%.1f m");
+                        if (obj->light.type == LightType::Directional) {
+                            ImGui::Checkbox("Show Light Frustum", &scene.showLightFrustum);
+                        }
                     }
                 }
 
@@ -2307,7 +3679,7 @@ void EngineUI::RenderDetails(Scene& scene) {
                 ImGui::Checkbox("Volumetric Scattering", &obj->light.volumetric);
                 if (obj->light.volumetric) {
                     ImGui::SliderFloat("Scattering", &obj->light.volumetricScattering, 0.0f, 1.0f);
-                    ImGui::DragFloat("Volumetric Intensity", &obj->light.volumetricIntensity, 0.05f, 0.0f, 10.0f);
+                    ImGui::DragFloat("Volumetric Intensity", &obj->light.volumetricIntensity, 0.05f, 0.0f, 1000.0f);
                 }
 
                 ImGui::Separator();
@@ -2319,11 +3691,36 @@ void EngineUI::RenderDetails(Scene& scene) {
             }
 
             if (obj->lightId >= 0 && obj->lightId < (int)scene.pointLights.size()) {
-                scene.pointLights[obj->lightId].color = obj->light.color;
-                scene.pointLights[obj->lightId].intensity = obj->light.intensity;
-                scene.pointLights[obj->lightId].range = obj->light.range;
-                scene.pointLights[obj->lightId].enabled = obj->light.enabled;
-                scene.pointLights[obj->lightId].castShadows = obj->light.castShadows;
+                auto& pl = scene.pointLights[obj->lightId];
+                pl.type = obj->light.type;
+                pl.color = obj->light.color;
+                pl.intensity = obj->light.intensity;
+                pl.range = obj->light.range;
+                pl.attenuation = obj->light.attenuation;
+                pl.enabled = obj->light.enabled;
+                pl.castShadows = obj->light.castShadows;
+                pl.shadowStrength = obj->light.shadowStrength;
+                pl.shadowBias = obj->light.shadowBias;
+                pl.shadowResolution = obj->light.shadowResolution;
+                pl.innerConeAngle = obj->light.innerConeAngle;
+                pl.outerConeAngle = obj->light.outerConeAngle;
+                pl.coneFalloff = obj->light.coneFalloff;
+                pl.areaShape = obj->light.areaShape;
+                pl.width = obj->light.width;
+                pl.height = obj->light.height;
+                pl.radius = obj->light.radius;
+                pl.twoSided = obj->light.twoSided;
+            }
+            if (obj->light.type == LightType::Directional) {
+                scene.lightColor = obj->light.color;
+                scene.lightIntensity = obj->light.intensity;
+                scene.enableShadows = obj->light.castShadows;
+                scene.shadowStrength = obj->light.shadowStrength;
+                scene.shadowBias = obj->light.shadowBias;
+                scene.shadowResolution = obj->light.shadowResolution;
+            } else if (obj->light.type == LightType::Sky) {
+                scene.ambientColor = obj->light.color;
+                scene.ambientIntensity = obj->light.intensity;
             }
         }
 
@@ -2802,6 +4199,32 @@ void EngineUI::RenderDetails(Scene& scene) {
             }
         }
 
+        // 4.5 Rendering: Mesh Cluster Culling (dev.md Section 2, 3, 12)
+        if (!obj->isLight && obj->type != PrimitiveType::Empty && ImGui::CollapsingHeader("Rendering", ImGuiTreeNodeFlags_DefaultOpen)) {
+            bool mcc = obj->meshClusterCulling;
+            if (ImGui::Checkbox("Mesh Cluster Culling", &mcc)) {
+                scene.SetMeshClusterCullingRecursive(obj->id, mcc);
+                if (mcc) {
+                    Eunoia::MeshClusterCullingSystem::Get().EnsureClustersBuilt(*obj);
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Enables GPU mesh-cluster visibility culling for this object.\nWhen enabled on a parent, the setting is propagated to its children.");
+            }
+
+            if (obj->meshClusterCulling) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 1.0f), "Cluster Culling Details:");
+                auto cStats = Eunoia::MeshClusterCullingSystem::Get().GetObjectStats(obj->id);
+                ImGui::Text("  Enabled: Yes");
+                ImGui::Text("  Cluster Count: %u", cStats.totalClusters);
+                ImGui::Text("  Visible Clusters: %u", cStats.visibleClusters);
+                ImGui::Text("  Culled Clusters: %u", cStats.culledClusters);
+                ImGui::Text("  Culling Ratio: %.2f%%", cStats.cullingRatio);
+            }
+        }
+
         // 5. Actor Behavior
         if (ImGui::CollapsingHeader("Actor Behavior")) {
             ImGui::Checkbox("Auto-Rotate (Movable Only)", &obj->autoRotate);
@@ -3008,6 +4431,11 @@ void EngineUI::ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj
             cur->emissionTexture = ma.emissionTexture;
             cur->opacityTexture = ma.opacityTexture;
             cur->uvScale = ma.uvScale;
+            cur->normalMapYFlip = ma.normalMapYFlip;
+            cur->metallicChannel = ma.metallicChannel;
+            cur->roughnessChannel = ma.roughnessChannel;
+            cur->aoChannel = ma.aoChannel;
+            cur->materialDebugMode = ma.materialDebugMode;
             if (cur != rootObj) {
                 childCount++;
             }
@@ -3101,6 +4529,21 @@ bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) 
         else if (key == "opacityMaskClipValue") {
             try { outMat.opacityMaskClipValue = std::stof(val); } catch (...) {}
         }
+        else if (key == "normalMapYFlip") {
+            outMat.normalMapYFlip = (val == "1" || val == "true");
+        }
+        else if (key == "metallicChannel") {
+            try { outMat.metallicChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "roughnessChannel") {
+            try { outMat.roughnessChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "aoChannel") {
+            try { outMat.aoChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "materialDebugMode") {
+            try { outMat.materialDebugMode = std::stoi(val); } catch (...) {}
+        }
         else if (key == "baseColorAssetId") outMat.baseColorAssetId = AssetID::FromString(val);
         else if (key == "normalAssetId") outMat.normalAssetId = AssetID::FromString(val);
         else if (key == "roughnessAssetId") outMat.roughnessAssetId = AssetID::FromString(val);
@@ -3170,6 +4613,11 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
     file << "opacity: " << mat.opacity << "\n";
     file << "opacityMaskClipValue: " << mat.opacityMaskClipValue << "\n";
     file << "uvScale: " << mat.uvScale.x << " " << mat.uvScale.y << "\n";
+    file << "normalMapYFlip: " << (mat.normalMapYFlip ? 1 : 0) << "\n";
+    file << "metallicChannel: " << mat.metallicChannel << "\n";
+    file << "roughnessChannel: " << mat.roughnessChannel << "\n";
+    file << "aoChannel: " << mat.aoChannel << "\n";
+    file << "materialDebugMode: " << mat.materialDebugMode << "\n";
     if (mat.baseColorAssetId.IsValid()) file << "baseColorAssetId: " << mat.baseColorAssetId.ToString() << "\n";
     file << "baseColorTexture: " << mat.baseColorTexture << "\n";
     if (mat.normalAssetId.IsValid()) file << "normalAssetId: " << mat.normalAssetId.ToString() << "\n";
@@ -3244,6 +4692,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                         obj.aoTexture = activeMaterial.aoTexture;
                         obj.emissionTexture = activeMaterial.emissionTexture;
                         obj.uvScale = activeMaterial.uvScale;
+                        obj.normalMapYFlip = activeMaterial.normalMapYFlip;
+                        obj.metallicChannel = activeMaterial.metallicChannel;
+                        obj.roughnessChannel = activeMaterial.roughnessChannel;
+                        obj.aoChannel = activeMaterial.aoChannel;
+                        obj.materialDebugMode = activeMaterial.materialDebugMode;
                         updatedCount++;
                     }
                 }
@@ -3268,6 +4721,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     sel->aoTexture = activeMaterial.aoTexture;
                     sel->emissionTexture = activeMaterial.emissionTexture;
                     sel->uvScale = activeMaterial.uvScale;
+                    sel->normalMapYFlip = activeMaterial.normalMapYFlip;
+                    sel->metallicChannel = activeMaterial.metallicChannel;
+                    sel->roughnessChannel = activeMaterial.roughnessChannel;
+                    sel->aoChannel = activeMaterial.aoChannel;
+                    sel->materialDebugMode = activeMaterial.materialDebugMode;
                 }
                 AddLog("LogMaterial", "Saved Material to " + activeMaterial.filePath + " (Reflected in " + std::to_string(updatedCount) + " actors in viewport)", 2);
             }
@@ -3520,6 +4978,21 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (ImGui::SliderFloat("Normal Strength", &activeMaterial.normalStrength, 0.0f, 2.0f, "%.2f")) {
                 materialDirty = true;
             }
+            if (ImGui::Checkbox("Normal Map Y / Green Flip (OpenGL / Blender)", &activeMaterial.normalMapYFlip)) {
+                materialDirty = true;
+            }
+            ImGui::Spacing();
+            const char* channelNames[] = { "Red (R)", "Green (G)", "Blue (B)", "Alpha (A)" };
+            if (ImGui::Combo("Metallic Channel", &activeMaterial.metallicChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            if (ImGui::Combo("Roughness Channel", &activeMaterial.roughnessChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            if (ImGui::Combo("AO Channel", &activeMaterial.aoChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            ImGui::Spacing();
             if (ImGui::ColorEdit3("Emission Color", &activeMaterial.emissiveColor.r)) {
                 materialDirty = true;
             }
@@ -3590,6 +5063,23 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (ImGui::Checkbox("Receive Shadows", &activeMaterial.receiveShadows)) {
                 materialDirty = true;
             }
+
+            const char* debugModes[] = {
+                "0: Final PBR",
+                "1: Base Color Only",
+                "2: Normal Visualization",
+                "3: Roughness",
+                "4: Metallic",
+                "5: AO",
+                "6: Tangent",
+                "7: Bitangent",
+                "8: Vertex Normal",
+                "9: UV0",
+                "10: Simple Diffuse (Diagnostic)"
+            };
+            if (ImGui::Combo("Material Debug Mode", &activeMaterial.materialDebugMode, debugModes, IM_ARRAYSIZE(debugModes))) {
+                materialDirty = true;
+            }
             ImGui::Spacing();
         }
 
@@ -3621,6 +5111,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     obj.emissionTexture = activeMaterial.emissionTexture;
                     obj.opacityTexture = activeMaterial.opacityTexture;
                     obj.uvScale = activeMaterial.uvScale;
+                    obj.normalMapYFlip = activeMaterial.normalMapYFlip;
+                    obj.metallicChannel = activeMaterial.metallicChannel;
+                    obj.roughnessChannel = activeMaterial.roughnessChannel;
+                    obj.aoChannel = activeMaterial.aoChannel;
+                    obj.materialDebugMode = activeMaterial.materialDebugMode;
                 }
             }
         }
@@ -3628,6 +5123,62 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         ImGui::EndChild();
     }
     ImGui::End();
+}
+
+bool EngineUI::IsBehaviourNameAlreadyExists(const std::string& rawName) const {
+    if (rawName.empty()) return false;
+
+    std::string nameLower = rawName;
+    std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+
+    // 1. Check BehaviourRegistry (built-in and registered scripts)
+    const auto& all = BehaviourRegistry::Get().GetAll();
+    for (const auto& pair : all) {
+        std::string classLower = pair.second.className;
+        std::transform(classLower.begin(), classLower.end(), classLower.begin(), ::tolower);
+        std::string displayLower = pair.second.displayName;
+        std::transform(displayLower.begin(), displayLower.end(), displayLower.begin(), ::tolower);
+        if (classLower == nameLower || displayLower == nameLower) {
+            return true;
+        }
+    }
+
+    // 2. Check AssetRegistry
+    const auto& assets = AssetRegistry::Get().GetAllAssets();
+    for (const auto& pair : assets) {
+        if (pair.second.type == AssetType::Behaviour || pair.second.type == AssetType::Script) {
+            std::string objLower = pair.second.objectName;
+            std::transform(objLower.begin(), objLower.end(), objLower.begin(), ::tolower);
+            if (objLower == nameLower) {
+                return true;
+            }
+        }
+    }
+
+    // 3. Scan Content root directory and project directory on disk
+    std::filesystem::path searchRoot = !contentRootPath.empty() ? contentRootPath : activeProjectRoot;
+    if (!searchRoot.empty()) {
+        std::error_code ec;
+        if (std::filesystem::exists(searchRoot, ec)) {
+            for (auto it = std::filesystem::recursive_directory_iterator(searchRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator();
+                 it.increment(ec)) {
+                if (!it->is_directory(ec)) {
+                    std::string ext = it->path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".behaviour") {
+                        std::string fileStem = it->path().stem().string();
+                        std::transform(fileStem.begin(), fileStem.end(), fileStem.begin(), ::tolower);
+                        if (fileStem == nameLower) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 void EngineUI::RenderContentBrowser(Scene& scene) {
@@ -3748,7 +5299,15 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 ImGui::SameLine();
                 if (ImGui::Button("🧩 New Behaviour")) {
                     showNewBehaviourPopup = true;
-                    snprintf(newBehaviourNameBuf, sizeof(newBehaviourNameBuf), "PlayerController");
+                    std::string defName = "NewBehaviour";
+                    if (IsBehaviourNameAlreadyExists(defName)) {
+                        int idx = 1;
+                        while (IsBehaviourNameAlreadyExists("NewBehaviour_" + std::to_string(idx))) {
+                            idx++;
+                        }
+                        defName = "NewBehaviour_" + std::to_string(idx);
+                    }
+                    snprintf(newBehaviourNameBuf, sizeof(newBehaviourNameBuf), "%s", defName.c_str());
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new EunoiaBehaviour C++ script asset (dev.md Section 4, 21)");
                 ImGui::SameLine();
@@ -3845,118 +5404,140 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 }
                 if (ImGui::BeginPopupModal("Create Behaviour##Modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                     ImGui::Text("Enter Behaviour Class Name (inherits EunoiaBehaviour):");
-                    ImGui::SetNextItemWidth(280.0f);
+                    ImGui::SetNextItemWidth(300.0f);
                     ImGui::InputText("##BehNameInput", newBehaviourNameBuf, sizeof(newBehaviourNameBuf));
+
+                    std::string inputName = newBehaviourNameBuf;
+                    while (!inputName.empty() && isspace((unsigned char)inputName.front())) inputName.erase(inputName.begin());
+                    while (!inputName.empty() && isspace((unsigned char)inputName.back())) inputName.pop_back();
+
+                    bool isDuplicate = !inputName.empty() && IsBehaviourNameAlreadyExists(inputName);
+                    bool isValidName = !inputName.empty();
+
+                    if (isDuplicate) {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "⚠️ A behaviour named '%s' already exists in this project!", inputName.c_str());
+                    } else if (isValidName) {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f), "✓ Valid name (will be created in current folder: %s)", currentVirtualDir.c_str());
+                    }
+
                     ImGui::Spacing();
-                    if (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-                        if (strlen(newBehaviourNameBuf) > 0) {
-                            std::string behName = newBehaviourNameBuf;
-                            std::string diskSub = currentVirtualDir;
-                            if (diskSub.rfind("/Game", 0) == 0) diskSub = diskSub.substr(5);
-                            if (!diskSub.empty() && diskSub[0] == '/') diskSub.erase(0, 1);
-                            std::filesystem::path behDir = contentRootPath / diskSub / "Behaviours";
-                            std::error_code bec;
-                            std::filesystem::create_directories(behDir, bec);
 
-                            // User Request: ONLY create a single .cpp file
-                            std::filesystem::path cppPath = behDir / (behName + ".cpp");
-                            std::filesystem::path metaPath = behDir / (behName + ".cpp.assetmeta");
+                    bool canCreate = isValidName && !isDuplicate;
+                    if (!canCreate) {
+                        ImGui::BeginDisabled();
+                    }
 
-                            std::ofstream cppFile(cppPath);
-                            if (cppFile.is_open()) {
-                                cppFile << "#include <EngineScene/EunoiaBehaviour.h>\n"
-                                    << "#include <EngineScene/BehaviourRegistry.h>\n"
-                                    << "#include <EngineScene/GameObject.h>\n"
-                                    << "#include <EnginePlatform/InputSystem.h>\n"
-                                    << "#include <EngineCore/EngineLogger.h>\n\n"
-                                    << "// ============================================================================\n"
-                                    << "// " << behName << " — Eunoia Behaviour Script\n"
-                                    << "// Inherits EunoiaBehaviour. Register properties in RegisterProperties().\n"
-                                    << "// ============================================================================\n\n"
-                                    << "class " << behName << " : public EunoiaBehaviour {\n"
-                                    << "public:\n"
-                                    << "    // --- Exposed Properties (appear in Details Panel) ---\n"
-                                    << "    float MoveSpeed = 5.0f;\n"
-                                    << "    bool  IsActive  = true;\n"
-                                    << "    int   Health    = 100;\n"
-                                    << "    Light* WarningLight = nullptr;\n\n"
-                                    << "    " << behName << "() {\n"
-                                    << "        m_className   = \"" << behName << "\";\n"
-                                    << "        m_displayName = \"" << behName << "\";\n"
-                                    << "        RegisterProperties();\n"
-                                    << "    }\n\n"
-                                    << "    void RegisterProperties() override {\n"
-                                    << "        m_properties.clear();\n"
-                                    << "        RegisterProperty(\"Move Speed\", &MoveSpeed, \"Locomotion\", 0.0f, 50.0f);\n"
-                                    << "        RegisterProperty(\"Is Active\",  &IsActive,  \"General\");\n"
-                                    << "        RegisterProperty(\"Health\",     &Health,    \"Stats\", 0, 1000);\n"
-                                    << "        RegisterReference(\"Warning Light\", &WarningLight, ObjectRefType::Light, \"References\");\n"
-                                    << "    }\n\n"
-                                    << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
-                                    << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
-                                    << "        clone->CopyPropertiesFrom(*this);\n"
-                                    << "        return clone;\n"
-                                    << "    }\n\n"
-                                    << "    void OnCreate() override {\n"
-                                    << "        // Called once when behaviour is first attached to an object.\n"
-                                    << "    }\n\n"
-                                    << "    void Start() override {\n"
-                                    << "        // Called once before the first Update. Use for initialization.\n"
-                                    << "        auto* light = GetRespectiveObject.Light(WarningLight);\n"
-                                    << "        if (light) {\n"
-                                    << "            // Configure light\n"
-                                    << "        }\n"
-                                    << "        AddEngineLog(\"LogBehaviour\", \"" << behName << "::Start on \" + (GetOwner() ? GetOwner()->name : \"Unknown\"), 0);\n"
-                                    << "    }\n\n"
-                                    << "    void Update(float deltaTime) override {\n"
-                                    << "        if (!m_owner || !IsActive) return;\n\n"
-                                    << "        // --- Transform examples (capitalized keywords) ---\n"
-                                    << "        // Move forward:\n"
-                                    << "        // Transform.Location += glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime);\n"
-                                    << "        // Set world position:\n"
-                                    << "        // Transform.Position.WorldSpace(glm::vec3(0, 1, 0));\n"
-                                    << "        // Set rotation:\n"
-                                    << "        // Transform.Rotation.LocalSpace(glm::vec3(0, 90, 0));\n\n"
-                                    << "        // --- Input example ---\n"
-                                    << "        // if (InputSystem::Get().IsKeyDown(Key::W)) {\n"
-                                    << "        //     Transform.Location += glm::vec3(0, 0, -1) * (MoveSpeed * deltaTime);\n"
-                                    << "        // }\n\n"
-                                    << "        // --- Access sibling behaviours ---\n"
-                                    << "        // auto* health = GetBehaviour<HealthBehaviour>();\n"
-                                    << "        // if (health) { /* use it */ }\n\n"
-                                    << "        // --- Runtime spawn ---\n"
-                                    << "        // GameObject* bullet = SpawnGameObject(\"Bullet\", m_owner->position);\n"
-                                    << "        // if (bullet) { bullet->AddBehaviour(std::make_shared<BulletBehaviour>()); }\n"
-                                    << "    }\n\n"
-                                    << "    void LateUpdate(float deltaTime) override {\n"
-                                    << "        // Called after all Update() calls each frame.\n"
-                                    << "    }\n\n"
-                                    << "    void OnDestroy() override {\n"
-                                    << "        // Called once when behaviour is destroyed / owner is deleted.\n"
-                                    << "    }\n"
-                                    << "};\n\n"
-                                    << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
-                            }
+                    bool enterPressed = ImGui::IsKeyPressed(ImGuiKey_Enter);
+                    bool createClicked = ImGui::Button("Create", ImVec2(120, 0));
 
-                            std::ofstream metaFile(metaPath);
-                            if (metaFile.is_open()) {
-                                AssetID aid = AssetID::CreateRandom();
-                                metaFile << "# Eunoia-Editor Asset Sidecar Metadata\n"
-                                         << "assetId: " << aid.ToString() << "\n"
-                                         << "type: Behaviour\n"
-                                         << "baseClass: EunoiaBehaviour\n"
-                                         << "virtualPath: " << currentVirtualDir << "/Behaviours/" << behName << ".cpp\n";
-                            }
+                    if (!canCreate) {
+                        ImGui::EndDisabled();
+                    }
 
-                            // Register the newly created script file immediately so it appears in Details Panel Behaviours list
-                            BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
-                            SyncRegistryWithUIProgress(contentRootPath);
-                            AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir + "/Behaviours/", 2);
+                    if (canCreate && (createClicked || enterPressed)) {
+                        std::string behName = inputName;
+                        std::string diskSub = currentVirtualDir;
+                        if (diskSub.rfind("/Game", 0) == 0) diskSub = diskSub.substr(5);
+                        if (!diskSub.empty() && diskSub[0] == '/') diskSub.erase(0, 1);
+                        // Create directly in current folder (do NOT create a folder called "Behaviours")
+                        std::filesystem::path behDir = diskSub.empty() ? contentRootPath : (contentRootPath / diskSub);
+                        std::error_code bec;
+                        std::filesystem::create_directories(behDir, bec);
 
-                            // Open project as workspace in VS Code and open the script file
-                            LaunchVSCodeWorkspace(cppPath.string());
-                            OpenScriptInCodeEditor(cppPath.string());
+                        // Create behaviour .cpp file in the current folder
+                        std::filesystem::path cppPath = behDir / (behName + ".cpp");
+                        std::filesystem::path metaPath = behDir / (behName + ".cpp.assetmeta");
+
+                        std::ofstream cppFile(cppPath);
+                        if (cppFile.is_open()) {
+                            cppFile << "#include <EngineScene/EunoiaBehaviour.h>\n"
+                                << "#include <EngineScene/BehaviourRegistry.h>\n"
+                                << "#include <EngineScene/GameObject.h>\n"
+                                << "#include <EnginePlatform/InputSystem.h>\n"
+                                << "#include <EngineCore/Log.h>\n\n"
+                                << "// ============================================================================\n"
+                                << "// Empty Base Behaviour Structure\n"
+                                << "// ============================================================================\n"
+                                << "class " << behName << " : public EunoiaBehaviour {\n"
+                                << "public:\n"
+                                << "    " << behName << "() {\n"
+                                << "        m_className   = \"" << behName << "\";\n"
+                                << "        m_displayName = \"" << behName << "\";\n"
+                                << "        RegisterProperties();\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Property Registration (Exposed in Editor Details Panel)\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    void RegisterProperties() override {\n"
+                                << "        m_properties.clear();\n"
+                                << "        // RegisterProperty(\"Property Name\", &variable, \"Category\");\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Deep copy support for Play Mode and Undo / Redo\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
+                                << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
+                                << "        clone->CopyPropertiesFrom(*this);\n"
+                                << "        return clone;\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Lifecycle Methods\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    void OnCreate() override {\n"
+                                << "        // Called once when behaviour is instantiated or attached\n"
+                                << "    }\n\n"
+                                << "    void OnEnable() override {\n"
+                                << "        // Called when behaviour or owner becomes enabled\n"
+                                << "    }\n\n"
+                                << "    void Start() override {\n"
+                                << "        // Called once before the first frame Update\n"
+                                << "    }\n\n"
+                                << "    void Update(float deltaTime) override {\n"
+                                << "        // Called every frame\n"
+                                << "    }\n\n"
+                                << "    void FixedUpdate(float fixedDeltaTime) override {\n"
+                                << "        // Called at fixed time intervals (physics / fixed tick)\n"
+                                << "    }\n\n"
+                                << "    void LateUpdate(float deltaTime) override {\n"
+                                << "        // Called after all Update calls each frame\n"
+                                << "    }\n\n"
+                                << "    void OnDisable() override {\n"
+                                << "        // Called when behaviour or owner becomes disabled\n"
+                                << "    }\n\n"
+                                << "    void OnDestroy() override {\n"
+                                << "        // Called when behaviour is removed or owner is destroyed\n"
+                                << "    }\n"
+                                << "};\n\n"
+                                << "// Register behaviour with the engine's BehaviourRegistry\n"
+                                << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
                         }
+
+                        std::ofstream metaFile(metaPath);
+                        if (metaFile.is_open()) {
+                            AssetID aid = AssetID::CreateRandom();
+                            std::string vPath = (currentVirtualDir.empty() || currentVirtualDir == "/") ?
+                                ("/" + behName) : (currentVirtualDir + "/" + behName);
+                            metaFile << "# Eunoia-Editor Asset Sidecar Metadata\n"
+                                     << "assetId: " << aid.ToString() << "\n"
+                                     << "type: Behaviour\n"
+                                     << "baseClass: EunoiaBehaviour\n"
+                                     << "virtualPath: " << vPath << "\n";
+                        }
+#ifdef _WIN32
+                        SetFileAttributesW(metaPath.wstring().c_str(), FILE_ATTRIBUTE_HIDDEN);
+#endif
+
+                        // Register the newly created script file immediately so it appears in Details Panel Behaviours list
+                        BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
+                        SyncRegistryWithUIProgress(contentRootPath);
+                        AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir, 2);
+
+                        // Open project as workspace in VS Code and open the script file
+                        LaunchVSCodeWorkspace(cppPath.string());
+                        OpenScriptInCodeEditor(cppPath.string());
+
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
@@ -4095,6 +5676,23 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                     // 2. Assets from AssetRegistry
                     for (const auto& meta : displayAssets) {
+                        std::string sPath = meta.sourcePath;
+                        std::transform(sPath.begin(), sPath.end(), sPath.begin(), ::tolower);
+                        std::string vPath = meta.virtualPath;
+                        std::transform(vPath.begin(), vPath.end(), vPath.begin(), ::tolower);
+                        std::string oName = meta.objectName;
+                        std::transform(oName.begin(), oName.end(), oName.begin(), ::tolower);
+
+                        // Do not show metadata files (.assetmeta, .meta) in Content Browser
+                        if (sPath.find(".assetmeta") != std::string::npos ||
+                            sPath.find(".meta") != std::string::npos ||
+                            vPath.find(".assetmeta") != std::string::npos ||
+                            vPath.find(".meta") != std::string::npos ||
+                            oName.find(".assetmeta") != std::string::npos ||
+                            oName.find(".meta") != std::string::npos) {
+                            continue;
+                        }
+
                         ImGui::TableNextRow();
                         ImGui::PushID(meta.id.ToString().c_str());
 
@@ -4309,6 +5907,125 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
         }
     }
     ImGui::End();
+}
+
+void EngineUI::RenderLayoutSplitters() {
+    if (isImmersiveMode) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+    if (!vp || vp->Size.x <= 10.0f || vp->Size.y <= 10.0f) return;
+
+    float margin = uiMargin;
+    float gap = uiGap;
+
+    float curBottomH = (showBottomDrawer ? (bottomDrawerOpen ? bottomDockHeight : 38.0f) : 0.0f);
+    float bottomY = vp->Pos.y + vp->Size.y - curBottomH - margin;
+    float sidebarsY = vp->Pos.y + margin + topBarHeight + gap;
+    float sidebarsH = (curBottomH > 0.0f) ? (bottomY - gap - sidebarsY) : (vp->Pos.y + vp->Size.y - margin - sidebarsY);
+
+    ImVec2 mousePos = ImGui::GetIO().MousePos;
+    bool mouseDown = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+    bool mouseClicked = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+    ImDrawList* drawList = ImGui::GetForegroundDrawList();
+
+    static bool s_dragLeft = false;
+    static bool s_dragRight = false;
+    static bool s_dragBottom = false;
+
+    // 1. Left Sidebar Splitter (adjusts leftSidebarWidth)
+    if (showOutliner) {
+        float splitX = vp->Pos.x + margin + leftSidebarWidth;
+        bool inLeftHit = (mousePos.x >= splitX - 5.0f && mousePos.x <= splitX + 5.0f &&
+                          mousePos.y >= sidebarsY && mousePos.y <= sidebarsY + sidebarsH);
+
+        if (!s_dragRight && !s_dragBottom) {
+            if (inLeftHit && mouseClicked) s_dragLeft = true;
+        }
+
+        if (s_dragLeft) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                float delta = ImGui::GetIO().MouseDelta.x;
+                if (delta != 0.0f) {
+                    float maxW = vp->Size.x - rightSidebarWidth - 250.0f;
+                    leftSidebarWidth = std::clamp(leftSidebarWidth + delta, 180.0f, std::max(200.0f, maxW));
+                }
+                drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragLeft = false;
+                SaveEditorConfig();
+            }
+        } else if (inLeftHit && !s_dragRight && !s_dragBottom) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
+
+    // 2. Right Sidebar Splitter (adjusts rightSidebarWidth)
+    if (showDetails) {
+        float splitX = vp->Pos.x + vp->Size.x - rightSidebarWidth - margin;
+        bool inRightHit = (mousePos.x >= splitX - 5.0f && mousePos.x <= splitX + 5.0f &&
+                           mousePos.y >= sidebarsY && mousePos.y <= sidebarsY + sidebarsH);
+
+        if (!s_dragLeft && !s_dragBottom) {
+            if (inRightHit && mouseClicked) s_dragRight = true;
+        }
+
+        if (s_dragRight) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+                float delta = ImGui::GetIO().MouseDelta.x;
+                if (delta != 0.0f) {
+                    float maxW = vp->Size.x - leftSidebarWidth - 250.0f;
+                    rightSidebarWidth = std::clamp(rightSidebarWidth - delta, 200.0f, std::max(220.0f, maxW));
+                }
+                drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragRight = false;
+                SaveEditorConfig();
+            }
+        } else if (inRightHit && !s_dragLeft && !s_dragBottom) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(splitX, sidebarsY), ImVec2(splitX, sidebarsY + sidebarsH), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
+
+    // 3. Bottom Content Browser Splitter (adjusts bottomDockHeight)
+    if (showBottomDrawer && bottomDrawerOpen) {
+        float splitY = bottomY;
+        float startX = vp->Pos.x + margin;
+        float endX = vp->Pos.x + vp->Size.x - margin;
+        bool inBottomHit = (mousePos.y >= splitY - 5.0f && mousePos.y <= splitY + 5.0f &&
+                            mousePos.x >= startX && mousePos.x <= endX);
+
+        if (!s_dragLeft && !s_dragRight) {
+            if (inBottomHit && mouseClicked) s_dragBottom = true;
+        }
+
+        if (s_dragBottom) {
+            if (mouseDown) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+                float delta = ImGui::GetIO().MouseDelta.y;
+                if (delta != 0.0f) {
+                    float maxH = vp->Size.y - topBarHeight - 120.0f;
+                    bottomDockHeight = std::clamp(bottomDockHeight - delta, 100.0f, std::max(150.0f, maxH));
+                }
+                drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(30, 160, 255, 255), 3.0f);
+            } else {
+                s_dragBottom = false;
+                SaveEditorConfig();
+            }
+        } else if (inBottomHit && !s_dragLeft && !s_dragRight) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(30, 160, 255, 200), 2.0f);
+        } else {
+            drawList->AddLine(ImVec2(startX, splitY), ImVec2(endX, splitY), IM_COL32(42, 45, 52, 180), 1.0f);
+        }
+    }
 }
 
 void EngineUI::RenderGizmo(Scene& scene, OrbitCamera& camera, float viewportWidth, float viewportHeight) {
@@ -4543,6 +6260,98 @@ void EngineUI::RenderHelpModal() {
         }
         ImGui::EndPopup();
     }
+}
+
+void EngineUI::RenderClusterCullingStats(Scene& scene) {
+    ImGui::SetNextWindowSize(ImVec2(520, 480), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Mesh Cluster Culling Statistics", &showClusterCullingStats)) {
+        auto& cullingSys = Eunoia::MeshClusterCullingSystem::Get();
+        auto& cfg = cullingSys.GetConfig();
+        const auto& stats = cullingSys.GetStats();
+
+        ImGui::TextColored(ImVec4(0.2f, 0.85f, 1.0f, 1.0f), "DirectX 12 GPU Mesh Cluster Culling Pipeline");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (ImGui::Checkbox("Enable Cluster Culling System", &cfg.enabled)) {
+            cullingSys.SetConfig(cfg);
+        }
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Indirect Rendering", &cfg.enableIndirectRendering)) {
+            cullingSys.SetConfig(cfg);
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("Culling Stages:");
+        if (ImGui::Checkbox("Frustum Culling", &cfg.enableFrustumCulling)) cullingSys.SetConfig(cfg);
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Backface / Normal Cone", &cfg.enableBackfaceCulling)) cullingSys.SetConfig(cfg);
+
+        if (ImGui::Checkbox("Hi-Z Occlusion", &cfg.enableHiZOcclusion)) cullingSys.SetConfig(cfg);
+        ImGui::SameLine();
+        if (ImGui::Checkbox("Screen-Space Size", &cfg.enableScreenSizeCulling)) cullingSys.SetConfig(cfg);
+
+        ImGui::Spacing();
+        const char* debugModes[] = {
+            "None (Default)",
+            "Show Clusters",
+            "Show Cluster Bounds",
+            "Show Visible Clusters",
+            "Show Culled Clusters",
+            "Show Hi-Z",
+            "Show Cluster IDs"
+        };
+        if (ImGui::Combo("Debug Mode", &cfg.debugVisualizationMode, debugModes, IM_ARRAYSIZE(debugModes))) {
+            cullingSys.SetConfig(cfg);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(0.9f, 0.9f, 0.2f, 1.0f), "Real-Time Pipeline Statistics:");
+        ImGui::Spacing();
+
+        if (ImGui::BeginTable("ClusterStatsTable", 2, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Objects Enabled");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.objectsEnabled);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Total Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.totalClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Visible Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.2f, 1.0f), "%u", stats.visibleClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Culled Clusters");
+            ImGui::TableSetColumnIndex(1); ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.2f, 1.0f), "%u", stats.culledClusters);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Visibility Ratio");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f%%", stats.visibilityRatio);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Culling Ratio");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.2f%%", stats.cullingRatio);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("CPU Culling Time");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%.3f ms", stats.cpuCullingTimeMs);
+
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::Text("Indirect Draws");
+            ImGui::TableSetColumnIndex(1); ImGui::Text("%u", stats.indirectDraws);
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+        if (stats.objectsEnabled == 0) {
+            ImGui::TextDisabled("ℹ Select an actor in Outliner -> Details panel -> Rendering -> check 'Mesh Cluster Culling' to enable.");
+        }
+    }
+    ImGui::End();
 }
 
 void EngineUI::RenderLoadingModal() {
@@ -4916,7 +6725,8 @@ void EngineUI::RenderCookModal() {
 
     static char outputDirBuf[260] = "Cooked";
     ImGui::InputText("Target Subdirectory", outputDirBuf, sizeof(outputDirBuf));
-    std::filesystem::path fullCookedPath = contentRootPath / outputDirBuf;
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path fullCookedPath = projectBase / outputDirBuf;
     ImGui::TextDisabled("Output Location: %s", fullCookedPath.string().c_str());
 
     static int targetPlatform = 0;
@@ -4927,7 +6737,7 @@ void EngineUI::RenderCookModal() {
     if (ImGui::Button("🚀 Start Cooking Now", ImVec2(180, 30))) {
         cookLog += "\n=== Starting Asset Cooking Pipeline ===\n";
         cookLog += "Target Platform: " + std::string(platforms[targetPlatform]) + "\n";
-        cookLog += "Project Root: " + contentRootPath.string() + "\n";
+        cookLog += "Project Root: " + projectBase.string() + "\n";
         cookLog += "Cooked Destination: " + fullCookedPath.string() + "\n";
 
         StartLoadingTask("Cooking Project Assets", "Initializing destination...", 0.05f);
@@ -4968,112 +6778,293 @@ void EngineUI::RenderCookModal() {
 }
 
 // ============================================================================
-// Play Mode / Editor Mode Management (dev.md Section 30-36)
+// Play Mode / External Game Window Management (User Request: external window only)
 // ============================================================================
 
-extern void WaitForGpuIdle();
+static HANDLE s_gameProcessHandle = NULL;
+static DWORD s_gameProcessId = 0;
+
+bool EngineUI::IsExternalGameRunning() {
+    if (!s_gameProcessHandle) return false;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(s_gameProcessHandle, &exitCode)) {
+        if (exitCode == STILL_ACTIVE) {
+            return true;
+        }
+    }
+    CloseHandle(s_gameProcessHandle);
+    s_gameProcessHandle = NULL;
+    s_gameProcessId = 0;
+    return false;
+}
+
+void EngineUI::StopExternalGame() {
+    if (!s_gameProcessHandle) return;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(s_gameProcessHandle, &exitCode) && exitCode == STILL_ACTIVE) {
+        TerminateProcess(s_gameProcessHandle, 0);
+        AddLog("LogPlayLevel", "External Game window closed.", 0);
+    }
+    CloseHandle(s_gameProcessHandle);
+    s_gameProcessHandle = NULL;
+    s_gameProcessId = 0;
+}
 
 void EngineUI::EnterPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
-    if (scene.isPlayMode) return;
-
-    // Flush and wait for in-flight GPU frames before modifying scene state and UI viewport
-    WaitForGpuIdle();
-
-    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
-    if (cam && scene.activeLevelCameraId != -1) {
-        GameObject* camObj = scene.FindObject(scene.activeLevelCameraId);
-        if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera)) {
-            savedCameraTarget = cam->target;
-            savedCameraDistance = cam->distance;
-            savedCameraYaw = cam->yaw;
-            savedCameraPitch = cam->pitch;
-            savedCameraFov = cam->fov;
-            savedCameraIsOrtho = cam->isOrthographic;
-            savedCameraOrthoSize = cam->orthoSize;
-            savedCameraNearPlane = cam->nearPlane;
-            savedCameraFarPlane = cam->farPlane;
-            hasSavedPlayModeCamera = true;
-
-            glm::mat4 worldMat = scene.GetWorldMatrix(*camObj);
-            glm::vec3 worldPos, worldRot, worldScale;
-            Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
-
-            cam->yaw = worldRot.y;
-            cam->pitch = worldRot.x;
-            cam->fov = camObj->camera.fov;
-            cam->isOrthographic = camObj->camera.isOrthographic;
-            cam->orthoSize = camObj->camera.orthoSize;
-            cam->nearPlane = std::max(0.01f, camObj->camera.nearPlane);
-            cam->farPlane = std::max(1.0f, camObj->camera.farPlane);
-            cam->distance = 1.0f;
-            cam->target = worldPos + cam->GetForward() * 1.0f;
-            AddLog("LogCamera", "Started Play Mode with Level Camera: " + camObj->name, 0);
-        } else {
-            hasSavedPlayModeCamera = false;
-        }
-    } else {
-        hasSavedPlayModeCamera = false;
-    }
-
-    // Hide all editor UI panels so the game view takes the full window
-    prevShowOutliner     = showOutliner;
-    prevShowDetails      = showDetails;
-    prevShowBottomDrawer = showBottomDrawer;
-    showOutliner     = false;
-    showDetails      = false;
-    showBottomDrawer = false;
-
-    // Hide gizmo and grid
-    prevShowGizmo = showGizmo;
-    prevShowGrid  = scene.showGrid;
-    showGizmo       = false;
-    scene.showGrid  = false;
-
-    g_pendingPickClick = false;
-    scene.StartPlayMode();
-    AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press ESC or DELETE to stop.", 0);
+    // Only external window game mode is supported (User Request: dont same window game mode)
+    LaunchGameSeparateWindow(scene);
 }
 
 void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
-    if (!scene.isPlayMode) return;
+    StopExternalGame();
+}
 
-    // Flush and wait for in-flight GPU frames before restoring scene actors and editor UI
-    WaitForGpuIdle();
-
-    scene.StopPlayMode();
-
-    g_pendingPickClick = false;
-    s_justExitedPlayMode = true;
-
-    // Ensure selected actor is preserved upon exiting Play Mode
-    if (scene.playModePreSelectedId != -1 && scene.FindObject(scene.playModePreSelectedId)) {
-        scene.selectedId = scene.playModePreSelectedId;
-    }
-    scene.ResolveAllBehaviourReferences();
-
-    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
-    if (cam && hasSavedPlayModeCamera) {
-        cam->target = savedCameraTarget;
-        cam->distance = savedCameraDistance;
-        cam->yaw = savedCameraYaw;
-        cam->pitch = savedCameraPitch;
-        cam->fov = savedCameraFov;
-        cam->isOrthographic = savedCameraIsOrtho;
-        cam->orthoSize = savedCameraOrthoSize;
-        cam->nearPlane = savedCameraNearPlane;
-        cam->farPlane = savedCameraFarPlane;
-        hasSavedPlayModeCamera = false;
-        AddLog("LogCamera", "Restored Viewport Camera after exiting Play Mode.", 0);
+void EngineUI::LaunchGameSeparateWindow(Scene& scene) {
+    if (IsExternalGameRunning()) {
+        AddLog("LogPlayLevel", "Game Mode is already running in an external window.", 1);
+        return;
     }
 
-    // Restore all editor panels
-    showOutliner     = prevShowOutliner;
-    showDetails      = prevShowDetails;
-    showBottomDrawer = prevShowBottomDrawer;
-    showGizmo        = prevShowGizmo;
-    scene.showGrid   = prevShowGrid;
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::string projName = projectBase.filename().string();
+    std::filesystem::path gameBuildDir = projectBase / "Build";
+    std::error_code ec;
 
-    AddLog("LogPlayLevel", "PIE: Play Mode Stopped. Editor restored.", 0);
+    // Auto-save current active scene so the separate game window always has latest actors & behaviours
+    std::filesystem::create_directories(gameBuildDir / "Scenes", ec);
+    std::filesystem::create_directories(projectBase / "Content" / "Scenes", ec);
+    SceneSerializer::SaveScene(scene, (gameBuildDir / "Scenes" / "Main.escene").string());
+    SceneSerializer::SaveScene(scene, (gameBuildDir / "Main.escene").string());
+    SceneSerializer::SaveScene(scene, (projectBase / "Content" / "Scenes" / "Main.escene").string());
+    AddLog("LogPlayLevel", "Saved active scene before opening Game Mode.", 0);
+
+    // Get current Eunoia-Editor.exe executable path
+    char exePathBuf[MAX_PATH] = {};
+    GetModuleFileNameA(NULL, exePathBuf, MAX_PATH);
+    std::filesystem::path editorExe(exePathBuf);
+
+    if (std::filesystem::exists(editorExe, ec)) {
+        std::string cmdArgs = "--game \"" + projectBase.string() + "\"";
+        std::string fullCmd = "\"" + editorExe.string() + "\" " + cmdArgs;
+
+        STARTUPINFOA si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        std::vector<char> cmdBuf(fullCmd.begin(), fullCmd.end());
+        cmdBuf.push_back('\0');
+
+        BOOL success = CreateProcessA(
+            NULL,
+            cmdBuf.data(),
+            NULL,
+            NULL,
+            FALSE,
+            0,
+            NULL,
+            projectBase.string().c_str(),
+            &si,
+            &pi
+        );
+
+        if (success) {
+            s_gameProcessHandle = pi.hProcess;
+            s_gameProcessId = pi.dwProcessId;
+            CloseHandle(pi.hThread);
+            AddLog("LogPlayLevel", "Launched Game Mode in separate window (PID: " + std::to_string(pi.dwProcessId) + ")", 2);
+        } else {
+            AddLog("LogPlayLevel", "Failed to launch game process (Error code: " + std::to_string(GetLastError()) + ")", 3);
+        }
+    } else {
+        AddLog("LogPlayLevel", "Could not locate engine executable: " + editorExe.string(), 3);
+    }
+}
+
+// ============================================================================
+// Behaviour Script Watcher & Compilation (User Request: ask compile or later)
+// ============================================================================
+
+void EngineUI::CheckForScriptChanges() {
+    if (showScriptCompileModal || isCompilingScripts) return;
+
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path contentDir = projectBase / "Content";
+    std::error_code ec;
+    if (!std::filesystem::exists(contentDir, ec)) return;
+
+    std::vector<std::string> detectedChanges;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(contentDir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".cpp") {
+            std::string pStr = entry.path().string();
+            std::string pLower = pStr;
+            std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+            if (pLower.find(".assetmeta") != std::string::npos || pLower.find(".meta") != std::string::npos) continue;
+
+            auto currentLwt = entry.last_write_time(ec);
+            if (ec) continue;
+
+            std::string stem = entry.path().stem().string();
+            BehaviourRegistry::Get().RegisterScriptFile(stem, pStr);
+
+            auto it = scriptFileTimestamps.find(pStr);
+            if (it == scriptFileTimestamps.end()) {
+                // Initial recording of this script file
+                scriptFileTimestamps[pStr] = currentLwt;
+            } else {
+                // If timestamp is newer, file was modified externally
+                if (currentLwt > it->second) {
+                    detectedChanges.push_back(pStr);
+                    // Update timestamp to current so we only notify once per file edit
+                    scriptFileTimestamps[pStr] = currentLwt;
+                }
+            }
+        }
+    }
+
+    if (!detectedChanges.empty()) {
+        pendingChangedScripts = detectedChanges;
+        showScriptCompileModal = true;
+    }
+}
+
+void EngineUI::TriggerCompileScripts(Scene* scene) {
+    if (isCompilingScripts) return;
+    isCompilingScripts = true;
+
+    AddLog("LogScript", "Starting compilation of behaviour scripts...", 0);
+
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path gameBuildDir = projectBase / "Build";
+    std::error_code ec;
+    std::filesystem::create_directories(gameBuildDir / "Scenes", ec);
+    std::filesystem::create_directories(projectBase / "Content" / "Scenes", ec);
+
+    if (scene) {
+        SceneSerializer::SaveScene(*scene, (gameBuildDir / "Scenes" / "Main.escene").string());
+        SceneSerializer::SaveScene(*scene, (gameBuildDir / "Main.escene").string());
+        SceneSerializer::SaveScene(*scene, (projectBase / "Content" / "Scenes" / "Main.escene").string());
+        AddLog("LogScript", "Active scene exported to game build.", 0);
+    }
+
+    std::filesystem::path engineRoot = FindEngineSourceRoot();
+    std::filesystem::path batPath = engineRoot / "CompileGameScripts.bat";
+    if (!std::filesystem::exists(batPath, ec)) {
+        batPath = "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine\\CompileGameScripts.bat";
+    }
+
+    std::string cmd = "cmd.exe /c \"" + batPath.string() + "\" \"" + projectBase.string() + "\" 2>&1";
+
+    // Asynchronously run compiler process in background thread
+    std::thread([this, cmd, projectBase]() {
+        FILE* pipe = _popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::lock_guard<std::mutex> lock(asyncLogMutex);
+            pendingAsyncLogs.push_back({ "LogScript", "Failed to launch script compiler batch process.", 3 });
+            isCompilingScripts = false;
+            return;
+        }
+
+        char buffer[256];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string line = buffer;
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            if (!line.empty()) {
+                std::lock_guard<std::mutex> lock(asyncLogMutex);
+                if (line.rfind("[ERROR]", 0) == 0 || line.find("error:") != std::string::npos) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 3 });
+                } else if (line.rfind("[SUCCESS]", 0) == 0) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 2 });
+                } else if (line.rfind("[INFO]", 0) == 0) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 0 });
+                } else {
+                    pendingAsyncLogs.push_back({ "LogBuild", line, 0 });
+                }
+            }
+        }
+
+        int exitCode = _pclose(pipe);
+        {
+            std::lock_guard<std::mutex> lock(asyncLogMutex);
+            if (exitCode == 0) {
+                pendingAsyncLogs.push_back({ "LogScript", "All behaviour scripts compiled successfully! Standalone Game binary is ready.", 2 });
+            } else {
+                pendingAsyncLogs.push_back({ "LogScript", "Script compilation finished with errors (Exit code " + std::to_string(exitCode) + ").", 3 });
+            }
+            pendingChangedScripts.clear();
+        }
+
+        // Update timestamps to latest after compile
+        std::error_code sEc;
+        std::filesystem::path contentDir = projectBase / "Content";
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(contentDir, std::filesystem::directory_options::skip_permission_denied, sEc)) {
+            if (entry.is_regular_file(sEc) && entry.path().extension() == ".cpp") {
+                scriptFileTimestamps[entry.path().string()] = entry.last_write_time(sEc);
+            }
+        }
+
+        isCompilingScripts = false;
+    }).detach();
+}
+
+void EngineUI::RenderScriptCompileModal(Scene& scene) {
+    if (!showScriptCompileModal) return;
+
+    ImGui::OpenPopup("Script Changes Detected##CompilePrompt");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Script Changes Detected##CompilePrompt", &showScriptCompileModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "⚡ Behaviour Script Changes Detected");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextWrapped("The following behaviour script(s) have been modified externally:");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+        float childHeight = std::min(140.0f, std::max(40.0f, (float)pendingChangedScripts.size() * 26.0f + 12.0f));
+        ImGui::BeginChild("##ChangedScriptsList", ImVec2(420.0f, childHeight), true);
+        for (const auto& scriptPath : pendingChangedScripts) {
+            std::string filename = std::filesystem::path(scriptPath).filename().string();
+            ImGui::BulletText("%s", filename.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scriptPath.c_str());
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::TextWrapped("Would you like to compile the updated behaviour script(s) now?");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // [ Compile ] button (Primary green)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.60f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.32f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.45f, 0.18f, 1.0f));
+        if (ImGui::Button("⚡ Compile", ImVec2(120, 32))) {
+            showScriptCompileModal = false;
+            ImGui::CloseCurrentPopup();
+            TriggerCompileScripts(&scene);
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine();
+        ImGui::Spacing();
+        ImGui::SameLine();
+
+        // [ Later ] button (Neutral gray)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.25f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.35f, 0.38f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.20f, 0.20f, 0.22f, 1.0f));
+        if (ImGui::Button("Later", ImVec2(100, 32))) {
+            showScriptCompileModal = false;
+            pendingChangedScripts.clear();
+            ImGui::CloseCurrentPopup();
+            AddLog("LogScript", "Behaviour script compilation deferred. You can compile anytime via [⚡ Compile] or Build menu.", 0);
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::EndPopup();
+    }
 }
 
 // ============================================================================
@@ -5115,6 +7106,9 @@ void EngineUI::RenderCodeEditor() {
                 LaunchVSCodeWorkspace(activeCodeEditorPath);
                 AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
             }
+            if (ImGui::MenuItem("⚡ Compile Script", "F7", false, !isCompilingScripts)) {
+                TriggerCompileScripts(nullptr);
+            }
             ImGui::EndMenuBar();
         }
 
@@ -5131,6 +7125,15 @@ void EngineUI::RenderCodeEditor() {
         if (ImGui::Button("🚀 Open in External IDE (VS Code)")) {
             LaunchVSCodeWorkspace(activeCodeEditorPath);
             AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
+        }
+        ImGui::SameLine();
+        if (isCompilingScripts) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "⏳ Compiling...");
+        } else {
+            if (ImGui::Button("⚡ Compile")) {
+                TriggerCompileScripts(nullptr);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compile this behaviour script and rebuild standalone game");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("| %s", activeCodeEditorPath.c_str());
@@ -5186,17 +7189,23 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
         }
 
         if (!obj->behaviours.empty()) {
-            if (!scene.isPlayMode) {
+            bool isGameRunning = IsExternalGameRunning();
+            if (!isGameRunning) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.70f, 0.32f, 1.0f));
-                if (ImGui::Button("▶ Run Play Mode to Test Movement", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
-                    EnterPlayMode(scene);
+                if (ImGui::Button("▶ Run Game in Separate Window", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                    LaunchGameSeparateWindow(scene);
                 }
                 ImGui::PopStyleColor(2);
-                ImGui::TextDisabled("ℹ Press [▶ Play] in toolbar or above to run behaviours.");
+                ImGui::TextDisabled("ℹ Runs behaviour scripts in a dedicated game window.");
                 ImGui::Spacing();
             } else {
-                ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ Simulation Active — Move with W, A, S, D keys!");
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+                if (ImGui::Button("⏹ Stop External Game", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                    StopExternalGame();
+                }
+                ImGui::PopStyleColor();
+                ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ Simulation Active in External Window");
                 ImGui::Spacing();
             }
         }
@@ -5222,9 +7231,14 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
                      !sEc && it != std::filesystem::recursive_directory_iterator();
                      it.increment(sEc)) {
                     if (!it->is_directory(sEc) && it->path().extension() == ".cpp") {
-                        std::string stem = it->path().stem().string();
-                        if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" && stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
-                            BehaviourRegistry::Get().RegisterScriptFile(stem, it->path().string());
+                        std::string pStr = it->path().string();
+                        std::string pLower = pStr;
+                        std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+                        if (pLower.find(".assetmeta") == std::string::npos && pLower.find(".meta") == std::string::npos) {
+                            std::string stem = it->path().stem().string();
+                            if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" && stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
+                                BehaviourRegistry::Get().RegisterScriptFile(stem, it->path().string());
+                            }
                         }
                     }
                 }
@@ -5281,6 +7295,28 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
             auto& b = obj->behaviours[i];
             if (!b) continue;
 
+            // Ensure user script behaviours are upgraded to dynamic script reflection with latest properties from .cpp
+            const auto& allRegistry = BehaviourRegistry::Get().GetAll();
+            auto regIt = allRegistry.find(b->GetClassName());
+            if (regIt != allRegistry.end() && !regIt->second.sourceCpp.empty()) {
+                if (regIt->second.isNative) {
+                    // Native compiled behaviour: retain native instance
+                    b->RefreshPropertiesFromSource();
+                } else if (b->GetSourceCppPath().empty() || b->GetProperties().empty()) {
+                    auto dynB = std::make_unique<DynamicScriptBehaviour>(b->GetClassName(), regIt->second.sourceCpp);
+                    dynB->SetScene(&scene);
+                    dynB->SetOwner(obj);
+                    dynB->SetEnabled(b->IsEnabled());
+                    dynB->CopyPropertiesFrom(*b);
+                    dynB->ResolveReferences(scene);
+                    b = std::move(dynB);
+                } else {
+                    b->RefreshPropertiesFromSource();
+                }
+            } else {
+                b->RefreshPropertiesFromSource();
+            }
+
             ImGui::PushID((int)i);
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
             ImGui::BeginChild("BehaviourCard", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
@@ -5319,6 +7355,9 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
 
             // Properties list
             auto& props = b->GetProperties();
+            if (props.empty()) {
+                ImGui::TextDisabled("  (No exposed properties)");
+            }
             for (size_t pi = 0; pi < props.size(); ++pi) {
                 auto& prop = props[pi];
                 ImGui::PushID((int)pi);
@@ -5499,6 +7538,282 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
             obj->ReorderBehaviour((size_t)moveDownIdx, (size_t)(moveDownIdx + 1));
         }
     }
+}
+
+void EngineUI::RenderProjectBrowser(Scene& scene, OrbitCamera& camera) {
+    if (!showProjectBrowser) return;
+
+    ImGuiViewport* vp = ImGui::GetMainViewport();
+
+    // 1. Dark semi-transparent backdrop
+    ImDrawList* bgDrawList = ImGui::GetForegroundDrawList();
+    bgDrawList->AddRectFilled(vp->Pos, ImVec2(vp->Pos.x + vp->Size.x, vp->Pos.y + vp->Size.y), IM_COL32(8, 12, 18, 220));
+
+    // 2. Centered Window
+    float winW = 820.0f;
+    float winH = 540.0f;
+    ImVec2 centerPos(vp->Pos.x + (vp->Size.x - winW) * 0.5f, vp->Pos.y + (vp->Size.y - winH) * 0.5f);
+    ImGui::SetNextWindowPos(centerPos, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Always);
+
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.0f, 18.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.12f, 0.60f, 0.95f, 0.85f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.10f, 0.12f, 0.16f, 0.98f));
+
+    bool open = true;
+    bool hasActiveProject = !activeProjectRoot.empty();
+
+    if (ImGui::Begin("📁 Project Browser###ProjectBrowserModal", hasActiveProject ? &open : nullptr, flags)) {
+        if (!open) {
+            showProjectBrowser = false;
+        }
+
+        // Title Header
+        ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "EUNOIA ENGINE");
+        ImGui::SameLine();
+        ImGui::TextDisabled("— Project Browser");
+        if (hasActiveProject) {
+            ImGui::SameLine(winW - 140.0f);
+            if (ImGui::SmallButton("✖ Return to Editor")) {
+                showProjectBrowser = false;
+            }
+        }
+
+        ImGui::TextWrapped("Select a previously created project, or configure and create a new empty game project.");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // Top Tabs: [ Recent Projects ] | [ New Project ]
+        bool tab0Active = (projectBrowserTab == 0);
+        if (tab0Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        std::string recentTabLabel = "📂 Recent Projects (" + std::to_string(recentProjects.size()) + ")";
+        if (ImGui::Button(recentTabLabel.c_str(), ImVec2(180, 32))) {
+            projectBrowserTab = 0;
+        }
+        if (tab0Active) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        bool tab1Active = (projectBrowserTab == 1);
+        if (tab1Active) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.08f, 0.50f, 0.90f, 1.0f));
+        if (ImGui::Button("➕ New Project", ImVec2(150, 32))) {
+            projectBrowserTab = 1;
+        }
+        if (tab1Active) ImGui::PopStyleColor();
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        if (ImGui::Button("📁 Browse for Project...", ImVec2(170, 32))) {
+            std::string selectedFolder = ShowSelectFolderDialog(nullptr, "Select Existing Project Folder");
+            if (!selectedFolder.empty()) {
+                LoadProject(selectedFolder, scene, camera);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        if (projectBrowserTab == 0) {
+            // =================================================================
+            // TAB 0: RECENT PROJECTS (PREVIOUSLY CREATED PROJECTS)
+            // =================================================================
+            ImGui::SetNextItemWidth(winW - 220.0f);
+            ImGui::InputTextWithHint("##ProjFilter", "🔍 Filter projects...", projectBrowserSearchBuf, sizeof(projectBrowserSearchBuf));
+            ImGui::SameLine();
+            if (ImGui::Button("🔄 Refresh List", ImVec2(140, 0))) {
+                LoadRecentProjects();
+            }
+
+            ImGui::Spacing();
+
+            // Projects List Child Window
+            ImGui::BeginChild("RecentProjectsScroll", ImVec2(0, winH - 240.0f), true, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            if (recentProjects.empty()) {
+                ImGui::Spacing();
+                ImGui::TextDisabled("No recent projects found.");
+                ImGui::Text("Click 'New Project' above to create your first game project!");
+            } else {
+                for (size_t i = 0; i < recentProjects.size(); ++i) {
+                    const auto& p = recentProjects[i];
+
+                    // Filter search
+                    if (strlen(projectBrowserSearchBuf) > 0) {
+                        std::string searchLower = projectBrowserSearchBuf;
+                        std::string nameLower = p.name;
+                        for (auto& c : searchLower) c = tolower(c);
+                        for (auto& c : nameLower) c = tolower(c);
+                        if (nameLower.find(searchLower) == std::string::npos && p.rootPath.find(projectBrowserSearchBuf) == std::string::npos) {
+                            continue;
+                        }
+                    }
+
+                    ImGui::PushID((int)i);
+                    bool isSelected = (selectedProjectIndex == (int)i);
+
+                    if (isSelected) {
+                        ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.12f, 0.45f, 0.85f, 0.45f));
+                        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0.16f, 0.52f, 0.95f, 0.65f));
+                    }
+
+                    ImGuiSelectableFlags sFlags = ImGuiSelectableFlags_AllowDoubleClick;
+                    if (ImGui::Selectable("##ProjectSelectable", isSelected, sFlags, ImVec2(0, 48))) {
+                        selectedProjectIndex = (int)i;
+                    }
+
+                    // DOUBLE CLICK TO OPEN PROJECT ("fblcik to open it")
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                        LoadProject(p.rootPath, scene, camera);
+                    }
+
+                    if (isSelected) {
+                        ImGui::PopStyleColor(2);
+                    }
+
+                    // Render content inside card
+                    ImGui::SameLine(12.0f);
+                    ImGui::BeginGroup();
+                    ImGui::TextColored(ImVec4(0.20f, 0.80f, 1.00f, 1.0f), "🎮 %s", p.name.c_str());
+                    ImGui::TextDisabled("Root: %s  |  Content: %s/Content", p.rootPath.c_str(), p.rootPath.c_str());
+                    ImGui::EndGroup();
+
+                    if (!p.lastOpened.empty()) {
+                        ImGui::SameLine(winW - 220.0f);
+                        ImGui::TextDisabled("%s", p.lastOpened.c_str());
+                    }
+
+                    ImGui::Separator();
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndChild();
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Bottom Actions for Tab 0
+            bool hasSelection = (selectedProjectIndex >= 0 && selectedProjectIndex < (int)recentProjects.size());
+            if (!hasSelection) ImGui::BeginDisabled();
+            if (ImGui::Button("🚀 Open Selected Project", ImVec2(200, 34))) {
+                if (hasSelection) {
+                    LoadProject(recentProjects[selectedProjectIndex].rootPath, scene, camera);
+                }
+            }
+            if (!hasSelection) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (!hasSelection) ImGui::BeginDisabled();
+            if (ImGui::Button("Remove From List", ImVec2(140, 34))) {
+                if (hasSelection) {
+                    recentProjects.erase(recentProjects.begin() + selectedProjectIndex);
+                    selectedProjectIndex = -1;
+                    SaveRecentProjects();
+                }
+            }
+            if (!hasSelection) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::TextDisabled("(Double-click any project to open immediately)");
+
+            if (hasActiveProject) {
+                ImGui::SameLine(winW - 170.0f);
+                if (ImGui::Button("Cancel", ImVec2(120, 34))) {
+                    showProjectBrowser = false;
+                }
+            }
+        } else {
+            // =================================================================
+            // TAB 1: NEW PROJECT (CREATE PROJECT SETUP)
+            // =================================================================
+            ImGui::TextColored(ImVec4(0.12f, 0.68f, 1.00f, 1.0f), "Create New Game Project");
+            ImGui::TextDisabled("Set the project name and location. A new empty project structure with Content folder will be created.");
+            ImGui::Spacing();
+
+            // 1. Project Name
+            ImGui::Text("Project Name:");
+            ImGui::SetNextItemWidth(360.0f);
+            ImGui::InputText("##NewProjNameInput", newProjectNameBuf, sizeof(newProjectNameBuf));
+
+            ImGui::Spacing();
+
+            // 2. Project Location
+            ImGui::Text("Project Location (Parent Folder):");
+            ImGui::SetNextItemWidth(560.0f);
+            ImGui::InputText("##NewProjLocInput", newProjectPathBuf, sizeof(newProjectPathBuf));
+            ImGui::SameLine();
+            if (ImGui::Button("Browse Folder...", ImVec2(140, 0))) {
+                std::string picked = ShowSelectFolderDialog(nullptr, "Select Folder for New Project");
+                if (!picked.empty()) {
+                    strncpy(newProjectPathBuf, picked.c_str(), sizeof(newProjectPathBuf) - 1);
+                }
+            }
+
+            ImGui::Spacing();
+
+            // 3. Computed Project Path & Content Structure Preview
+            std::filesystem::path targetProjectDir = std::filesystem::path(newProjectPathBuf) / newProjectNameBuf;
+            std::filesystem::path targetContentDir = targetProjectDir / "Content";
+            std::filesystem::path targetCookedDir  = targetProjectDir / "Cooked";
+            std::filesystem::path targetBuildDir   = targetProjectDir / "Build";
+
+            ImGui::BeginChild("NewProjPreview", ImVec2(0, 160), true);
+            ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.25f, 1.0f), "Project Structure Summary:");
+            ImGui::BulletText("Project Directory: %s", targetProjectDir.string().c_str());
+            ImGui::BulletText("Content Root (Content Browser): %s", targetContentDir.string().c_str());
+            ImGui::BulletText("Cooked Assets Directory: %s", targetCookedDir.string().c_str());
+            ImGui::BulletText("Standalone Game Build Directory: %s", targetBuildDir.string().c_str());
+            ImGui::BulletText("Starter Template: Empty Project (Default Scene & Material included)");
+            ImGui::EndChild();
+
+            ImGui::Spacing();
+
+            // Validation status
+            std::error_code ec;
+            bool nameValid = strlen(newProjectNameBuf) > 0;
+            bool pathValid = strlen(newProjectPathBuf) > 0;
+            bool targetExists = std::filesystem::exists(targetProjectDir, ec);
+
+            if (!nameValid) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "⚠️ Please enter a project name.");
+            } else if (!pathValid) {
+                ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "⚠️ Please select a valid project directory.");
+            } else if (targetExists) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f), "ℹ️ Folder already exists on disk. Will initialize/load project.");
+            } else {
+                ImGui::TextColored(ImVec4(0.3f, 0.9f, 0.4f, 1.0f), "✅ Ready to create empty project in selected path.");
+            }
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool canCreate = nameValid && pathValid;
+            if (!canCreate) ImGui::BeginDisabled();
+            if (ImGui::Button("✨ Create Project", ImVec2(180, 36))) {
+                CreateNewProject(newProjectPathBuf, newProjectNameBuf, scene, camera);
+            }
+            if (!canCreate) ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 36))) {
+                if (hasActiveProject) {
+                    showProjectBrowser = false;
+                } else {
+                    projectBrowserTab = 0;
+                }
+            }
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(3);
 }
 
 

@@ -17,12 +17,29 @@ add_executable(AssetRegistryTest
 target_link_libraries(AssetRegistryTest PRIVATE EngineAssets EngineCore)
 add_test(NAME AssetRegistryTest COMMAND AssetRegistryTest)
 
+add_executable(ProjectSetupTest
+    EngineAssets/ProjectSetupTest.cpp
+)
+target_include_directories(ProjectSetupTest PRIVATE ${EUNOIA_DEPS}/json)
+target_link_libraries(ProjectSetupTest PRIVATE EngineAssets EngineCore)
+add_test(NAME ProjectSetupTest COMMAND ProjectSetupTest)
+
 # EngineScene Tests
 add_executable(SceneTest
     EngineScene/SceneTest.cpp
 )
 target_link_libraries(SceneTest PRIVATE EngineScene EngineRenderer EngineAssets EnginePlatform EngineCore)
 add_test(NAME SceneTest COMMAND SceneTest)
+
+# EngineRHI Tests
+add_executable(RHITest
+    EngineRHI/RHITest.cpp
+    ${EUNOIA_ROOT}/Engine/EngineRHI/Src/DescriptorAllocator.cpp
+    ${EUNOIA_ROOT}/Engine/EngineRHI/Src/Fence.cpp
+    ${EUNOIA_ROOT}/Engine/EngineRHI/Src/PipelineState.cpp
+)
+target_link_libraries(RHITest PRIVATE EngineRHI EngineCore d3d12 dxgi d3dcompiler)
+add_test(NAME RHITest COMMAND RHITest)
 
 # PluginSystem Tests
 add_executable(PluginManagerTest

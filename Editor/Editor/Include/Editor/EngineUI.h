@@ -7,6 +7,12 @@
 #include <vector>
 #include <filesystem>
 #include <unordered_set>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
+#include <thread>
+
+struct GLFWwindow;
 
 struct EngineLogEntry {
     std::string category;
@@ -65,6 +71,11 @@ struct MaterialAsset {
     bool twoSided = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    bool normalMapYFlip = false;
+    int metallicChannel = 0;  // 0=R, 1=G, 2=B, 3=A
+    int roughnessChannel = 1; // 0=R, 1=G, 2=B, 3=A
+    int aoChannel = 0;        // 0=R, 1=G, 2=B, 3=A
+    int materialDebugMode = 0;
 };
 
 class EngineUI {
@@ -76,12 +87,40 @@ public:
     bool showViewportOverlay = true;
     bool showHelpModal = false;
     bool showUndoHistory = false;
+    bool showClusterCullingStats = false;
+
+    void RenderClusterCullingStats(Scene& scene);
 
     // Bottom drawer active tab: 0=Content Browser, 1=Output Log
     int bottomDrawerTab = 0;
     bool bottomDrawerOpen = true;
 
-    // Content Browser project root & navigation
+    // Project Management & Browser
+    struct ProjectEntry {
+        std::string name;
+        std::string rootPath;
+        std::string lastOpened;
+    };
+
+    bool showProjectBrowser = true;
+    int projectBrowserTab = 0; // 0 = Recent Projects, 1 = New Project
+    char newProjectNameBuf[64] = "MyProject";
+    char newProjectPathBuf[260] = "C:\\Projects\\Eunoia-Engine\\Projects";
+    char projectBrowserSearchBuf[64] = "";
+    int selectedProjectIndex = 0;
+
+    std::filesystem::path activeProjectRoot;
+    std::string activeProjectName = "";
+    std::vector<ProjectEntry> recentProjects;
+
+    void LoadRecentProjects();
+    void SaveRecentProjects();
+    bool CreateNewProject(const std::string& parentDir, const std::string& projName, Scene& scene, OrbitCamera& camera);
+    bool LoadProject(const std::filesystem::path& projRoot, Scene& scene, OrbitCamera& camera);
+    static std::string ShowSelectFolderDialog(void* owner = nullptr, const std::string& title = "Select Project Location");
+    static std::string ShowOpenProjectFileDialog();
+
+    // Content Browser project root & navigation (Root is in project's folder inside Content)
     std::filesystem::path contentRootPath;
     std::filesystem::path currentContentPath;
     char contentBrowserSearch[64] = "";
@@ -114,7 +153,7 @@ public:
     // UI layout dimensions (scaled for friendly visibility and comfort)
     float uiMargin = 0.0f;
     float uiGap = 0.0f;
-    float topBarHeight = 62.0f;
+    float topBarHeight = 68.0f;
     float leftSidebarWidth = 280.0f;
     float rightSidebarWidth = 320.0f;
     float bottomDockHeight = 260.0f;
@@ -124,7 +163,7 @@ public:
     };
 
     ViewportRect GetViewportRect(float windowWidth, float windowHeight) const {
-        if (isImmersiveMode) {
+        if (isImmersiveMode || isGameOnlyWindow) {
             return { 0.0f, 0.0f, windowWidth, windowHeight };
         }
         float topH = topBarHeight;
@@ -141,6 +180,40 @@ public:
         if (vpH < 10.0f) vpH = 10.0f;
 
         return { vpX, vpY, vpW, vpH };
+    }
+
+    struct CameraPipRect {
+        bool active = false;
+        float x = 0.0f;
+        float y = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+        int selectedCameraId = -1;
+    };
+
+    CameraPipRect GetCameraPipRect(float windowWidth, float windowHeight, const Scene& scene) const {
+        CameraPipRect rect;
+        if (isGameView || scene.isPlayMode || isGameOnlyWindow || scene.selectedId == -1) return rect;
+
+        const GameObject* selObj = scene.FindObject(scene.selectedId);
+        if (!selObj || (!selObj->isCamera && selObj->type != PrimitiveType::Camera)) return rect;
+
+        auto vpRect = GetViewportRect(windowWidth, windowHeight);
+        float pipW = 320.0f;
+        float pipH = 180.0f;
+        float headerH = 28.0f;
+        float margin = 14.0f;
+
+        float winX = vpRect.x + vpRect.width - pipW - margin;
+        float winY = vpRect.y + vpRect.height - (pipH + headerH) - margin;
+
+        rect.active = true;
+        rect.x = winX + 4.0f;
+        rect.y = winY + headerH;
+        rect.width = pipW - 8.0f;
+        rect.height = pipH - 4.0f;
+        rect.selectedCameraId = selObj->id;
+        return rect;
     }
 
     // Viewport display mode
@@ -201,6 +274,20 @@ public:
 
     EngineUI();
 
+    // Initialize EngineUI with a pre-selected project path (called after standalone project browser)
+    void InitWithProject(const std::filesystem::path& projectPath, Scene& scene, OrbitCamera& camera);
+
+    // Dynamic layout splitters and Configs.Editor.econfigs management
+    void LoadEditorConfig();
+    void SaveEditorConfig();
+    void RenderLayoutSplitters();
+
+    // Standalone Project Browser window (runs before editor, returns selected project path or empty)
+    static std::filesystem::path RunStandaloneProjectBrowser();
+
+    void SetWindow(GLFWwindow* window) { m_window = window; }
+    GLFWwindow* GetWindow() const { return m_window; }
+
     void AddLog(const std::string& category, const std::string& message, int level = 0);
     void SetupTheme();
     void Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit);
@@ -217,8 +304,8 @@ public:
     void OpenCookModal();
 
     // Material file I/O & Textures
-    bool LoadMaterialFile(const std::string& path, MaterialAsset& outMat);
-    bool SaveMaterialFile(const std::string& path, const MaterialAsset& mat);
+    static bool LoadMaterialFile(const std::string& path, MaterialAsset& outMat);
+    static bool SaveMaterialFile(const std::string& path, const MaterialAsset& mat);
     void OpenMaterialEditor(const std::string& path);
     void ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj, const MaterialAsset& ma);
     std::vector<TextureAssetEntry> ScanProjectTextures();
@@ -228,7 +315,8 @@ public:
     bool showAddBehaviourPopup = false;
     char behaviourSearchBuf[64] = "";
     bool showNewBehaviourPopup = false;
-    char newBehaviourNameBuf[64] = "PlayerController";
+    char newBehaviourNameBuf[64] = "NewBehaviour";
+    bool IsBehaviourNameAlreadyExists(const std::string& name) const;
 
     // In-Editor Code Editor (dev.md & User Request)
     bool showCodeEditor = false;
@@ -236,15 +324,51 @@ public:
     std::string activeCodeEditorPath = "";
     std::string activeCodeEditorFilename = "";
     std::string activeCodeEditorContent = "";
+    void SetupProjectDependencies(const std::filesystem::path& projectRoot);
     void OpenScriptInCodeEditor(const std::string& path);
     void RenderCodeEditor();
     void RenderBehavioursSection(Scene& scene, GameObject* obj);
     void EnterPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
     void ExitPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
+    void LaunchGameSeparateWindow(Scene& scene);
+    bool IsExternalGameRunning();
+    void StopExternalGame();
     void RenderScreenPrintOverlay(float startX, float startY);
 
+    bool isGameOnlyWindow = false;
+
+    // Behaviour Script Watcher & Compilation (User Request: ask compile or later)
+    bool showScriptCompileModal = false;
+    std::atomic<bool> isCompilingScripts{false};
+    float scriptWatchTimer = 0.0f;
+    std::unordered_map<std::string, std::filesystem::file_time_type> scriptFileTimestamps;
+    std::vector<std::string> pendingChangedScripts;
+    std::mutex asyncLogMutex;
+    std::vector<EngineLogEntry> pendingAsyncLogs;
+
+    void CheckForScriptChanges();
+    void TriggerCompileScripts(Scene* scene = nullptr);
+    void RenderScriptCompileModal(Scene& scene);
+
     uint64_t lightIconGpuHandle = 0;
+    uint64_t directionalLightIconGpuHandle = 0;
+    uint64_t pointLightIconGpuHandle = 0;
+    uint64_t spotLightIconGpuHandle = 0;
+    uint64_t areaLightIconGpuHandle = 0;
+    uint64_t skyLightIconGpuHandle = 0;
     uint64_t cameraIconGpuHandle = 0;
+    uint64_t engineIconGpuHandle = 0;
+
+    uint64_t GetLightIconGpuHandle(LightType type) const {
+        switch (type) {
+            case LightType::Directional: return directionalLightIconGpuHandle ? directionalLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Point:       return pointLightIconGpuHandle ? pointLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Spot:        return spotLightIconGpuHandle ? spotLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Area:        return areaLightIconGpuHandle ? areaLightIconGpuHandle : lightIconGpuHandle;
+            case LightType::Sky:         return skyLightIconGpuHandle ? skyLightIconGpuHandle : lightIconGpuHandle;
+            default:                     return lightIconGpuHandle;
+        }
+    }
 
     OrbitCamera* currentCamera = nullptr;
     bool hasSavedPlayModeCamera = false;
@@ -289,6 +413,8 @@ public:
 
 private:
     void RenderTopMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
+    void RenderCustomTitleBar(Scene& scene, bool& outShouldExit);
+    void RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outShouldExit);
     void RenderViewportOverlay(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs);
     void RenderOutliner(Scene& scene);
     void DrawOutlinerNode(GameObject& obj, Scene& scene, std::unordered_set<int>& visitedIds, int depth = 0);
@@ -299,10 +425,13 @@ private:
     void RenderCookModal();
     void RenderHelpModal();
     void RenderLoadingModal();
+    void RenderProjectBrowser(Scene& scene, OrbitCamera& camera);
 
     // Custom UE5-style UI widgets
     bool DrawTransformPill(const char* label, float& value, const glm::vec4& color, float resetValue = 0.0f, float speed = 0.05f);
 
     int m_pendingReparentChild = -1;
     int m_pendingReparentParent = -1;
+
+    GLFWwindow* m_window = nullptr;
 };

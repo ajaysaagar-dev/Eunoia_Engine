@@ -106,6 +106,7 @@ public:
             file << "        \"twoSided\": " << BoolStr(obj.twoSided) << ",\n";
             file << "        \"castShadows\": " << BoolStr(obj.castShadows) << ",\n";
             file << "        \"receiveShadows\": " << BoolStr(obj.receiveShadows) << ",\n";
+            file << "        \"meshClusterCulling\": " << BoolStr(obj.meshClusterCulling) << ",\n";
             file << "        \"opacity\": " << obj.opacity << ",\n";
             file << "        \"opacityMaskClipValue\": " << obj.opacityMaskClipValue << ",\n";
             file << "        \"uvScale\": [" << obj.uvScale.x << ", " << obj.uvScale.y << "],\n";
@@ -374,11 +375,8 @@ private:
         if (s == "PointLight" || s == "Point Light") return PrimitiveType::PointLight;
         if (s == "SpotLight" || s == "Spot Light") return PrimitiveType::SpotLight;
         if (s == "AreaLight" || s == "Area Light") return PrimitiveType::AreaLight;
-        if (s == "SkyLight" || s == "Sky Light") return PrimitiveType::SkyLight;
-        if (s == "AmbientLight" || s == "Ambient Light") return PrimitiveType::AmbientLight;
-        if (s == "HemisphereLight" || s == "Hemisphere Light") return PrimitiveType::HemisphereLight;
-        if (s == "TubeLight" || s == "Tube Light") return PrimitiveType::TubeLight;
-        if (s == "DiscLight" || s == "Disc Light") return PrimitiveType::DiscLight;
+        if (s == "SkyLight" || s == "Sky Light" || s == "AmbientLight" || s == "Ambient Light" || s == "HemisphereLight" || s == "Hemisphere Light") return PrimitiveType::SkyLight;
+        if (s == "TubeLight" || s == "Tube Light" || s == "DiscLight" || s == "Disc Light") return PrimitiveType::AreaLight;
         if (s == "Camera") return PrimitiveType::Camera;
         return PrimitiveType::Cube;
     }
@@ -725,6 +723,7 @@ private:
                 p = matBlock.find("\"twoSided\""); if (p != std::string::npos) obj.twoSided = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"castShadows\""); if (p != std::string::npos) obj.castShadows = ParseBoolAt(matBlock, p, true);
                 p = matBlock.find("\"receiveShadows\""); if (p != std::string::npos) obj.receiveShadows = ParseBoolAt(matBlock, p, true);
+                p = matBlock.find("\"meshClusterCulling\""); if (p != std::string::npos) obj.meshClusterCulling = ParseBoolAt(matBlock, p, false);
                 p = matBlock.find("\"opacity\""); if (p != std::string::npos) obj.opacity = ParseFloatAt(matBlock, p, 1.0f);
                 p = matBlock.find("\"opacityMaskClipValue\""); if (p != std::string::npos) obj.opacityMaskClipValue = ParseFloatAt(matBlock, p, 0.333f);
                 p = matBlock.find("\"uvScale\"");
@@ -905,7 +904,13 @@ private:
             // Restore mesh geometry for imported meshes, or empty mesh for empty/light actors
             if (obj.isImportedMesh && !obj.meshFilePath.empty()) {
                 ImportedModel model;
-                try { model = MeshImporter::Load(obj.meshFilePath); } catch (...) {}
+                try {
+                    model = MeshImporter::Load(obj.meshFilePath);
+                } catch (const std::exception& e) {
+                    std::cout << "[SceneSerializer] Error loading mesh for " << obj.name << ": " << e.what() << " (neglecting, forcing open)\n";
+                } catch (...) {
+                    std::cout << "[SceneSerializer] Unknown error loading mesh for " << obj.name << " (neglecting, forcing open)\n";
+                }
                 if (model.valid && !model.meshes.empty()) {
                     if (obj.submeshIndex >= 0 && obj.submeshIndex < (int)model.meshes.size()) {
                         obj.mesh.vertices = model.meshes[obj.submeshIndex].vertices;
@@ -969,6 +974,10 @@ private:
                         obj.mesh.vertices.clear();
                         obj.mesh.indices.clear();
                     }
+                } else {
+                    // Fallback to empty mesh or default cube representation so scene forces open
+                    obj.mesh = GeometryBuilder::CreateCube(1.0f, 1);
+                    std::cout << "[SceneSerializer] Notice: Actor '" << obj.name << "' (ID: " << obj.id << ") mesh '" << obj.meshFilePath << "' could not be loaded. Force opening with fallback geometry.\n";
                 }
             } else if (obj.type == PrimitiveType::Empty || obj.isLight || IsLightPrimitive(obj.type)) {
                 obj.isLight = (obj.type != PrimitiveType::Empty);

@@ -3,6 +3,7 @@
 #include <GLFW/glfw3native.h>
 
 #include <windows.h>
+#include <dwmapi.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_6.h>
@@ -32,12 +33,14 @@
 #include <EngineScene/LevelSerializer.h>
 #include <EngineRenderer/Camera.h>
 #include <Editor/EngineUI.h>
+#include <Editor/EditorGizmoSystem.h>
 #include <EngineAssets/TextureManager.h>
 #include <EngineAssets/AssetSystem.h>
 #include <EngineAssets/MeshImporter.h>
 #include <EnginePlatform/InputSystem.h>
 #include <EngineCore/EngineLogger.h>
 #include <EngineScene/ScreenPrint.h>
+#include <MeshClusterCulling/MeshClusterCulling.h>
 
 extern "C" {
     unsigned char *stbi_load(char const *filename, int *x, int *y, int *channels_in_file, int desired_channels);
@@ -54,14 +57,21 @@ const int WIDTH = 1728;
 const int HEIGHT = 1117;
 const UINT FRAME_COUNT = 2;
 
-// Real-Time Shadow Mapping Configuration (2048x2048 D32_FLOAT PCF)
+// Real-Time Shadow Mapping Configuration
 const UINT SHADOW_MAP_WIDTH = 2048;
 const UINT SHADOW_MAP_HEIGHT = 2048;
 const UINT POINT_SHADOW_MAP_SIZE = 512;
 const UINT MAX_SHADOW_POINT_LIGHTS = 4;
+const UINT MAX_SHADOW_SPOT_LIGHTS = 4;
 
-// Real-Time Point Lights Configuration
+// Real-Time Lights Configuration (Directional, Point, Spot, Area)
 const int MAX_POINT_LIGHTS = 64;
+
+static UINT g_currentDirShadowRes = 2048;
+static UINT g_currentPointShadowRes = 512;
+static UINT g_currentSpotShadowRes = 1024;
+static UINT g_activePointLightResolutions[MAX_SHADOW_POINT_LIGHTS] = { 512, 512, 512, 512 };
+static UINT g_activeSpotLightResolutions[MAX_SHADOW_SPOT_LIGHTS] = { 1024, 1024, 1024, 1024 };
 
 // HLSL Constant Buffer struct (must be 256-byte aligned in D3D12)
 struct alignas(256) SceneConstantBuffer
@@ -78,9 +88,13 @@ struct alignas(256) SceneConstantBuffer
 	float enableShadows;
 	float shadowMapSize;
 	float numPointLights;
+	glm::vec4 ambientColor;
 	glm::vec4 pointLightPosRange[MAX_POINT_LIGHTS];
 	glm::vec4 pointLightColorIntensity[MAX_POINT_LIGHTS];
-	glm::vec4 pointLightCastShadows[MAX_POINT_LIGHTS / 4]; // x,y,z,w corresponding to point lights (1.0 = cast shadows, 0.0 = no shadows)
+	glm::vec4 pointLightDirType[MAX_POINT_LIGHTS];
+	glm::vec4 pointLightSpotAreaParams[MAX_POINT_LIGHTS];
+	glm::vec4 pointLightShadowParams[MAX_POINT_LIGHTS];
+	glm::mat4 spotLightSpaceMatrices[MAX_SHADOW_SPOT_LIGHTS];
 };
 
 struct alignas(256) ShadowConstantBuffer
@@ -109,7 +123,16 @@ struct MaterialShaderConstants
 	float opacity;
 	float opacityMaskClipValue;
 	float hasOpacityTex;
+	float normalMapYFlip;
+	float roughnessChannel;
+	float metallicChannel;
+	float aoChannel;
+	float materialDebugMode;
+	float pad1;
+	float pad2;
+	float pad3;
 };
+static_assert(sizeof(MaterialShaderConstants) == 128, "MaterialShaderConstants must be 128 bytes (32 floats)");
 
 // Window & GLFW
 static GLFWwindow* g_window = nullptr;
@@ -173,6 +196,7 @@ static Scene g_scene;
 static OrbitCamera g_camera;
 static EngineUI g_engineUI;
 static std::vector<Scene::RenderBatch> g_sceneBatches;
+static size_t g_numPureSceneBatches = 0;
 
 struct DX12GpuTexture {
 	ID3D12Resource* resource = nullptr;
@@ -205,6 +229,13 @@ static D3D12_CPU_DESCRIPTOR_HANDLE g_pointShadowDsvHandles[MAX_SHADOW_POINT_LIGH
 static D3D12_CPU_DESCRIPTOR_HANDLE g_pointShadowSrvCpuHandle = {};
 static D3D12_GPU_DESCRIPTOR_HANDLE g_pointShadowSrvGpuHandle = {};
 static int g_activeShadowPointLights = 0;
+
+// Real-Time Spot / Area Light Shadow 2D Array Resources
+static ID3D12Resource* g_spotShadowDepthBuffer = nullptr;
+static D3D12_CPU_DESCRIPTOR_HANDLE g_spotShadowDsvHandles[MAX_SHADOW_SPOT_LIGHTS] = {};
+static D3D12_CPU_DESCRIPTOR_HANDLE g_spotShadowSrvCpuHandle = {};
+static D3D12_GPU_DESCRIPTOR_HANDLE g_spotShadowSrvGpuHandle = {};
+static int g_activeShadowSpotLights = 0;
 
 static ID3D12RootSignature* g_shadowRootSignature = nullptr;
 static ID3D12PipelineState* g_shadowPipelineState = nullptr;
@@ -524,65 +555,142 @@ static void DumpDREDInformation()
 	EngineLogger::Get().LogError("DirectX12", 0x887A0006, "DXGI_ERROR_DEVICE_HUNG / GPU Page Fault", logStream.str());
 }
 
+static std::vector<ID3D12Resource*> g_deferredReleases;
+
+void SafeDeferredRelease(ID3D12Resource*& pRes)
+{
+	if (pRes)
+	{
+		g_deferredReleases.push_back(pRes);
+		pRes = nullptr;
+	}
+}
+
+void FlushDeferredReleases()
+{
+	if (g_deferredReleases.empty()) return;
+	for (auto* res : g_deferredReleases)
+	{
+		if (res)
+		{
+			res->Release();
+		}
+	}
+	g_deferredReleases.clear();
+}
+
 bool SafeWaitForFence(ID3D12Fence* fence, UINT64 targetValue, HANDLE eventHandle, DWORD timeoutMs = 5000, const char* context = "GPU Fence")
 {
 	if (!fence || !eventHandle || g_deviceLost) return false;
 
 	if (fence->GetCompletedValue() >= targetValue) return true;
 
+	ResetEvent(eventHandle);
 	fence->SetEventOnCompletion(targetValue, eventHandle);
-	DWORD waitRes = WaitForSingleObject(eventHandle, timeoutMs);
 
-	if (waitRes == WAIT_TIMEOUT)
+	while (fence->GetCompletedValue() < targetValue)
 	{
-		std::cerr << "[RECOVERY] Engine detected stall at " << context << " (target fence: " << targetValue
-		          << ", completed: " << fence->GetCompletedValue() << ", timeout: " << timeoutMs << "ms)!\n";
+		DWORD waitRes = WaitForSingleObject(eventHandle, timeoutMs);
 
-		HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
-		if (FAILED(removedReason))
+		if (waitRes == WAIT_OBJECT_0)
 		{
-			g_deviceLost = true;
-			std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
-			DumpDREDInformation();
-			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
+			if (fence->GetCompletedValue() >= targetValue)
+			{
+				return true;
+			}
+		}
+		else if (waitRes == WAIT_TIMEOUT)
+		{
+			std::cerr << "[RECOVERY] Engine detected stall at " << context << " (target fence: " << targetValue
+			          << ", completed: " << fence->GetCompletedValue() << ", timeout: " << timeoutMs << "ms)!\n";
+
+			HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+			if (FAILED(removedReason))
+			{
+				g_deviceLost = true;
+				std::cerr << "[RECOVERY] D3D12 Device Removed reason: 0x" << std::hex << removedReason << std::dec << "\n";
+				DumpDREDInformation();
+				g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected (0x" + std::to_string(removedReason) + "). Please save work if possible and restart editor.", 3);
+				return false;
+			}
+
+			// Try a secondary wait of 3000ms before giving up
+			DWORD waitRetry = WaitForSingleObject(eventHandle, 3000);
+			if (waitRetry == WAIT_OBJECT_0 && fence->GetCompletedValue() >= targetValue)
+			{
+				return true;
+			}
+
+			removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+			if (FAILED(removedReason))
+			{
+				g_deviceLost = true;
+				std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
+				DumpDREDInformation();
+				g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
+			}
+			else
+			{
+				g_engineUI.AddLog("LogRecovery", std::string("Engine wait timeout at ") + context + ". GPU is taking longer than expected.", 1);
+			}
+
 			return false;
-		}
-
-		// Try a secondary wait of 3000ms before giving up
-		DWORD waitRetry = WaitForSingleObject(eventHandle, 3000);
-		if (waitRetry == WAIT_OBJECT_0 || fence->GetCompletedValue() >= targetValue)
-		{
-			return true;
-		}
-
-		removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
-		if (FAILED(removedReason))
-		{
-			g_deviceLost = true;
-			std::cerr << "[RECOVERY] D3D12 Device Removed on retry: 0x" << std::hex << removedReason << std::dec << "\n";
-			DumpDREDInformation();
-			g_engineUI.AddLog("LogRecovery", "GPU Device Lost/Removed detected on retry.", 3);
 		}
 		else
 		{
-			g_engineUI.AddLog("LogRecovery", std::string("Engine wait timeout at ") + context + ". GPU is taking longer than expected.", 1);
+			break;
 		}
-
-		return false;
 	}
 
-	return true;
+	return fence->GetCompletedValue() >= targetValue;
 }
 
 void WaitForGpuIdle()
 {
-	if (!g_commandQueue || !g_fence || !g_fenceEvent || g_deviceLost) return;
-	g_globalFenceValue++;
-	g_commandQueue->Signal(g_fence, g_globalFenceValue);
-	SafeWaitForFence(g_fence, g_globalFenceValue, g_fenceEvent, 5000, "WaitForGpuIdle");
+	if (!g_commandQueue || !g_fence || g_deviceLost) return;
+
+	const UINT64 fenceToWait = ++g_globalFenceValue;
+	HRESULT hr = g_commandQueue->Signal(g_fence, fenceToWait);
+	if (FAILED(hr)) return;
+
+	if (g_fence->GetCompletedValue() < fenceToWait)
+	{
+		HANDLE tempEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (tempEvent)
+		{
+			hr = g_fence->SetEventOnCompletion(fenceToWait, tempEvent);
+			if (SUCCEEDED(hr))
+			{
+				while (g_fence->GetCompletedValue() < fenceToWait)
+				{
+					DWORD res = WaitForSingleObject(tempEvent, 5000);
+					if (res == WAIT_OBJECT_0)
+					{
+						break;
+					}
+					else if (res == WAIT_TIMEOUT)
+					{
+						HRESULT removedReason = g_d3dDevice ? g_d3dDevice->GetDeviceRemovedReason() : S_OK;
+						if (FAILED(removedReason))
+						{
+							g_deviceLost = true;
+							DumpDREDInformation();
+							break;
+						}
+					}
+					else
+					{
+						break;
+					}
+				}
+			}
+			CloseHandle(tempEvent);
+		}
+	}
+
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
-		g_fenceValues[i] = g_globalFenceValue;
+		g_fenceValues[i] = fenceToWait;
 	}
 }
 
@@ -733,7 +841,16 @@ void InitFallbackTextures()
 	}
 }
 
-DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture& fallback)
+enum class TextureUsageSlot {
+	BaseColor,
+	Normal,
+	Roughness,
+	Metallic,
+	AO,
+	Opacity
+};
+
+DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture& fallback, TextureUsageSlot slot = TextureUsageSlot::BaseColor)
 {
 	if (name.empty() || name == "none") return fallback;
 
@@ -750,7 +867,8 @@ DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture
 		if (!tmResolved.empty()) resolved = tmResolved;
 	}
 
-	auto it = g_gpuTextureMap.find(resolved);
+	std::string cacheKey = resolved + "@slot=" + std::to_string((int)slot);
+	auto it = g_gpuTextureMap.find(cacheKey);
 	if (it != g_gpuTextureMap.end()) {
 		return it->second;
 	}
@@ -763,7 +881,7 @@ DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture
 
 	DX12GpuTexture tex = UploadTextureToD3D12(cached->data.data(), cached->width, cached->height, resolved);
 	if (tex.resource) {
-		g_gpuTextureMap[resolved] = tex;
+		g_gpuTextureMap[cacheKey] = tex;
 		return tex;
 	}
 	return fallback;
@@ -784,14 +902,14 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 	}
 
 	DX12GpuTexture texAlbedo  = (!albedo.empty() && albedo != "none")
-		? GetOrLoadGPUTexture(albedo, g_fallbackMissing)
+		? GetOrLoadGPUTexture(albedo, g_fallbackMissing, TextureUsageSlot::BaseColor)
 		: g_fallbackWhite;
-	DX12GpuTexture texNormal  = GetOrLoadGPUTexture(normal,  g_fallbackNormal);
-	DX12GpuTexture texRough   = GetOrLoadGPUTexture(rough,   g_fallbackRoughness);
-	DX12GpuTexture texMetal   = GetOrLoadGPUTexture(metal,   g_fallbackMetallic);
-	DX12GpuTexture texAO      = GetOrLoadGPUTexture(ao,      g_fallbackAO);
+	DX12GpuTexture texNormal  = GetOrLoadGPUTexture(normal,  g_fallbackNormal, TextureUsageSlot::Normal);
+	DX12GpuTexture texRough   = GetOrLoadGPUTexture(rough,   g_fallbackRoughness, TextureUsageSlot::Roughness);
+	DX12GpuTexture texMetal   = GetOrLoadGPUTexture(metal,   g_fallbackMetallic, TextureUsageSlot::Metallic);
+	DX12GpuTexture texAO      = GetOrLoadGPUTexture(ao,      g_fallbackAO, TextureUsageSlot::AO);
 	DX12GpuTexture texOpacity = (!opacity.empty() && opacity != "none")
-		? GetOrLoadGPUTexture(opacity, g_fallbackWhite)
+		? GetOrLoadGPUTexture(opacity, g_fallbackWhite, TextureUsageSlot::Opacity)
 		: g_fallbackWhite;
 
 	static D3D12_GPU_DESCRIPTOR_HANDLE s_fallbackTable = {};
@@ -894,24 +1012,30 @@ int createDepthStencilView(int width, int height)
 	return EXIT_SUCCESS;
 }
 
-int createShadowResources()
+int createDirectionalShadowResource(UINT dirRes = 2048)
 {
-	if (g_shadowDepthBuffer)
-	{
-		g_shadowDepthBuffer->Release();
-		g_shadowDepthBuffer = nullptr;
-	}
-	if (g_pointShadowDepthBuffer)
-	{
-		g_pointShadowDepthBuffer->Release();
-		g_pointShadowDepthBuffer = nullptr;
-	}
+	if (!g_d3dDevice) return EXIT_FAILURE;
 
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	dirRes = SnapRes(dirRes, 2048);
+
+	// Defer release of prior buffer
+	SafeDeferredRelease(g_shadowDepthBuffer);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC depthDesc = {};
 	depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	depthDesc.Alignment = 0;
-	depthDesc.Width = SHADOW_MAP_WIDTH;
-	depthDesc.Height = SHADOW_MAP_HEIGHT;
+	depthDesc.Width = dirRes;
+	depthDesc.Height = dirRes;
 	depthDesc.DepthOrArraySize = 1;
 	depthDesc.MipLevels = 1;
 	depthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -924,8 +1048,6 @@ int createShadowResources()
 	depthClear.Format = DXGI_FORMAT_D32_FLOAT;
 	depthClear.DepthStencil.Depth = 1.0f;
 	depthClear.DepthStencil.Stencil = 0;
-
-	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 
 	HRESULT hr = g_d3dDevice->CreateCommittedResource(
 		&heapProps,
@@ -953,15 +1075,15 @@ int createShadowResources()
 	g_d3dDevice->CreateDepthStencilView(g_shadowDepthBuffer, &dsvDesc, g_shadowDsvHandle);
 
 	// Create SRV in g_srvDescHeap for directional shadow map
-	UINT descIdx = 0;
-	if (!TryAllocSrvDescriptors(1, descIdx))
+	if (g_shadowSrvCpuHandle.ptr == 0)
 	{
-		descIdx = 0;
+		UINT descIdx = 0;
+		TryAllocSrvDescriptors(1, descIdx);
+		g_shadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_shadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_shadowSrvCpuHandle.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
+		g_shadowSrvGpuHandle.ptr += (UINT64)descIdx * g_srvDescriptorSize;
 	}
-	g_shadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
-	g_shadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
-	g_shadowSrvCpuHandle.ptr += (SIZE_T)descIdx * g_srvDescriptorSize;
-	g_shadowSrvGpuHandle.ptr += (UINT64)descIdx * g_srvDescriptorSize;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 	srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -970,14 +1092,33 @@ int createShadowResources()
 	srvDesc.Texture2D.MipLevels = 1;
 	g_d3dDevice->CreateShaderResourceView(g_shadowDepthBuffer, &srvDesc, g_shadowSrvCpuHandle);
 
-	// ------------------------------------------------------------------------
-	// Create Point Light Shadow Cubemap Array Texture (512x512, 4 lights * 6 faces = 24 slices)
-	// ------------------------------------------------------------------------
+	g_currentDirShadowRes = dirRes;
+	return EXIT_SUCCESS;
+}
+
+int createPointShadowResource(UINT ptRes = 512)
+{
+	if (!g_d3dDevice) return EXIT_FAILURE;
+
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	ptRes = SnapRes(ptRes, 512);
+
+	SafeDeferredRelease(g_pointShadowDepthBuffer);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC ptDepthDesc = {};
 	ptDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 	ptDepthDesc.Alignment = 0;
-	ptDepthDesc.Width = POINT_SHADOW_MAP_SIZE;
-	ptDepthDesc.Height = POINT_SHADOW_MAP_SIZE;
+	ptDepthDesc.Width = ptRes;
+	ptDepthDesc.Height = ptRes;
 	ptDepthDesc.DepthOrArraySize = MAX_SHADOW_POINT_LIGHTS * 6; // 24
 	ptDepthDesc.MipLevels = 1;
 	ptDepthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
@@ -991,7 +1132,7 @@ int createShadowResources()
 	ptDepthClear.DepthStencil.Depth = 1.0f;
 	ptDepthClear.DepthStencil.Stencil = 0;
 
-	hr = g_d3dDevice->CreateCommittedResource(
+	HRESULT hr = g_d3dDevice->CreateCommittedResource(
 		&heapProps,
 		D3D12_HEAP_FLAG_NONE,
 		&ptDepthDesc,
@@ -1023,15 +1164,15 @@ int createShadowResources()
 	}
 
 	// Create SRV in g_srvDescHeap for TextureCubeArray
-	UINT ptDescIdx = 0;
-	if (!TryAllocSrvDescriptors(1, ptDescIdx))
+	if (g_pointShadowSrvCpuHandle.ptr == 0)
 	{
-		ptDescIdx = 0;
+		UINT ptDescIdx = 0;
+		TryAllocSrvDescriptors(1, ptDescIdx);
+		g_pointShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_pointShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_pointShadowSrvCpuHandle.ptr += (SIZE_T)ptDescIdx * g_srvDescriptorSize;
+		g_pointShadowSrvGpuHandle.ptr += (UINT64)ptDescIdx * g_srvDescriptorSize;
 	}
-	g_pointShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
-	g_pointShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
-	g_pointShadowSrvCpuHandle.ptr += (SIZE_T)ptDescIdx * g_srvDescriptorSize;
-	g_pointShadowSrvGpuHandle.ptr += (UINT64)ptDescIdx * g_srvDescriptorSize;
 
 	D3D12_SHADER_RESOURCE_VIEW_DESC ptSrvDesc = {};
 	ptSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -1042,19 +1183,153 @@ int createShadowResources()
 	ptSrvDesc.TextureCubeArray.MipLevels = 1;
 	g_d3dDevice->CreateShaderResourceView(g_pointShadowDepthBuffer, &ptSrvDesc, g_pointShadowSrvCpuHandle);
 
-	// Create Shadow Constant Buffer (upload heap: slot 0 for directional, slots 1..24 for point lights)
-	UINT64 shadowCbSize = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6) * 256;
-	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(shadowCbSize);
-	D3D12_HEAP_PROPERTIES uploadHeap = CreateHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-	g_d3dDevice->CreateCommittedResource(
-		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
-		D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer)
+	g_currentPointShadowRes = ptRes;
+	return EXIT_SUCCESS;
+}
+
+int createSpotShadowResource(UINT spotRes = 1024)
+{
+	if (!g_d3dDevice) return EXIT_FAILURE;
+
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	spotRes = SnapRes(spotRes, 1024);
+
+	SafeDeferredRelease(g_spotShadowDepthBuffer);
+
+	D3D12_HEAP_PROPERTIES heapProps = CreateHeapProperties(D3D12_HEAP_TYPE_DEFAULT);
+	D3D12_RESOURCE_DESC spotDepthDesc = {};
+	spotDepthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+	spotDepthDesc.Alignment = 0;
+	spotDepthDesc.Width = spotRes;
+	spotDepthDesc.Height = spotRes;
+	spotDepthDesc.DepthOrArraySize = MAX_SHADOW_SPOT_LIGHTS; // 4
+	spotDepthDesc.MipLevels = 1;
+	spotDepthDesc.Format = DXGI_FORMAT_R32_TYPELESS;
+	spotDepthDesc.SampleDesc.Count = 1;
+	spotDepthDesc.SampleDesc.Quality = 0;
+	spotDepthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+	spotDepthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+	D3D12_CLEAR_VALUE spotDepthClear = {};
+	spotDepthClear.Format = DXGI_FORMAT_D32_FLOAT;
+	spotDepthClear.DepthStencil.Depth = 1.0f;
+	spotDepthClear.DepthStencil.Stencil = 0;
+
+	HRESULT hr = g_d3dDevice->CreateCommittedResource(
+		&heapProps,
+		D3D12_HEAP_FLAG_NONE,
+		&spotDepthDesc,
+		D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+		&spotDepthClear,
+		IID_PPV_ARGS(&g_spotShadowDepthBuffer)
 	);
-	if (g_shadowConstantBuffer) g_shadowConstantBuffer->SetName(L"g_shadowConstantBuffer");
-	D3D12_RANGE readRange = { 0, 0 };
-	g_shadowConstantBuffer->Map(0, &readRange, &g_pShadowConstantMapped);
+	if (FAILED(hr))
+	{
+		std::cerr << "Failed to create D3D12 spot shadow depth buffer: " << hr << std::endl;
+		return EXIT_FAILURE;
+	}
+	g_spotShadowDepthBuffer->SetName(L"g_spotShadowDepthBuffer");
+
+	// Create 4 DSVs at indices 26..29 of g_dsvDescHeap
+	for (UINT i = 0; i < MAX_SHADOW_SPOT_LIGHTS; ++i)
+	{
+		D3D12_DEPTH_STENCIL_VIEW_DESC spotDsvDesc = {};
+		spotDsvDesc.Format = DXGI_FORMAT_D32_FLOAT;
+		spotDsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+		spotDsvDesc.Flags = D3D12_DSV_FLAG_NONE;
+		spotDsvDesc.Texture2DArray.FirstArraySlice = i;
+		spotDsvDesc.Texture2DArray.ArraySize = 1;
+		spotDsvDesc.Texture2DArray.MipSlice = 0;
+
+		g_spotShadowDsvHandles[i] = g_dsvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_spotShadowDsvHandles[i].ptr += (SIZE_T)(26 + i) * g_dsvDescriptorSize;
+		g_d3dDevice->CreateDepthStencilView(g_spotShadowDepthBuffer, &spotDsvDesc, g_spotShadowDsvHandles[i]);
+	}
+
+	// Create SRV in g_srvDescHeap for Texture2DArray
+	if (g_spotShadowSrvCpuHandle.ptr == 0)
+	{
+		UINT spotDescIdx = 0;
+		TryAllocSrvDescriptors(1, spotDescIdx);
+		g_spotShadowSrvCpuHandle = g_srvDescHeap->GetCPUDescriptorHandleForHeapStart();
+		g_spotShadowSrvGpuHandle = g_srvDescHeap->GetGPUDescriptorHandleForHeapStart();
+		g_spotShadowSrvCpuHandle.ptr += (SIZE_T)spotDescIdx * g_srvDescriptorSize;
+		g_spotShadowSrvGpuHandle.ptr += (UINT64)spotDescIdx * g_srvDescriptorSize;
+	}
+
+	D3D12_SHADER_RESOURCE_VIEW_DESC spotSrvDesc = {};
+	spotSrvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+	spotSrvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+	spotSrvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+	spotSrvDesc.Texture2DArray.FirstArraySlice = 0;
+	spotSrvDesc.Texture2DArray.ArraySize = MAX_SHADOW_SPOT_LIGHTS;
+	spotSrvDesc.Texture2DArray.MipLevels = 1;
+	g_d3dDevice->CreateShaderResourceView(g_spotShadowDepthBuffer, &spotSrvDesc, g_spotShadowSrvCpuHandle);
+
+	g_currentSpotShadowRes = spotRes;
+	return EXIT_SUCCESS;
+}
+
+int createShadowResources(UINT dirRes = 2048, UINT ptRes = 512, UINT spotRes = 1024)
+{
+	createDirectionalShadowResource(dirRes);
+	createPointShadowResource(ptRes);
+	createSpotShadowResource(spotRes);
+
+	// 4. Shadow Constant Buffer (upload heap: slot 0 for directional, slots 1..24 for point lights, slots 25..28 for spot lights)
+	if (!g_shadowConstantBuffer)
+	{
+		UINT64 shadowCbSize = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + MAX_SHADOW_SPOT_LIGHTS) * 256;
+		D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(shadowCbSize);
+		D3D12_HEAP_PROPERTIES uploadHeap = CreateHeapProperties(D3D12_HEAP_TYPE_UPLOAD);
+		g_d3dDevice->CreateCommittedResource(
+			&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
+			D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&g_shadowConstantBuffer)
+		);
+		if (g_shadowConstantBuffer) g_shadowConstantBuffer->SetName(L"g_shadowConstantBuffer");
+		D3D12_RANGE readRange = { 0, 0 };
+		g_shadowConstantBuffer->Map(0, &readRange, &g_pShadowConstantMapped);
+	}
 
 	return EXIT_SUCCESS;
+}
+
+void EnsureShadowBuffers(UINT reqDirRes, UINT reqPtRes, UINT reqSpotRes)
+{
+	auto SnapRes = [](UINT r, UINT defVal) -> UINT {
+		if (r < 256) r = 256;
+		if (r > 4096) r = 4096;
+		if (r <= 384) return 256;
+		if (r <= 768) return 512;
+		if (r <= 1536) return 1024;
+		if (r <= 3072) return 2048;
+		return 4096;
+	};
+	reqDirRes = SnapRes(reqDirRes, 2048);
+	reqPtRes = SnapRes(reqPtRes, 512);
+	reqSpotRes = SnapRes(reqSpotRes, 1024);
+
+	bool needDir  = (!g_shadowDepthBuffer || reqDirRes != g_currentDirShadowRes);
+	bool needPt   = (!g_pointShadowDepthBuffer || reqPtRes != g_currentPointShadowRes);
+	bool needSpot = (!g_spotShadowDepthBuffer || reqSpotRes != g_currentSpotShadowRes);
+
+	if (needDir || needPt || needSpot)
+	{
+		WaitForGpuIdle();
+		FlushDeferredReleases();
+
+		if (needDir)  createDirectionalShadowResource(reqDirRes);
+		if (needPt)   createPointShadowResource(reqPtRes);
+		if (needSpot) createSpotShadowResource(reqSpotRes);
+	}
 }
 
 int initD3D12(HWND hwnd)
@@ -1189,7 +1464,7 @@ int initD3D12(HWND hwnd)
 	g_rtvDescHeap->SetName(L"g_rtvDescHeap");
 
 	D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-	dsvHeapDesc.NumDescriptors = 32; // Index 0: SwapChain Depth, Index 1: Directional Shadow Depth, Indices 2..25: Point Light Cubemap Faces
+	dsvHeapDesc.NumDescriptors = 64; // Index 0: SwapChain Depth, Index 1: Directional Shadow Depth, Indices 2..25: Point Cubemap Faces, Indices 26..29: Spot/Area Slices
 	dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
 	dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
 	g_d3dDevice->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&g_dsvDescHeap));
@@ -1259,12 +1534,15 @@ int initD3D12(HWND hwnd)
 	g_uploadFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 	g_uploadFenceValue = 0;
 
+	// 12. Initialize Mesh Cluster Culling Pipeline (dev.md Plugin)
+	Eunoia::MeshClusterCullingSystem::Get().Initialize(g_d3dDevice, g_commandQueue, (UINT)g_currentWidth, (UINT)g_currentHeight);
+
 	return EXIT_SUCCESS;
 }
 
 int createShadersAndPipeline()
 {
-	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t5 for materials, Descriptor Table t6 for shadow map, Descriptor Table t7 for point shadows, Samplers s0 and s1)
+	// 1. Root Signature (CBV b0, 32-bit constants b1, Descriptor Table t0-t5 for materials, Descriptor Table t6 for shadow map, Descriptor Table t7 for point shadows, Descriptor Table t8 for spot/area shadows, Samplers s0-s2)
 	D3D12_DESCRIPTOR_RANGE srvRange = {};
 	srvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
 	srvRange.NumDescriptors = 6;
@@ -1286,39 +1564,52 @@ int createShadersAndPipeline()
 	ptShadowSrvRange.RegisterSpace = 0;
 	ptShadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
 
-	D3D12_ROOT_PARAMETER rootParams[5] = {};
+	D3D12_DESCRIPTOR_RANGE spotShadowSrvRange = {};
+	spotShadowSrvRange.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+	spotShadowSrvRange.NumDescriptors = 1;
+	spotShadowSrvRange.BaseShaderRegister = 8;
+	spotShadowSrvRange.RegisterSpace = 0;
+	spotShadowSrvRange.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
+
+	D3D12_ROOT_PARAMETER rootParams[6] = {};
 	// 0: CBV b0 (Frame Constants)
 	rootParams[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
 	rootParams[0].Descriptor.ShaderRegister = 0;
 	rootParams[0].Descriptor.RegisterSpace = 0;
 	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-	// 1: 32-bit Constants b1 (24 floats Material Constants)
+	// 1: 32-bit Constants b1 (32 floats Material Constants)
 	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 	rootParams[1].Constants.ShaderRegister = 1;
 	rootParams[1].Constants.RegisterSpace = 0;
-	rootParams[1].Constants.Num32BitValues = 24;
+	rootParams[1].Constants.Num32BitValues = 32;
 	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-	// 2: Descriptor Table t0-t4 (5 SRVs for Material Textures)
+	// 2: Descriptor Table t0-t5 (6 SRVs for Material Textures)
 	rootParams[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[2].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[2].DescriptorTable.pDescriptorRanges = &srvRange;
 	rootParams[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// 3: Descriptor Table t5 (1 SRV for Directional Shadow Map)
+	// 3: Descriptor Table t6 (1 SRV for Directional Shadow Map)
 	rootParams[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[3].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[3].DescriptorTable.pDescriptorRanges = &shadowSrvRange;
 	rootParams[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// 4: Descriptor Table t6 (1 SRV for Point Light Shadow Cubemap Array)
+	// 4: Descriptor Table t7 (1 SRV for Point Light Shadow Cubemap Array)
 	rootParams[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 	rootParams[4].DescriptorTable.NumDescriptorRanges = 1;
 	rootParams[4].DescriptorTable.pDescriptorRanges = &ptShadowSrvRange;
 	rootParams[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	D3D12_STATIC_SAMPLER_DESC staticSamplers[2] = {};
+	// 5: Descriptor Table t8 (1 SRV for Spot / Area Light Shadow 2D Array)
+	rootParams[5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+	rootParams[5].DescriptorTable.NumDescriptorRanges = 1;
+	rootParams[5].DescriptorTable.pDescriptorRanges = &spotShadowSrvRange;
+	rootParams[5].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
+	D3D12_STATIC_SAMPLER_DESC staticSamplers[3] = {};
 	// Sampler 0: s0 (Anisotropic wrap for materials)
 	staticSamplers[0].Filter = D3D12_FILTER_ANISOTROPIC;
 	staticSamplers[0].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
@@ -1334,7 +1625,7 @@ int createShadersAndPipeline()
 	staticSamplers[0].RegisterSpace = 0;
 	staticSamplers[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
-	// Sampler 1: s1 (Hardware PCF Comparison Sampler for Shadow Map)
+	// Sampler 1: s1 (Hardware PCF Comparison Sampler for 2D Directional & Spot Shadow Maps)
 	staticSamplers[1].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
 	staticSamplers[1].AddressU = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
 	staticSamplers[1].AddressV = D3D12_TEXTURE_ADDRESS_MODE_BORDER;
@@ -1349,10 +1640,25 @@ int createShadersAndPipeline()
 	staticSamplers[1].RegisterSpace = 0;
 	staticSamplers[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
+	// Sampler 2: s2 (Hardware PCF Comparison Sampler for Point Light Cube Shadows - Clamp for seamless edges)
+	staticSamplers[2].Filter = D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+	staticSamplers[2].AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	staticSamplers[2].MipLODBias = 0.0f;
+	staticSamplers[2].MaxAnisotropy = 1;
+	staticSamplers[2].ComparisonFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+	staticSamplers[2].BorderColor = D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+	staticSamplers[2].MinLOD = 0.0f;
+	staticSamplers[2].MaxLOD = D3D12_FLOAT32_MAX;
+	staticSamplers[2].ShaderRegister = 2;
+	staticSamplers[2].RegisterSpace = 0;
+	staticSamplers[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+
 	D3D12_ROOT_SIGNATURE_DESC rootSigDesc = {};
-	rootSigDesc.NumParameters = 5;
+	rootSigDesc.NumParameters = 6;
 	rootSigDesc.pParameters = rootParams;
-	rootSigDesc.NumStaticSamplers = 2;
+	rootSigDesc.NumStaticSamplers = 3;
 	rootSigDesc.pStaticSamplers = staticSamplers;
 	rootSigDesc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
@@ -1371,7 +1677,7 @@ int createShadersAndPipeline()
 	g_d3dDevice->CreateRootSignature(0, serializedRootSig->GetBufferPointer(), serializedRootSig->GetBufferSize(), IID_PPV_ARGS(&g_rootSignature));
 	serializedRootSig->Release();
 
-	// 2. Compile Main HLSL Shaders with Hardware PBR, 2K Textures & 16-Tap PCF Real-Time Shadows
+	// 2. Compile Main HLSL Shaders with Hardware PBR, 2K Textures & Real-Time Directional, Point, Spot, Area Shadows
 	const char* hlslSource = R"(
 		cbuffer FrameConstants : register(b0)
 		{
@@ -1387,9 +1693,13 @@ int createShadersAndPipeline()
 			float enableShadows;
 			float shadowMapSize;
 			float numPointLights;
+			float4 ambientColor;
 			float4 pointLightPosRange[64];
 			float4 pointLightColorIntensity[64];
-			float4 pointLightCastShadows[16];
+			float4 pointLightDirType[64];
+			float4 pointLightSpotAreaParams[64];
+			float4 pointLightShadowParams[64];
+			float4x4 spotLightSpaceMatrices[4];
 		};
 
 		cbuffer MaterialConstants : register(b1)
@@ -1413,6 +1723,14 @@ int createShadersAndPipeline()
 			float opacity;
 			float opacityMaskClipValue;
 			float hasOpacityTex;
+			float normalMapYFlip;
+			float roughnessChannel;
+			float metallicChannel;
+			float aoChannel;
+			float materialDebugMode;
+			float pad1;
+			float pad2;
+			float pad3;
 		};
 
 		Texture2D g_albedoTex : register(t0);
@@ -1423,9 +1741,11 @@ int createShadersAndPipeline()
 		Texture2D g_opacityTex : register(t5);
 		Texture2D g_shadowMap : register(t6);
 		TextureCubeArray g_pointShadowMap : register(t7);
+		Texture2DArray g_spotShadowMap : register(t8);
 
 		SamplerState g_sampler : register(s0);
 		SamplerComparisonState g_shadowSampler : register(s1);
+		SamplerComparisonState g_pointShadowSampler : register(s2);
 
 		struct VSInput
 		{
@@ -1433,6 +1753,7 @@ int createShadersAndPipeline()
 			float3 normal   : NORMAL;
 			float2 uv       : TEXCOORD;
 			float3 color    : COLOR;
+			float4 tangent  : TANGENT;
 		};
 
 		struct PSInput
@@ -1443,7 +1764,16 @@ int createShadersAndPipeline()
 			float2 uv          : TEXCOORD;
 			float3 color       : COLOR;
 			float4 shadowCoord : SHADOW_COORD;
+			float4 tangent     : TANGENT;
 		};
+
+		float SamplePbrChannel(float4 smp, float chIdx)
+		{
+			if (chIdx < 0.5f) return smp.r;
+			if (chIdx < 1.5f) return smp.g;
+			if (chIdx < 2.5f) return smp.b;
+			return smp.a;
+		}
 
 		PSInput VSMain(VSInput input)
 		{
@@ -1454,18 +1784,47 @@ int createShadersAndPipeline()
 			output.uv       = input.uv;
 			output.color    = input.color;
 			output.shadowCoord = mul(lightSpaceMatrix, float4(input.position, 1.0f));
+			output.tangent  = input.tangent;
 			return output;
 		}
 
 		#define M_PI 3.14159265359f
 
-		float CalculateShadow(float4 shadowCoord, float3 N, float3 L)
+		static const float2 poissonDisk16[16] = {
+			float2(-0.94201624f, -0.39906216f),
+			float2( 0.94558609f, -0.76890725f),
+			float2(-0.09418410f, -0.92938870f),
+			float2( 0.34495938f,  0.29387760f),
+			float2(-0.91588581f,  0.45771432f),
+			float2(-0.81544232f, -0.87912464f),
+			float2(-0.38277543f,  0.27676845f),
+			float2( 0.97484398f,  0.75648379f),
+			float2( 0.44323325f, -0.97511554f),
+			float2( 0.53742981f, -0.47373420f),
+			float2(-0.26496911f, -0.41893023f),
+			float2( 0.79197514f,  0.19090188f),
+			float2(-0.24188840f,  0.99706507f),
+			float2(-0.81409955f,  0.91437590f),
+			float2( 0.19984126f,  0.78641367f),
+			float2( 0.14383161f, -0.14100790f)
+		};
+
+		float CalculateShadow(float3 worldPos, float3 N, float3 L)
 		{
 			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
 
+			float cosTheta = saturate(dot(N, L));
+			float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+			float lightScale = length(lightSpaceMatrix[0].xyz);
+			float texelSizeWorld = (lightScale > 0.00001f) ? (2.0f / (shadowMapSize * lightScale)) : 0.02f;
+
+			float normalBias = texelSizeWorld * (1.5f * sinTheta + 0.5f);
+			float3 biasedWorldPos = worldPos + N * normalBias;
+
+			float4 shadowCoord = mul(lightSpaceMatrix, float4(biasedWorldPos, 1.0f));
 			float3 projCoords = shadowCoord.xyz / shadowCoord.w;
 
-			// Outside frustum test
 			if (projCoords.z > 1.0f || projCoords.z < 0.0f ||
 				projCoords.x < -1.0f || projCoords.x > 1.0f ||
 				projCoords.y < -1.0f || projCoords.y > 1.0f)
@@ -1473,61 +1832,125 @@ int createShadersAndPipeline()
 				return 1.0f;
 			}
 
-			// Map NDC [-1, 1] to Texture UV [0, 1] (D3D texture coordinates: V=0 is top)
 			float2 shadowUV;
 			shadowUV.x = projCoords.x * 0.5f + 0.5f;
 			shadowUV.y = -projCoords.y * 0.5f + 0.5f;
 
-			float currentDepth = projCoords.z;
+			float borderDist = min(min(shadowUV.x, 1.0f - shadowUV.x), min(shadowUV.y, 1.0f - shadowUV.y));
+			if (borderDist <= 0.0f) return 1.0f;
+			float fade = saturate(borderDist * 10.0f);
 
-			// Slope-scaled normal bias
-			float cosTheta = saturate(dot(N, L));
-			float bias = max(shadowBias * (1.0f - cosTheta), shadowBias * 0.25f);
+			float zBorderDist = min(projCoords.z, 1.0f - projCoords.z);
+			fade = min(fade, saturate(zBorderDist * 10.0f));
 
-			// 16-tap PCF kernel for smooth soft shadows
-			float shadow = 0.0f;
+			float depthBias = max(shadowBias * (1.0f - cosTheta), shadowBias * 0.2f);
+			float currentDepth = projCoords.z - depthBias;
+
 			float texelSize = 1.0f / shadowMapSize;
+			float filterRadius = texelSize * max(pcfRadius, 0.5f);
 
+			float shadow = 0.0f;
 			[unroll]
-			for (int x = -1; x <= 2; ++x)
+			for (int i = 0; i < 16; ++i)
 			{
-				[unroll]
-				for (int y = -1; y <= 2; ++y)
-				{
-					float2 offset = float2(x, y) * texelSize * pcfRadius;
-					shadow += g_shadowMap.SampleCmpLevelZero(g_shadowSampler, shadowUV + offset, currentDepth - bias);
-				}
+				float2 offset = poissonDisk16[i] * filterRadius;
+				shadow += g_shadowMap.SampleCmpLevelZero(g_shadowSampler, shadowUV + offset, currentDepth);
 			}
 			shadow /= 16.0f;
 
-			return lerp(1.0f - shadowStrength, 1.0f, shadow);
+			float rawShadow = lerp(1.0f - shadowStrength, 1.0f, shadow);
+			return lerp(1.0f, rawShadow, fade);
 		}
 
-		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N)
+		static const float3 pointShadowOffsets[16] = {
+			float3( 0.577f,  0.577f,  0.577f), float3(-0.577f,  0.577f,  0.577f),
+			float3( 0.577f, -0.577f,  0.577f), float3(-0.577f, -0.577f,  0.577f),
+			float3( 0.577f,  0.577f, -0.577f), float3(-0.577f,  0.577f, -0.577f),
+			float3( 0.577f, -0.577f, -0.577f), float3(-0.577f, -0.577f, -0.577f),
+			float3( 1.0f,  0.0f,  0.0f), float3(-1.0f,  0.0f,  0.0f),
+			float3( 0.0f,  1.0f,  0.0f), float3( 0.0f, -1.0f,  0.0f),
+			float3( 0.0f,  0.0f,  1.0f), float3( 0.0f,  0.0f, -1.0f),
+			float3( 0.707f,  0.707f,  0.0f), float3(-0.707f, -0.707f,  0.0f)
+		};
+
+		float CalculatePointShadow(int shadowIdx, float3 worldPos, float3 pPos, float pRange, float3 N, float shadowRes, float sBias, float sStrength)
 		{
+			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
+
 			float3 toFrag = worldPos - pPos;
 			float currentDist = length(toFrag);
 			if (currentDist >= pRange || currentDist <= 0.001f) return 1.0f;
 
+			float3 L = -toFrag / currentDist;
+			float cosTheta = saturate(dot(N, L));
+
+			float worldBias = max(sBias * 20.0f * (1.0f - cosTheta), sBias * 5.0f);
+
 			float absZ = max(abs(toFrag.x), max(abs(toFrag.y), abs(toFrag.z)));
-			float nearZ = 0.1f;
+			float nearZ = 0.05f;
 			float farZ = max(pRange, 5.0f);
-			float refDepth = (farZ / (farZ - nearZ)) - (farZ * nearZ / (farZ - nearZ)) / max(absZ, 0.001f);
 
-			float normalBias = max(0.004f * (1.0f - max(dot(N, normalize(-toFrag)), 0.0f)), 0.001f);
-			float compareVal = refDepth - normalBias;
+			float biasedZ = max(absZ - worldBias, nearZ);
+			if (biasedZ >= farZ) return 1.0f;
 
-			float filterRadius = 0.015f * (currentDist / farZ);
-			float3 up = abs(toFrag.y) < 0.99f ? float3(0, 1, 0) : float3(1, 0, 0);
-			float3 right = normalize(cross(up, toFrag)) * filterRadius;
-			up = normalize(cross(toFrag, right)) * filterRadius;
+			float refDepth = saturate((farZ / (farZ - nearZ)) - (farZ * nearZ / (farZ - nearZ)) / max(biasedZ, 0.0001f));
+
+			float filterScale = 512.0f / max(shadowRes, 256.0f);
+			float diskRadius = (0.008f + 0.020f * saturate(currentDist / farZ)) * max(pcfRadius, 0.5f) * filterScale;
 
 			float shadow = 0.0f;
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag + right + up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag - right + up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag + right - up, (float)shadowIdx), compareVal);
-			shadow += g_pointShadowMap.SampleCmpLevelZero(g_shadowSampler, float4(toFrag - right - up, (float)shadowIdx), compareVal);
-			return shadow * 0.25f;
+			[unroll]
+			for (int k = 0; k < 16; ++k)
+			{
+				float3 sampleDir = toFrag + pointShadowOffsets[k] * diskRadius;
+				shadow += g_pointShadowMap.SampleCmpLevelZero(g_pointShadowSampler, float4(sampleDir, (float)shadowIdx), refDepth);
+			}
+			shadow /= 16.0f;
+
+			float distFade = saturate((pRange - currentDist) / max(pRange * 0.1f, 0.5f));
+			float finalShadow = lerp(1.0f - sStrength, 1.0f, shadow);
+			return lerp(1.0f, finalShadow, distFade);
+		}
+
+		float CalculateSpotShadow(int shadowIdx, float3 worldPos, float3 N, float3 L, float4x4 spotMatrix, float shadowRes, float sBias, float sStrength)
+		{
+			if (enableShadows < 0.5f || receiveShadows < 0.5f) return 1.0f;
+
+			float cosTheta = saturate(dot(N, L));
+			float sinTheta = sqrt(saturate(1.0f - cosTheta * cosTheta));
+
+			float texelSize = 1.0f / max(shadowRes, 256.0f);
+			float normalBias = texelSize * 2.0f * (1.5f * sinTheta + 0.5f);
+			float3 biasedWorldPos = worldPos + N * normalBias;
+
+			float4 shadowCoord = mul(spotMatrix, float4(biasedWorldPos, 1.0f));
+			float3 projCoords = shadowCoord.xyz / shadowCoord.w;
+
+			if (projCoords.z > 1.0f || projCoords.z < 0.0f ||
+				projCoords.x < -1.0f || projCoords.x > 1.0f ||
+				projCoords.y < -1.0f || projCoords.y > 1.0f)
+			{
+				return 1.0f;
+			}
+
+			float2 shadowUV;
+			shadowUV.x = projCoords.x * 0.5f + 0.5f;
+			shadowUV.y = -projCoords.y * 0.5f + 0.5f;
+
+			float depthBias = max(sBias * (1.0f - cosTheta), sBias * 0.2f);
+			float currentDepth = projCoords.z - depthBias;
+
+			float filterRadius = texelSize * max(pcfRadius, 0.5f);
+			float shadow = 0.0f;
+			[unroll]
+			for (int k = 0; k < 16; ++k)
+			{
+				float2 offset = poissonDisk16[k] * filterRadius;
+				shadow += g_spotShadowMap.SampleCmpLevelZero(g_shadowSampler, float3(shadowUV + offset, (float)shadowIdx), currentDepth);
+			}
+			shadow /= 16.0f;
+
+			return lerp(1.0f - sStrength, 1.0f, shadow);
 		}
 
 		float4 PSMain(PSInput input) : SV_TARGET
@@ -1540,61 +1963,111 @@ int createShadersAndPipeline()
 				currentOpacity *= g_opacityTex.Sample(g_sampler, uv).r;
 			}
 
-			// Masked blend mode: clip / discard pixels below threshold
 			if (blendMode > 0.5f && blendMode < 1.5f)
 			{
 				clip(currentOpacity - opacityMaskClipValue);
 			}
 
-			if (isUnlit > 0.5f)
-			{
-				float3 col = input.color * baseColor;
-				if (hasAlbedoTex > 0.5f)
-				{
-					col = g_albedoTex.Sample(g_sampler, uv).rgb;
-				}
-				return float4(col + emissiveColor * emissiveIntensity, currentOpacity);
-			}
+			float3 V = normalize(cameraPos - input.worldPos);
+			float3 L = normalize(lightDir);
+			float3 H = normalize(L + V);
 
 			float3 N = normalize(input.normal);
+			float3 T = normalize(input.tangent.xyz);
+			T = normalize(T - dot(T, N) * N);
+			float3 B = normalize(cross(N, T) * input.tangent.w);
+			float3x3 TBN = float3x3(T, B, N);
+
 			if (hasNormalTex > 0.5f && normalStrength > 0.01f)
 			{
 				float3 nSample = g_normalTex.Sample(g_sampler, uv).rgb * 2.0f - 1.0f;
+				if (normalMapYFlip > 0.5f)
+				{
+					nSample.y = -nSample.y;
+				}
 				nSample.xy *= normalStrength;
-				float3 up = abs(N.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
-				float3 T = normalize(cross(up, N));
-				float3 B = cross(N, T);
-				N = normalize(T * nSample.x + B * nSample.y + N * nSample.z);
+				nSample = normalize(nSample);
+				N = normalize(mul(nSample, TBN));
 			}
 
 			float3 albedo = input.color * baseColor;
 			if (hasAlbedoTex > 0.5f)
 			{
-				albedo = g_albedoTex.Sample(g_sampler, uv).rgb;
+				float4 albedoSample = g_albedoTex.Sample(g_sampler, uv);
+				albedo = pow(max(albedoSample.rgb, 0.0001f), 2.2f) * baseColor;
 			}
 
 			float rough = roughness;
 			if (hasRoughTex > 0.5f)
 			{
-				rough = g_roughTex.Sample(g_sampler, uv).r;
+				float4 rSamp = g_roughTex.Sample(g_sampler, uv);
+				rough = SamplePbrChannel(rSamp, roughnessChannel);
 			}
 			rough = clamp(rough, 0.04f, 1.0f);
 
 			float metal = metallic;
-			if (hasAlbedoTex > 0.5f && metallic > 0.0f)
+			if (hasAlbedoTex > 0.5f || hasRoughTex > 0.5f)
 			{
-				metal = clamp(g_metalTex.Sample(g_sampler, uv).r, 0.0f, 1.0f);
+				float4 mSamp = g_metalTex.Sample(g_sampler, uv);
+				metal = clamp(SamplePbrChannel(mSamp, metallicChannel), 0.0f, 1.0f);
 			}
 
 			float ao = 1.0f;
 			if (hasAoTex > 0.5f)
 			{
-				ao = clamp(g_aoTex.Sample(g_sampler, uv).r, 0.05f, 1.0f);
+				float4 aoSamp = g_aoTex.Sample(g_sampler, uv);
+				ao = clamp(SamplePbrChannel(aoSamp, aoChannel), 0.05f, 1.0f);
 			}
 
-			float3 V = normalize(cameraPos - input.worldPos);
-			float3 L = normalize(lightDir);
-			float3 H = normalize(L + V);
+			// Diagnostic Material Debug Modes (dev.md Section 11 & 15)
+			if (materialDebugMode > 0.5f && materialDebugMode < 1.5f) // 1: Base Color Only
+			{
+				return float4(pow(saturate(albedo), 1.0f / 2.2f), currentOpacity);
+			}
+			else if (materialDebugMode > 1.5f && materialDebugMode < 2.5f) // 2: Normal Visualization
+			{
+				return float4(N * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 2.5f && materialDebugMode < 3.5f) // 3: Roughness
+			{
+				return float4(rough, rough, rough, currentOpacity);
+			}
+			else if (materialDebugMode > 3.5f && materialDebugMode < 4.5f) // 4: Metallic
+			{
+				return float4(metal, metal, metal, currentOpacity);
+			}
+			else if (materialDebugMode > 4.5f && materialDebugMode < 5.5f) // 5: AO
+			{
+				return float4(ao, ao, ao, currentOpacity);
+			}
+			else if (materialDebugMode > 5.5f && materialDebugMode < 6.5f) // 6: Tangent
+			{
+				return float4(T * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 6.5f && materialDebugMode < 7.5f) // 7: Bitangent
+			{
+				return float4(B * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 7.5f && materialDebugMode < 8.5f) // 8: Vertex Normal
+			{
+				float3 vN = normalize(input.normal);
+				return float4(vN * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 8.5f && materialDebugMode < 9.5f) // 9: UV0
+			{
+				return float4(frac(uv.x), frac(uv.y), 0.0f, currentOpacity);
+			}
+			else if (materialDebugMode > 9.5f && materialDebugMode < 10.5f) // 10: Simple Diffuse (diagnostic)
+			{
+				float3 vN = normalize(input.normal);
+				float3 simpleDiff = albedo * (max(dot(vN, L), 0.0f) * lightColor + ambientColor.rgb * ambientIntensity);
+				return float4(pow(saturate(simpleDiff), 1.0f / 2.2f), currentOpacity);
+			}
+
+			if (isUnlit > 0.5f)
+			{
+				return float4(pow(saturate(albedo + emissiveColor * emissiveIntensity), 1.0f / 2.2f), currentOpacity);
+			}
 
 			float NdotL = max(dot(N, L), 0.0f);
 			float NdotV = max(dot(N, V), 0.001f);
@@ -1620,14 +2093,15 @@ int createShadersAndPipeline()
 			float3 diffBRDF = kD * albedo;
 
 			// Directional Sun Light with Shadows
-			float shadowFactor = CalculateShadow(input.shadowCoord, N, L);
+			float shadowFactor = CalculateShadow(input.worldPos, N, L);
 			float3 directLit = (diffBRDF + specBRDF) * NdotL * lightColor * shadowFactor;
 
-			float3 ambientDiff = albedo * ambientIntensity * (1.0f - metal) * ao;
+			float3 ambCol = ambientColor.rgb;
+			float3 ambientDiff = albedo * ambCol * ambientIntensity * (1.0f - metal) * ao;
 			float3 ambF = F0 + (max(1.0f - rough, F0) - F0) * pow(clamp(1.0f - NdotV, 0.0f, 1.0f), 5.0f);
-			float3 ambientSpec = ambF * ambientIntensity * lerp(1.0f, 0.15f, rough) * ao;
+			float3 ambientSpec = ambF * ambCol * ambientIntensity * lerp(1.0f, 0.15f, rough) * ao;
 
-			// Multiple Point Lights with Physical Inverse-Square Falloff
+			// Multiple Lights (Point, Spot, Area)
 			float3 pointLightsContribution = float3(0, 0, 0);
 			int numLights = min((int)numPointLights, 64);
 			[loop]
@@ -1637,10 +2111,18 @@ int createShadersAndPipeline()
 				float pRange = pointLightPosRange[i].w;
 				float3 pCol = pointLightColorIntensity[i].xyz;
 				float pIntensity = pointLightColorIntensity[i].w;
+				float3 lDir = pointLightDirType[i].xyz;
+				int lType = (int)(pointLightDirType[i].w + 0.5f);
+				float4 spParams = pointLightSpotAreaParams[i];
+				float4 shParams = pointLightShadowParams[i];
+				int shadowIdx = (int)shParams.x;
+				float sStrength = shParams.y;
+				float sBias = shParams.z;
+				float shadowRes = shParams.w;
 
 				float3 toLight = pPos - input.worldPos;
 				float dist = length(toLight);
-				if (dist < pRange && dist > 0.001f)
+				if (dist < pRange && dist > 0.0001f)
 				{
 					float3 pL = toLight / dist;
 					float3 pH = normalize(pL + V);
@@ -1648,32 +2130,68 @@ int createShadersAndPipeline()
 					float pNdotH = max(dot(N, pH), 0.0f);
 					float pVdotH = max(dot(V, pH), 0.0f);
 
-					float atten = saturate(1.0f - (dist / pRange));
-					atten = (atten * atten) / (dist * dist + 1.0f);
+					float attenExp = max(spParams.z, 0.2f);
+					float normDist = dist / max(pRange, 0.0001f);
+					float distAtten = saturate(1.0f - normDist);
+					distAtten = pow(distAtten, attenExp) / (dist * dist + 1.0f);
 
-					float3 pF = F0 + (1.0f - F0) * pow(clamp(1.0f - pVdotH, 0.0f, 1.0f), 5.0f);
-					float pDenomD = (pNdotH * pNdotH * (a2 - 1.0f) + 1.0f);
-					float pD = a2 / (M_PI * pDenomD * pDenomD + 0.0001f);
-					float pg1L = pNdotL / (pNdotL * (1.0f - k) + k);
-					float pG = g1V * pg1L;
-					float3 pSpec = (pD * pF * pG) / max(4.0f * NdotV * pNdotL, 0.001f);
-					float3 pkD = (1.0f - pF) * (1.0f - metal);
-					float3 pDiff = pkD * albedo;
-
-					float pShadowFactor = 1.0f;
-					int shadowIdx = (int)pointLightCastShadows[i / 4][i % 4];
-					if (shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
+					float spotAngleAtten = 1.0f;
+					if (lType == 2) // Spot Light
 					{
-						pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N);
+						float cosDir = dot(normalize(lDir), -pL);
+						float cosInner = spParams.x;
+						float cosOuter = spParams.y;
+						spotAngleAtten = saturate((cosDir - cosOuter) / max(cosInner - cosOuter, 0.001f));
+						spotAngleAtten = spotAngleAtten * spotAngleAtten;
+					}
+					else if (lType == 3) // Area Light
+					{
+						float twoSided = spParams.w;
+						float forwardDot = dot(normalize(lDir), -pL);
+						if (twoSided < 0.5f && forwardDot <= 0.0f)
+						{
+							spotAngleAtten = 0.0f;
+						}
+						else
+						{
+							spotAngleAtten = saturate(abs(forwardDot) * 1.2f);
+						}
 					}
 
-					pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * atten * pShadowFactor;
+					if (distAtten * spotAngleAtten > 0.00001f)
+					{
+						float3 pF = F0 + (1.0f - F0) * pow(clamp(1.0f - pVdotH, 0.0f, 1.0f), 5.0f);
+						float pDenomD = (pNdotH * pNdotH * (a2 - 1.0f) + 1.0f);
+						float pD = a2 / (M_PI * pDenomD * pDenomD + 0.0001f);
+						float pg1L = pNdotL / (pNdotL * (1.0f - k) + k);
+						float pG = g1V * pg1L;
+						float3 pSpec = (pD * pF * pG) / max(4.0f * NdotV * pNdotL, 0.001f);
+						float3 pkD = (1.0f - pF) * (1.0f - metal);
+						float3 pDiff = pkD * albedo;
+
+						float pShadowFactor = 1.0f;
+						if (enableShadows > 0.5f && shadowIdx >= 0 && shadowIdx < 4 && receiveShadows > 0.5f)
+						{
+							if (lType == 1) // Point Light
+							{
+								pShadowFactor = CalculatePointShadow(shadowIdx, input.worldPos, pPos, pRange, N, shadowRes, sBias, sStrength);
+							}
+							else if (lType == 2 || lType == 3) // Spot or Area Light
+							{
+								float4x4 sMatrix = spotLightSpaceMatrices[shadowIdx];
+								pShadowFactor = CalculateSpotShadow(shadowIdx, input.worldPos, N, pL, sMatrix, shadowRes, sBias, sStrength);
+							}
+						}
+
+						pointLightsContribution += (pDiff + pSpec) * pNdotL * pCol * pIntensity * distAtten * spotAngleAtten * pShadowFactor;
+					}
 				}
 			}
 
 			float3 emissive = emissiveColor * emissiveIntensity;
 			float3 litColor = ambientDiff + ambientSpec + directLit + pointLightsContribution + emissive;
-			return float4(saturate(litColor), currentOpacity);
+			litColor = pow(saturate(litColor), 1.0f / 2.2f);
+			return float4(litColor, currentOpacity);
 		}
 	)";
 
@@ -1694,17 +2212,18 @@ int createShadersAndPipeline()
 		return EXIT_FAILURE;
 	}
 
-	// 3. Input Layout (Position, Normal, UV, Color)
+	// 3. Input Layout (Position, Normal, UV, Color, Tangent)
 	D3D12_INPUT_ELEMENT_DESC inputElementDescs[] = {
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 
 	// 4. Graphics Pipeline State Object (PSO) for Main Lit Pass
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-	psoDesc.InputLayout = { inputElementDescs, 4 };
+	psoDesc.InputLayout = { inputElementDescs, 5 };
 	psoDesc.pRootSignature = g_rootSignature;
 	psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
 	psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
@@ -1803,7 +2322,7 @@ int createShadersAndPipeline()
 	shadowPsoDesc.VS = { shadowVS->GetBufferPointer(), shadowVS->GetBufferSize() };
 	shadowPsoDesc.PS = { nullptr, 0 }; // Depth-only pass
 	shadowPsoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-	shadowPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+	shadowPsoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
 	shadowPsoDesc.RasterizerState.FrontCounterClockwise = FALSE;
 	shadowPsoDesc.RasterizerState.DepthClipEnable = TRUE;
 	shadowPsoDesc.RasterizerState.DepthBias = 50;
@@ -1867,7 +2386,7 @@ int createDynamicBuffers()
 
 	// 3. Constant Buffer
 	UINT64 cbSize = (sizeof(SceneConstantBuffer) + 255) & ~255;
-	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(cbSize);
+	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(cbSize * 2);
 
 	g_d3dDevice->CreateCommittedResource(
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
@@ -1882,47 +2401,32 @@ int createDynamicBuffers()
 
 static void SyncViewportCameraToLevelCamera()
 {
-	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
-	{
-		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
-		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
-		{
-			camObj->rotation.x = g_camera.pitch;
-			camObj->rotation.y = g_camera.yaw;
-
-			glm::vec3 camPos = g_camera.GetPosition();
-			if (camObj->parentId != -1)
-			{
-				GameObject* parent = g_scene.FindObject(camObj->parentId);
-				if (parent)
-				{
-					glm::mat4 invParent = glm::inverse(g_scene.GetWorldMatrix(*parent));
-					camObj->position = glm::vec3(invParent * glm::vec4(camPos, 1.0f));
-				}
-				else
-				{
-					camObj->position = camPos;
-				}
-			}
-			else
-			{
-				camObj->position = camPos;
-			}
-		}
-	}
+	// In Play Mode, camera is completely static unless controlled by a behaviour script.
+	// Viewport mouse dragging never alters the camera actor.
+	return;
 }
 
 static void SyncLevelCameraToViewportCamera()
 {
-	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
+	if (g_scene.isPlayMode)
 	{
-		// While user actively pilots camera via RMB fly or viewport controls, do not overwrite from level camera actor
-		if (g_camera.isFlying || s_isRightMouseDown || s_isMiddleMouseDown)
+		GameObject* camObj = nullptr;
+		if (g_scene.activeLevelCameraId != -1)
 		{
-			return;
+			camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
 		}
-
-		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		if (!camObj)
+		{
+			for (auto& obj : g_scene.objects)
+			{
+				if (obj.isCamera || obj.type == PrimitiveType::Camera)
+				{
+					camObj = &obj;
+					g_scene.activeLevelCameraId = obj.id;
+					break;
+				}
+			}
+		}
 		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
 		{
 			glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
@@ -1936,8 +2440,8 @@ static void SyncLevelCameraToViewportCamera()
 			g_camera.orthoSize = camObj->camera.orthoSize;
 			g_camera.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
 			g_camera.farPlane = std::max(1.0f, camObj->camera.farPlane);
-			g_camera.distance = 1.0f;
-			g_camera.target = worldPos + g_camera.GetForward() * 1.0f;
+			g_camera.distance = 0.001f;
+			g_camera.target = worldPos + g_camera.GetForward() * 0.001f;
 		}
 	}
 }
@@ -1949,6 +2453,10 @@ void updateSceneGeometry()
 	static std::vector<uint32_t> sceneIndices;
 
 	g_scene.BuildSceneMesh(sceneVertices, sceneIndices, g_sceneBatches, g_camera.GetPosition());
+	g_numPureSceneBatches = g_sceneBatches.size();
+
+	// Light & Camera Editor Gizmos (dev.md)
+	Eunoia::EditorGizmoSystem::Get().RenderGizmos(g_scene, g_camera.GetPosition(), sceneVertices, sceneIndices, g_sceneBatches);
 
 	g_currentVertexCount = (uint32_t)std::min(sceneVertices.size(), MAX_SCENE_VERTICES);
 	g_currentIndexCount  = (uint32_t)std::min(sceneIndices.size(), MAX_SCENE_INDICES);
@@ -1979,6 +2487,26 @@ void updateConstantBuffer()
 	SyncLevelCameraToViewportCamera();
 	g_scene.SyncLightPositionsFromActors();
 
+	// Dynamically ensure shadow buffer allocations match highest requested resolutions per light category
+	UINT reqDirRes = (UINT)g_scene.shadowResolution;
+	UINT reqPtRes = 0;
+	UINT reqSpotRes = 0;
+	for (const auto& pl : g_scene.pointLights)
+	{
+		if (!pl.enabled || !pl.castShadows) continue;
+		if (pl.type == LightType::Point)
+		{
+			if ((UINT)pl.shadowResolution > reqPtRes) reqPtRes = (UINT)pl.shadowResolution;
+		}
+		else if (pl.type == LightType::Spot || pl.type == LightType::Area)
+		{
+			if ((UINT)pl.shadowResolution > reqSpotRes) reqSpotRes = (UINT)pl.shadowResolution;
+		}
+	}
+	if (reqPtRes == 0) reqPtRes = 512;
+	if (reqSpotRes == 0) reqSpotRes = 1024;
+	EnsureShadowBuffers(reqDirRes, reqPtRes, reqSpotRes);
+
 	EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
 	float aspect = (vpRect.width > 0 && vpRect.height > 0) ? (vpRect.width / vpRect.height) : 1.777f;
 	if (aspect <= 0.01f || std::isnan(aspect)) aspect = 1.777f;
@@ -1986,6 +2514,27 @@ void updateConstantBuffer()
 	glm::mat4 model = glm::mat4(1.0f);
 	glm::mat4 view  = g_camera.GetViewMatrix();
 	glm::mat4 proj  = g_camera.GetProjectionMatrix(aspect);
+
+	// Update Mesh Cluster Culling Camera (dev.md Section 6, 15, 16)
+	if (Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		glm::mat4 vp = proj * view;
+		glm::vec4 frustumPlanes[6];
+		frustumPlanes[0] = glm::vec4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // Left
+		frustumPlanes[1] = glm::vec4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // Right
+		frustumPlanes[2] = glm::vec4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // Bottom
+		frustumPlanes[3] = glm::vec4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // Top
+		frustumPlanes[4] = glm::vec4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                                 // Near
+		frustumPlanes[5] = glm::vec4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // Far
+		for (int p = 0; p < 6; ++p)
+		{
+			float len = glm::length(glm::vec3(frustumPlanes[p]));
+			if (len > 1e-6f) frustumPlanes[p] /= len;
+		}
+		Eunoia::MeshClusterCullingSystem::Get().UpdateCamera(
+			view, proj, g_camera.GetPosition(), frustumPlanes, vpRect.width, vpRect.height
+		);
+	}
 
 	// Light View-Projection for Directional Sun Light
 	glm::vec3 lightDir = g_scene.lightDirection;
@@ -1995,13 +2544,44 @@ void updateConstantBuffer()
 	} else {
 		lightDir = glm::vec3(0.6f, 1.0f, 0.8f);
 	}
-	glm::vec3 sceneCenter(0.0f, 0.0f, 0.0f);
-	glm::vec3 lightPos = sceneCenter + lightDir * 18.0f;
+	glm::vec3 sceneMin(-10.0f), sceneMax(10.0f);
+	g_scene.GetSceneAABB(sceneMin, sceneMax);
+	glm::vec3 sceneCenter = (sceneMin + sceneMax) * 0.5f;
+	float sceneRadius = glm::length(sceneMax - sceneCenter);
+	if (sceneRadius < 10.0f) sceneRadius = 10.0f;
+
+	float orthoHalfSize = sceneRadius * 1.25f + 2.0f;
+	float lightDistance = sceneRadius * 2.0f + 10.0f;
+	glm::vec3 lightPos = sceneCenter + lightDir * lightDistance;
 	glm::vec3 up = (std::abs(lightDir.y) > 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
 	glm::mat4 lightView = glm::lookAt(lightPos, sceneCenter, up);
-	float orthoHalfSize = 14.0f;
-	glm::mat4 lightProj = glm::ortho(-orthoHalfSize, orthoHalfSize, -orthoHalfSize, orthoHalfSize, 1.0f, 40.0f);
+
+	float nearPlane = 1.0f;
+	float farPlane = lightDistance + sceneRadius * 2.0f + 10.0f;
+	glm::mat4 lightProj = glm::ortho(-orthoHalfSize, orthoHalfSize, -orthoHalfSize, orthoHalfSize, nearPlane, farPlane);
 	glm::mat4 lightSpaceMatrix = lightProj * lightView;
+
+	// Calculate 8 NDC corners of the light frustum in world space for debug wireframe rendering
+	glm::mat4 invLightSpace = glm::inverse(lightSpaceMatrix);
+	const glm::vec4 ndcCorners[8] = {
+		// Near plane: Z = 0
+		{ -1.0f, -1.0f, 0.0f, 1.0f },
+		{  1.0f, -1.0f, 0.0f, 1.0f },
+		{  1.0f,  1.0f, 0.0f, 1.0f },
+		{ -1.0f,  1.0f, 0.0f, 1.0f },
+		// Far plane: Z = 1
+		{ -1.0f, -1.0f, 1.0f, 1.0f },
+		{  1.0f, -1.0f, 1.0f, 1.0f },
+		{  1.0f,  1.0f, 1.0f, 1.0f },
+		{ -1.0f,  1.0f, 1.0f, 1.0f },
+	};
+	for (int i = 0; i < 8; ++i) {
+		glm::vec4 wp = invLightSpace * ndcCorners[i];
+		if (std::abs(wp.w) > 1e-5f) {
+			g_scene.lightFrustumCorners[i] = glm::vec3(wp) / wp.w;
+		}
+	}
+	g_scene.hasLightFrustumCorners = true;
 
 	if (g_pShadowConstantMapped)
 	{
@@ -2015,68 +2595,156 @@ void updateConstantBuffer()
 	cb.lightSpaceMatrix = lightSpaceMatrix;
 	cb.cameraPos = g_camera.GetPosition();
 	cb.ambientIntensity = g_scene.ambientIntensity;
+	cb.ambientColor = glm::vec4(g_scene.ambientColor, 1.0f);
 	cb.lightDir = lightDir;
 	cb.shadowBias = g_scene.shadowBias;
 	cb.lightColor = g_scene.lightColor * g_scene.lightIntensity;
 	cb.shadowStrength = g_scene.shadowStrength;
 	cb.pcfRadius = g_scene.pcfRadius;
 	cb.enableShadows = g_scene.enableShadows ? 1.0f : 0.0f;
-	cb.shadowMapSize = (float)SHADOW_MAP_WIDTH;
+	cb.shadowMapSize = (float)g_currentDirShadowRes;
 
-	// Fill Point Lights (up to MAX_POINT_LIGHTS)
+	// Fill Point, Spot, and Area Lights (up to MAX_POINT_LIGHTS)
 	int activePointLights = 0;
 	int activeShadowPointLights = 0;
-	for (int i = 0; i < MAX_POINT_LIGHTS / 4; ++i)
-	{
-		cb.pointLightCastShadows[i] = glm::vec4(-1.0f);
-	}
+	int activeShadowSpotLights = 0;
 
 	for (size_t i = 0; i < g_scene.pointLights.size() && activePointLights < MAX_POINT_LIGHTS; ++i)
 	{
 		const auto& pl = g_scene.pointLights[i];
 		if (!pl.enabled) continue;
+
 		cb.pointLightPosRange[activePointLights] = glm::vec4(pl.position, pl.range);
 		cb.pointLightColorIntensity[activePointLights] = glm::vec4(pl.color, pl.intensity);
 
-		if (pl.castShadows && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
+		glm::vec3 dir = pl.direction;
+		float dLen = glm::length(dir);
+		if (dLen > 0.0001f) dir /= dLen;
+		else dir = glm::vec3(0.0f, -1.0f, 0.0f);
+
+		cb.pointLightDirType[activePointLights] = glm::vec4(dir, (float)pl.type);
+
+		if (pl.type == LightType::Spot)
 		{
-			int vecIdx = activePointLights / 4;
-			int compIdx = activePointLights % 4;
-			cb.pointLightCastShadows[vecIdx][compIdx] = (float)activeShadowPointLights;
-
-			if (g_pShadowConstantMapped)
-			{
-				float nearZ = 0.1f;
-				float farZ = std::max(pl.range, 5.0f);
-				glm::mat4 ptProj = glm::perspective(glm::radians(90.0f), 1.0f, nearZ, farZ);
-				glm::vec3 pos = pl.position;
-
-				glm::mat4 faceViews[6] = {
-					glm::lookAt(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X
-					glm::lookAt(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y
-					glm::lookAt(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z
-					glm::lookAt(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z
-				};
-
-				for (int f = 0; f < 6; ++f)
-				{
-					ShadowConstantBuffer ptScb = {};
-					ptScb.lightSpaceMatrix = ptProj * faceViews[f];
-					UINT64 faceOffset = (UINT64)(1 + activeShadowPointLights * 6 + f) * 256;
-					memcpy((uint8_t*)g_pShadowConstantMapped + faceOffset, &ptScb, sizeof(ptScb));
-				}
-			}
-			activeShadowPointLights++;
+			float cosInner = std::cos(glm::radians(std::min(pl.innerConeAngle, pl.outerConeAngle)));
+			float cosOuter = std::cos(glm::radians(std::max(pl.innerConeAngle, pl.outerConeAngle)));
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(cosInner, cosOuter, pl.attenuation, 0.0f);
 		}
+		else if (pl.type == LightType::Area)
+		{
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(pl.width, pl.height, pl.attenuation, pl.twoSided ? 1.0f : 0.0f);
+		}
+		else
+		{
+			cb.pointLightSpotAreaParams[activePointLights] = glm::vec4(0.0f, 0.0f, pl.attenuation, 0.0f);
+		}
+
+		int shadowSlot = -1;
+		if (g_scene.enableShadows && pl.castShadows)
+		{
+			if (pl.type == LightType::Point && activeShadowPointLights < (int)MAX_SHADOW_POINT_LIGHTS)
+			{
+				shadowSlot = activeShadowPointLights;
+				if (g_pShadowConstantMapped)
+				{
+					float nearZ = 0.05f;
+					float farZ = std::max(pl.range, 5.0f);
+					glm::mat4 ptProj = glm::perspectiveLH_ZO(glm::radians(90.0f), 1.0f, nearZ, farZ);
+					glm::vec3 pos = pl.position;
+
+					glm::mat4 faceViews[6] = {
+						glm::lookAtLH(pos, pos + glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +X (Face 0)
+						glm::lookAtLH(pos, pos + glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // -X (Face 1)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  1.0f,  0.0f), glm::vec3(0.0f, 0.0f, -1.0f)), // +Y (Face 2)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f, -1.0f,  0.0f), glm::vec3(0.0f, 0.0f,  1.0f)), // -Y (Face 3)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f,  1.0f), glm::vec3(0.0f, 1.0f,  0.0f)), // +Z (Face 4)
+						glm::lookAtLH(pos, pos + glm::vec3( 0.0f,  0.0f, -1.0f), glm::vec3(0.0f, 1.0f,  0.0f))  // -Z (Face 5)
+					};
+
+					for (int f = 0; f < 6; ++f)
+					{
+						ShadowConstantBuffer ptScb = {};
+						ptScb.lightSpaceMatrix = ptProj * faceViews[f];
+						UINT64 faceOffset = (UINT64)(1 + activeShadowPointLights * 6 + f) * 256;
+						memcpy((uint8_t*)g_pShadowConstantMapped + faceOffset, &ptScb, sizeof(ptScb));
+					}
+				}
+				activeShadowPointLights++;
+			}
+			else if ((pl.type == LightType::Spot || pl.type == LightType::Area) && activeShadowSpotLights < (int)MAX_SHADOW_SPOT_LIGHTS)
+			{
+				shadowSlot = activeShadowSpotLights;
+				float fov = (pl.type == LightType::Spot) ? std::max(pl.outerConeAngle * 2.0f, 5.0f) : 120.0f;
+				fov = std::min(fov, 160.0f);
+				float nearZ = 0.05f;
+				float farZ = std::max(pl.range, 5.0f);
+				glm::mat4 spotProj = glm::perspectiveLH_ZO(glm::radians(fov), 1.0f, nearZ, farZ);
+				glm::vec3 spotUp = (std::abs(dir.y) > 0.99f) ? glm::vec3(0.0f, 0.0f, 1.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+				glm::mat4 spotView = glm::lookAtLH(pl.position, pl.position + dir, spotUp);
+				glm::mat4 spotLightSpace = spotProj * spotView;
+
+				cb.spotLightSpaceMatrices[activeShadowSpotLights] = spotLightSpace;
+
+				if (g_pShadowConstantMapped)
+				{
+					ShadowConstantBuffer spotScb = {};
+					spotScb.lightSpaceMatrix = spotLightSpace;
+					UINT64 spotOffset = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + activeShadowSpotLights) * 256;
+					memcpy((uint8_t*)g_pShadowConstantMapped + spotOffset, &spotScb, sizeof(spotScb));
+				}
+				activeShadowSpotLights++;
+			}
+		}
+
+		cb.pointLightShadowParams[activePointLights] = glm::vec4(
+			(float)shadowSlot,
+			pl.shadowStrength,
+			pl.shadowBias,
+			(float)pl.shadowResolution
+		);
 
 		activePointLights++;
 	}
+
 	cb.numPointLights = (float)activePointLights;
 	g_activeShadowPointLights = activeShadowPointLights;
+	g_activeShadowSpotLights = activeShadowSpotLights;
 
 	memcpy(g_pConstantMapped, &cb, sizeof(cb));
+
+	// If Camera Picture-in-Picture (PiP) preview is active, compute and upload camera's view/projection into slot 1
+	EngineUI::CameraPipRect pipRect = g_engineUI.GetCameraPipRect((float)g_currentWidth, (float)g_currentHeight, g_scene);
+	if (pipRect.active && g_pConstantMapped)
+	{
+		GameObject* camObj = g_scene.FindObject(pipRect.selectedCameraId);
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
+		{
+			glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
+			glm::vec3 worldPos, worldRot, worldScale;
+			Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+
+			OrbitCamera pipCam;
+			pipCam.yaw = worldRot.y;
+			pipCam.pitch = worldRot.x;
+			pipCam.fov = camObj->camera.fov;
+			pipCam.isOrthographic = camObj->camera.isOrthographic;
+			pipCam.orthoSize = camObj->camera.orthoSize;
+			pipCam.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+			pipCam.farPlane = std::max(1.0f, camObj->camera.farPlane);
+			pipCam.distance = 0.001f;
+			pipCam.target = worldPos + pipCam.GetForward() * 0.001f;
+
+			float pipAspect = (pipRect.width > 0.0f && pipRect.height > 0.0f) ? (pipRect.width / pipRect.height) : 1.777f;
+			glm::mat4 pipView = pipCam.GetViewMatrix();
+			glm::mat4 pipProj = pipCam.GetProjectionMatrix(pipAspect);
+
+			SceneConstantBuffer pipCb = cb;
+			pipCb.mvp = pipProj * pipView * model;
+			pipCb.cameraPos = pipCam.GetPosition();
+
+			memcpy((uint8_t*)g_pConstantMapped + sizeof(SceneConstantBuffer), &pipCb, sizeof(pipCb));
+		}
+	}
 }
 
 void resizeBuffers(int width, int height)
@@ -2131,8 +2799,8 @@ void renderFrame()
 		RecordGpuBreadcrumbOp("[Barrier] ShadowDepthBuffer -> DEPTH_WRITE");
 		g_commandList->ResourceBarrier(1, &shadowBarrier);
 
-		D3D12_VIEWPORT shadowViewport = { 0.0f, 0.0f, (float)SHADOW_MAP_WIDTH, (float)SHADOW_MAP_HEIGHT, 0.0f, 1.0f };
-		D3D12_RECT shadowScissor = { 0, 0, (LONG)SHADOW_MAP_WIDTH, (LONG)SHADOW_MAP_HEIGHT };
+		D3D12_VIEWPORT shadowViewport = { 0.0f, 0.0f, (float)g_currentDirShadowRes, (float)g_currentDirShadowRes, 0.0f, 1.0f };
+		D3D12_RECT shadowScissor = { 0, 0, (LONG)g_currentDirShadowRes, (LONG)g_currentDirShadowRes };
 		g_commandList->RSSetViewports(1, &shadowViewport);
 		g_commandList->RSSetScissorRects(1, &shadowScissor);
 
@@ -2172,7 +2840,7 @@ void renderFrame()
 	}
 
 	// ----------------------------------------------------
-	// PASS 1.5: Point Light Shadow Cubemap Array Pass (512x512, up to 4 lights * 6 faces)
+	// PASS 1.5: Point Light Shadow Cubemap Array Pass (up to 4 lights * 6 faces)
 	// ----------------------------------------------------
 	if (!g_deviceLost && g_currentIndexCount > 0 && g_pointShadowDepthBuffer && g_shadowPipelineState && g_activeShadowPointLights > 0)
 	{
@@ -2184,8 +2852,8 @@ void renderFrame()
 		RecordGpuBreadcrumbOp("[Barrier] PointShadowDepthBuffer -> DEPTH_WRITE");
 		g_commandList->ResourceBarrier(1, &ptBarrier);
 
-		D3D12_VIEWPORT ptViewport = { 0.0f, 0.0f, (float)POINT_SHADOW_MAP_SIZE, (float)POINT_SHADOW_MAP_SIZE, 0.0f, 1.0f };
-		D3D12_RECT ptScissor = { 0, 0, (LONG)POINT_SHADOW_MAP_SIZE, (LONG)POINT_SHADOW_MAP_SIZE };
+		D3D12_VIEWPORT ptViewport = { 0.0f, 0.0f, (float)g_currentPointShadowRes, (float)g_currentPointShadowRes, 0.0f, 1.0f };
+		D3D12_RECT ptScissor = { 0, 0, (LONG)g_currentPointShadowRes, (LONG)g_currentPointShadowRes };
 		g_commandList->RSSetViewports(1, &ptViewport);
 		g_commandList->RSSetScissorRects(1, &ptScissor);
 
@@ -2228,6 +2896,69 @@ void renderFrame()
 	}
 
 	// ----------------------------------------------------
+	// PASS 1.8: Spot & Area Light Shadow 2D Array Pass (up to 4 lights)
+	// ----------------------------------------------------
+	if (!g_deviceLost && g_currentIndexCount > 0 && g_spotShadowDepthBuffer && g_shadowPipelineState && g_activeShadowSpotLights > 0)
+	{
+		D3D12_RESOURCE_BARRIER spotBarrier = CreateTransitionBarrier(
+			g_spotShadowDepthBuffer,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_DEPTH_WRITE
+		);
+		RecordGpuBreadcrumbOp("[Barrier] SpotShadowDepthBuffer -> DEPTH_WRITE");
+		g_commandList->ResourceBarrier(1, &spotBarrier);
+
+		D3D12_VIEWPORT spotViewport = { 0.0f, 0.0f, (float)g_currentSpotShadowRes, (float)g_currentSpotShadowRes, 0.0f, 1.0f };
+		D3D12_RECT spotScissor = { 0, 0, (LONG)g_currentSpotShadowRes, (LONG)g_currentSpotShadowRes };
+		g_commandList->RSSetViewports(1, &spotViewport);
+		g_commandList->RSSetScissorRects(1, &spotScissor);
+
+		g_commandList->SetGraphicsRootSignature(g_shadowRootSignature);
+		g_commandList->SetPipelineState(g_shadowPipelineState);
+
+		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+		g_commandList->IASetIndexBuffer(&g_indexBufferView);
+
+		for (int s = 0; s < g_activeShadowSpotLights; ++s)
+		{
+			g_commandList->ClearDepthStencilView(g_spotShadowDsvHandles[s], D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			g_commandList->OMSetRenderTargets(0, nullptr, FALSE, &g_spotShadowDsvHandles[s]);
+
+			UINT64 spotCbOffset = (UINT64)(1 + MAX_SHADOW_POINT_LIGHTS * 6 + s) * 256;
+			g_commandList->SetGraphicsRootConstantBufferView(0, g_shadowConstantBuffer->GetGPUVirtualAddress() + spotCbOffset);
+
+			for (size_t bIdx = 0; bIdx < g_sceneBatches.size(); ++bIdx)
+			{
+				const auto& batch = g_sceneBatches[bIdx];
+				if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0 || !batch.castShadows || batch.isUnlit) continue;
+				UINT drawCount = (UINT)std::min((size_t)batch.indexCount, (size_t)(g_currentIndexCount - batch.startIndex));
+				if (drawCount == 0) continue;
+				g_commandList->DrawIndexedInstanced(drawCount, 1, (UINT)batch.startIndex, 0, 0);
+			}
+		}
+
+		D3D12_RESOURCE_BARRIER spotReadBarrier = CreateTransitionBarrier(
+			g_spotShadowDepthBuffer,
+			D3D12_RESOURCE_STATE_DEPTH_WRITE,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE
+		);
+		RecordGpuBreadcrumbOp("[Barrier] SpotShadowDepthBuffer -> PIXEL_SHADER_RESOURCE");
+		g_commandList->ResourceBarrier(1, &spotReadBarrier);
+	}
+
+	// ----------------------------------------------------
+	// PASS 1.9: Mesh Cluster Culling GPU Compute Pass (dev.md Sections 5, 8, 9, 10)
+	// ----------------------------------------------------
+	if (!g_deviceLost && Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		RecordGpuBreadcrumbOp("[Compute] MeshClusterCulling ExecuteCullingPass");
+		Eunoia::MeshClusterCullingSystem::Get().ExecuteCullingPass(
+			g_commandList, g_scene, g_depthStencilBuffer, D3D12_RESOURCE_STATE_DEPTH_WRITE
+		);
+	}
+
+	// ----------------------------------------------------
 	// PASS 2: Main Scene PBR Lit Pass with Shadows & Point Lights
 	// ----------------------------------------------------
 	D3D12_RESOURCE_BARRIER barrier = CreateTransitionBarrier(
@@ -2258,16 +2989,24 @@ void renderFrame()
 
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_dsvDescHeap->GetCPUDescriptorHandleForHeapStart();
 
-	// First clear entire backbuffer to editor background #2B2B2B (RGB 0.169f, 0.169f, 0.169f)
-	const float editorBgColor[4] = { 0.169f, 0.169f, 0.169f, 1.0f };
-	g_commandList->ClearRenderTargetView(rtvHandle, editorBgColor, 0, nullptr);
-
-	// Clear the 3D viewport area to scene clear color
 	const float clearColor[4] = { g_scene.clearColor.r, g_scene.clearColor.g, g_scene.clearColor.b, 1.0f };
 	char bufClearRtv[64];
 	snprintf(bufClearRtv, sizeof(bufClearRtv), "[ClearRTV] BackBuffer[%u]", g_frameIndex);
 	RecordGpuBreadcrumbOp(bufClearRtv);
-	g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &scissor);
+
+	if (g_engineUI.isGameOnlyWindow)
+	{
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+	}
+	else
+	{
+		// First clear entire backbuffer to editor background #2B2B2B (RGB 0.169f, 0.169f, 0.169f)
+		const float editorBgColor[4] = { 0.169f, 0.169f, 0.169f, 1.0f };
+		g_commandList->ClearRenderTargetView(rtvHandle, editorBgColor, 0, nullptr);
+
+		// Clear the 3D viewport area to scene clear color
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &scissor);
+	}
 
 	RecordGpuBreadcrumbOp("[ClearDSV] DepthStencilBuffer");
 	g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
@@ -2286,6 +3025,7 @@ void renderFrame()
 		g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress());
 		g_commandList->SetGraphicsRootDescriptorTable(3, g_shadowSrvGpuHandle);
 		g_commandList->SetGraphicsRootDescriptorTable(4, g_pointShadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(5, g_spotShadowSrvGpuHandle);
 
 		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
@@ -2322,8 +3062,13 @@ void renderFrame()
 			matConsts.opacity = batch.opacity;
 			matConsts.opacityMaskClipValue = batch.opacityMaskClipValue > 0.0f ? batch.opacityMaskClipValue : 0.333f;
 			matConsts.hasOpacityTex = (!batch.opacityTex.empty() && batch.opacityTex != "none") ? 1.0f : 0.0f;
+			matConsts.normalMapYFlip = batch.normalMapYFlip ? 1.0f : 0.0f;
+			matConsts.roughnessChannel = (float)batch.roughnessChannel;
+			matConsts.metallicChannel = (float)batch.metallicChannel;
+			matConsts.aoChannel = (float)batch.aoChannel;
+			matConsts.materialDebugMode = (float)batch.materialDebugMode;
 
-			g_commandList->SetGraphicsRoot32BitConstants(1, 24, &matConsts, 0);
+			g_commandList->SetGraphicsRoot32BitConstants(1, 32, &matConsts, 0);
 
 			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
 				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
@@ -2336,8 +3081,117 @@ void renderFrame()
 			RecordGpuBreadcrumbOp(bufSceneDraw);
 
 			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
-			g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+
+			// GPU Mesh Cluster Culling branch (dev.md Sections 10, 11)
+			if (batch.meshClusterCulling && Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+			{
+				char bufSceneIndirect[160];
+				snprintf(bufSceneIndirect, sizeof(bufSceneIndirect), "[SceneDraw-ClusterCull] Batch %zu (%s) ExecuteIndirect",
+					bIdx, batch.albedoTex.empty() ? "untextured" : batch.albedoTex.c_str());
+				RecordGpuBreadcrumbOp(bufSceneIndirect);
+
+				bool rendered = Eunoia::MeshClusterCullingSystem::Get().RenderClusteredBatch(g_commandList, batch);
+				if (!rendered)
+				{
+					// Safe fallback to standard rasterization if cluster execution is skipped or has no visible clusters
+					g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+				}
+			}
+			else
+			{
+				// Standard rasterization path for objects with Mesh Cluster Culling OFF (zero overhead)
+				g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
+			}
 		}
+	}
+
+	// ----------------------------------------------------
+	// PASS 2.5: Selected Camera Picture-in-Picture (PiP) Hardware Pass
+	// ----------------------------------------------------
+	EngineUI::CameraPipRect pipRect = g_engineUI.GetCameraPipRect((float)g_currentWidth, (float)g_currentHeight, g_scene);
+	if (!g_deviceLost && pipRect.active && g_currentIndexCount > 0 && g_numPureSceneBatches > 0)
+	{
+		float px = std::max(0.0f, std::min((float)g_currentWidth - 1.0f, pipRect.x));
+		float py = std::max(0.0f, std::min((float)g_currentHeight - 1.0f, pipRect.y));
+		float pw = std::max(1.0f, std::min((float)g_currentWidth - px, pipRect.width));
+		float ph = std::max(1.0f, std::min((float)g_currentHeight - py, pipRect.height));
+
+		D3D12_VIEWPORT pipViewport = { px, py, pw, ph, 0.0f, 1.0f };
+		D3D12_RECT pipScissor = { (LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph) };
+
+		RecordGpuBreadcrumbOp("[PiP Pass] Selected Camera Preview");
+		g_commandList->RSSetViewports(1, &pipViewport);
+		g_commandList->RSSetScissorRects(1, &pipScissor);
+
+		// Clear Depth & Stencil exclusively within the PiP rect for a fresh camera z-buffer
+		g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &pipScissor);
+		// Clear PiP color rectangle to scene background clear color
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &pipScissor);
+
+		// Set camera Constant Buffer from Slot 1 (Camera MVP & Pos)
+		g_commandList->SetGraphicsRootSignature(g_rootSignature);
+		g_commandList->SetPipelineState(g_pipelineState);
+		g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress() + sizeof(SceneConstantBuffer));
+		g_commandList->SetGraphicsRootDescriptorTable(3, g_shadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(4, g_pointShadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(5, g_spotShadowSrvGpuHandle);
+
+		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+		g_commandList->IASetIndexBuffer(&g_indexBufferView);
+
+		// Render all pure scene geometry (batches [0, g_numPureSceneBatches))
+		// This automatically excludes editor-only gizmos (lights, camera frustum lines, transform gizmo, grid)
+		for (size_t bIdx = 0; bIdx < g_numPureSceneBatches; ++bIdx)
+		{
+			const auto& batch = g_sceneBatches[bIdx];
+			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0) continue;
+			UINT drawCount = (UINT)std::min((size_t)batch.indexCount, (size_t)(g_currentIndexCount - batch.startIndex));
+			if (drawCount == 0) continue;
+
+			MaterialShaderConstants matConsts = {};
+			matConsts.baseColor[0] = batch.baseColor.r;
+			matConsts.baseColor[1] = batch.baseColor.g;
+			matConsts.baseColor[2] = batch.baseColor.b;
+			matConsts.metallic     = batch.metallic;
+			matConsts.roughness    = batch.roughness;
+			matConsts.normalStrength = batch.normalStrength;
+			matConsts.specular     = batch.specular;
+			matConsts.emissiveIntensity = batch.emissiveIntensity;
+			matConsts.emissiveColor[0] = batch.emissiveColor.r;
+			matConsts.emissiveColor[1] = batch.emissiveColor.g;
+			matConsts.emissiveColor[2] = batch.emissiveColor.b;
+			matConsts.isUnlit      = batch.isUnlit ? 1.0f : 0.0f;
+			matConsts.hasAlbedoTex = (!batch.albedoTex.empty() && batch.albedoTex != "none") ? 1.0f : 0.0f;
+			matConsts.hasNormalTex = (!batch.normalTex.empty() && batch.normalTex != "none") ? 1.0f : 0.0f;
+			matConsts.hasRoughTex  = (!batch.roughTex.empty() && batch.roughTex != "none")  ? 1.0f : 0.0f;
+			matConsts.hasAoTex     = (!batch.aoTex.empty() && batch.aoTex != "none")        ? 1.0f : 0.0f;
+			matConsts.receiveShadows = batch.receiveShadows ? 1.0f : 0.0f;
+			matConsts.uvScale[0]   = batch.uvScale.x != 0.0f ? batch.uvScale.x : 1.0f;
+			matConsts.uvScale[1]   = batch.uvScale.y != 0.0f ? batch.uvScale.y : 1.0f;
+			matConsts.blendMode    = (float)batch.blendMode;
+			matConsts.opacity      = batch.opacity;
+			matConsts.opacityMaskClipValue = batch.opacityMaskClipValue > 0.0f ? batch.opacityMaskClipValue : 0.333f;
+			matConsts.hasOpacityTex = (!batch.opacityTex.empty() && batch.opacityTex != "none") ? 1.0f : 0.0f;
+			matConsts.normalMapYFlip = batch.normalMapYFlip ? 1.0f : 0.0f;
+			matConsts.roughnessChannel = (float)batch.roughnessChannel;
+			matConsts.metallicChannel = (float)batch.metallicChannel;
+			matConsts.aoChannel = (float)batch.aoChannel;
+			matConsts.materialDebugMode = (float)batch.materialDebugMode;
+
+			g_commandList->SetGraphicsRoot32BitConstants(1, 32, &matConsts, 0);
+
+			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
+				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
+			if (tableHandle.ptr == 0) continue;
+
+			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
+			g_commandList->DrawIndexedInstanced(drawCount, 1, (UINT)batch.startIndex, 0, 0);
+		}
+
+		// Restore main viewport and scissor
+		g_commandList->RSSetViewports(1, &viewport);
+		g_commandList->RSSetScissorRects(1, &scissor);
 	}
 
 	// 2. Render Unreal Engine 5 UI with Dear ImGui
@@ -2386,14 +3240,21 @@ void renderFrame()
 	// Wait if the next backbuffer is still in-flight
 	if (g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
 	{
-		g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
 		SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "renderFrame frame fence");
+	}
+
+	// Update non-stalling readback statistics for Mesh Cluster Culling (dev.md Section 14)
+	if (Eunoia::MeshClusterCullingSystem::Get().IsInitialized())
+	{
+		Eunoia::MeshClusterCullingSystem::Get().FetchStatistics();
 	}
 }
 
 void cleanUpD3D12()
 {
 	WaitForGpuIdle();
+	FlushDeferredReleases();
+	Eunoia::MeshClusterCullingSystem::Get().Shutdown();
 
 	ImGui_ImplDX12_Shutdown();
 	ImGui_ImplGlfw_Shutdown();
@@ -2418,6 +3279,7 @@ void cleanUpD3D12()
 	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
 	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
 	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
+	if (g_spotShadowDepthBuffer) { g_spotShadowDepthBuffer->Release(); g_spotShadowDepthBuffer = nullptr; }
 
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
@@ -2461,6 +3323,7 @@ static void frameBufferResizeCallback(GLFWwindow* window, int width, int height)
 	g_currentWidth = width;
 	g_currentHeight = height;
 	resizeBuffers(width, height);
+	Eunoia::MeshClusterCullingSystem::Get().Resize((UINT)width, (UINT)height);
 }
 
 static bool RayTriangleIntersect(
@@ -2627,6 +3490,14 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
+	if (g_scene.isPlayMode)
+	{
+		if (button == GLFW_MOUSE_BUTTON_LEFT) s_isLeftMouseDown = (action == GLFW_PRESS);
+		else if (button == GLFW_MOUSE_BUTTON_MIDDLE) s_isMiddleMouseDown = (action == GLFW_PRESS);
+		else if (button == GLFW_MOUSE_BUTTON_RIGHT) s_isRightMouseDown = (action == GLFW_PRESS);
+		return;
+	}
+
 	ImGuiIO& io = ImGui::GetIO();
 
 	if (button == GLFW_MOUSE_BUTTON_LEFT)
@@ -2655,14 +3526,12 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			s_isRightMouseDown = true;
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-			bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+			bool wantCapture = io.WantCaptureMouse;
 			if (!isAlt && !wantCapture)
 			{
 				double mx, my;
 				glfwGetCursorPos(window, &mx, &my);
-				EngineUI::ViewportRect vpRect = g_scene.isPlayMode ?
-					EngineUI::ViewportRect{0.0f, 0.0f, (float)g_currentWidth, (float)g_currentHeight} :
-					g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+				EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
 				if (mx >= vpRect.x && mx <= vpRect.x + vpRect.width &&
 				    my >= vpRect.y && my <= vpRect.y + vpRect.height)
 				{
@@ -2685,6 +3554,17 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 
 static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 {
+	double deltaX = xpos - s_lastMouseX;
+	double deltaY = ypos - s_lastMouseY;
+	s_lastMouseX = xpos;
+	s_lastMouseY = ypos;
+
+	if (g_scene.isPlayMode)
+	{
+		// Game mode: Camera is static unless controlled by a behaviour script
+		return;
+	}
+
 	if (s_firstMouseAfterCapture && g_camera.isFlying)
 	{
 		s_lastMouseX = xpos;
@@ -2693,18 +3573,13 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		return;
 	}
 
-	double deltaX = xpos - s_lastMouseX;
-	double deltaY = ypos - s_lastMouseY;
-	s_lastMouseX = xpos;
-	s_lastMouseY = ypos;
-
 	ImGuiIO& io = ImGui::GetIO();
 	if (ImGuizmo::IsUsing()) return;
 
 	bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 	              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
 
-	// 1. Fly Camera (Hold RMB + Mouse Movement -> Look around) - Active in Editor and in Play Mode
+	// 1. Fly Camera (Hold RMB + Mouse Movement -> Look around)
 	if (g_camera.isFlying && s_isRightMouseDown && !isAlt)
 	{
 		g_camera.LookAround((float)deltaX, (float)deltaY);
@@ -2712,7 +3587,7 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		return;
 	}
 
-	bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+	bool wantCapture = io.WantCaptureMouse;
 	if (wantCapture || ImGuizmo::IsOver()) return;
 
 	// 2. Alt Navigation (Unreal Engine Maya-style viewport controls)
@@ -2752,6 +3627,12 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 {
 	InputSystem::ScrollCallback(window, xoffset, yoffset);
 
+	if (g_scene.isPlayMode)
+	{
+		// Game mode: Viewport zoom is disabled
+		return;
+	}
+
 	ImGuiIO& io = ImGui::GetIO();
 
 	if (s_isRightMouseDown && g_camera.isFlying)
@@ -2762,7 +3643,7 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 	}
 	else
 	{
-		bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+		bool wantCapture = io.WantCaptureMouse;
 		if (wantCapture) return;
 		g_camera.Zoom((float)yoffset);
 		SyncViewportCameraToLevelCamera();
@@ -2783,6 +3664,7 @@ bool RecoverD3D12Device(HWND hwnd)
 	EngineLogger::Get().LogAction("DEVICE_RECOVERY_START", "DirectX12", "Attempting full D3D12 device recreation.");
 
 	// 1. Release all mapped buffers and hardware resources
+	FlushDeferredReleases();
 	if (g_vertexBuffer) { g_vertexBuffer->Unmap(0, nullptr); g_vertexBuffer->Release(); g_vertexBuffer = nullptr; }
 	if (g_indexBuffer) { g_indexBuffer->Unmap(0, nullptr); g_indexBuffer->Release(); g_indexBuffer = nullptr; }
 	if (g_constantBuffer) { g_constantBuffer->Unmap(0, nullptr); g_constantBuffer->Release(); g_constantBuffer = nullptr; }
@@ -2802,6 +3684,10 @@ bool RecoverD3D12Device(HWND hwnd)
 	if (g_depthStencilBuffer) { g_depthStencilBuffer->Release(); g_depthStencilBuffer = nullptr; }
 	if (g_shadowDepthBuffer) { g_shadowDepthBuffer->Release(); g_shadowDepthBuffer = nullptr; }
 	if (g_pointShadowDepthBuffer) { g_pointShadowDepthBuffer->Release(); g_pointShadowDepthBuffer = nullptr; }
+	if (g_spotShadowDepthBuffer) { g_spotShadowDepthBuffer->Release(); g_spotShadowDepthBuffer = nullptr; }
+	g_shadowSrvCpuHandle = {}; g_shadowSrvGpuHandle = {};
+	g_pointShadowSrvCpuHandle = {}; g_pointShadowSrvGpuHandle = {};
+	g_spotShadowSrvCpuHandle = {}; g_spotShadowSrvGpuHandle = {};
 
 	for (UINT i = 0; i < FRAME_COUNT; i++)
 	{
@@ -2874,10 +3760,28 @@ bool RecoverD3D12Device(HWND hwnd)
 
 	// 4. Reload textures & fallbacks
 	InitFallbackTextures();
-	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
-	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
-	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	DX12GpuTexture dirLightIcon = GetOrLoadGPUTexture("Resources/Icons/directional_light.png", g_fallbackWhite);
+	g_engineUI.directionalLightIconGpuHandle = dirLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture ptLightIcon = GetOrLoadGPUTexture("Resources/Icons/point_light.png", g_fallbackWhite);
+	g_engineUI.pointLightIconGpuHandle = ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture spotLightIcon = GetOrLoadGPUTexture("Resources/Icons/spot_light.png", g_fallbackWhite);
+	g_engineUI.spotLightIconGpuHandle = spotLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture areaLightIcon = GetOrLoadGPUTexture("Resources/Icons/area_light.png", g_fallbackWhite);
+	g_engineUI.areaLightIconGpuHandle = areaLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
+	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture skyLightIcon = GetOrLoadGPUTexture("Resources/Icons/sky_light.png", lightIcon);
+	g_engineUI.skyLightIconGpuHandle = skyLightIcon.gpuHandle.ptr ? skyLightIcon.gpuHandle.ptr : lightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
+	DX12GpuTexture engineIcon = GetOrLoadGPUTexture("Resources/Icons/eunoia.png", g_fallbackWhite);
+	g_engineUI.engineIconGpuHandle = engineIcon.gpuHandle.ptr;
 
 	// 5. Pre-upload textures & rebuild scene geometry
 	PreRenderUploadTextures();
@@ -2891,10 +3795,125 @@ bool RecoverD3D12Device(HWND hwnd)
 	return true;
 }
 
-int main()
+// ============================================================================
+// Custom Window Frame & Window Procedure for Editor
+// Provides borderless dark custom frame, native resize borders, snap, and DWM shadow
+// ============================================================================
+static WNDPROC g_originalWndProc = nullptr;
+
+static LRESULT CALLBACK CustomWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+	switch (uMsg)
+	{
+	case WM_NCCALCSIZE:
+	{
+		if (wParam == TRUE)
+		{
+			// Returning 0 removes default OS caption and borders; client area fills entire window
+			if (IsZoomed(hwnd))
+			{
+				// When maximized, adjust the client rect to match monitor work area (avoids 8px overflow)
+				HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+				MONITORINFO mi = { sizeof(mi) };
+				if (GetMonitorInfo(hMon, &mi))
+				{
+					NCCALCSIZE_PARAMS* p = (NCCALCSIZE_PARAMS*)lParam;
+					p->rgrc[0] = mi.rcWork;
+				}
+				return 0;
+			}
+			return 0;
+		}
+		return 0;
+	}
+
+	case WM_GETMINMAXINFO:
+	{
+		MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+		HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi = { sizeof(mi) };
+		if (GetMonitorInfo(hMon, &mi))
+		{
+			mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+			mmi->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+			mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
+			mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+		}
+		mmi->ptMinTrackSize.x = 800;
+		mmi->ptMinTrackSize.y = 500;
+		return 0;
+	}
+
+	case WM_NCHITTEST:
+	{
+		if (IsZoomed(hwnd))
+		{
+			return HTCLIENT;
+		}
+
+		POINT pt = { (short)LOWORD(lParam), (short)HIWORD(lParam) };
+		RECT rc;
+		GetWindowRect(hwnd, &rc);
+
+		const int BORDER_SIZE = 7;
+		bool left   = (pt.x >= rc.left && pt.x < rc.left + BORDER_SIZE);
+		bool right  = (pt.x <= rc.right && pt.x > rc.right - BORDER_SIZE);
+		bool top    = (pt.y >= rc.top && pt.y < rc.top + BORDER_SIZE);
+		bool bottom = (pt.y <= rc.bottom && pt.y > rc.bottom - BORDER_SIZE);
+
+		if (top && left)     return HTTOPLEFT;
+		if (top && right)    return HTTOPRIGHT;
+		if (bottom && left)  return HTBOTTOMLEFT;
+		if (bottom && right) return HTBOTTOMRIGHT;
+		if (left)            return HTLEFT;
+		if (right)           return HTRIGHT;
+		if (top)             return HTTOP;
+		if (bottom)          return HTBOTTOM;
+
+		return HTCLIENT;
+	}
+
+	case WM_NCACTIVATE:
+		return TRUE;
+	}
+
+	return CallWindowProc(g_originalWndProc, hwnd, uMsg, wParam, lParam);
+}
+
+static void SetupCustomWindowFrame(HWND hwnd)
+{
+	if (!hwnd) return;
+
+	LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+	style |= WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CAPTION | WS_SYSMENU;
+	SetWindowLongPtr(hwnd, GWL_STYLE, style);
+
+	g_originalWndProc = (WNDPROC)SetWindowLongPtr(hwnd, GWLP_WNDPROC, (LONG_PTR)CustomWindowProc);
+
+	MARGINS margins = { 1, 1, 1, 1 };
+	DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+	SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+int main(int argc, char** argv)
 {
 	EngineLogger::Get().Init("logs.elogs");
 	EngineLogger::Get().LogAction("ENGINE_START", "Eunoia-Editor", "DirectX 12 Initializing");
+
+	bool isGameOnlyMode = false;
+	std::filesystem::path gameProjectPath;
+
+	for (int i = 1; i < argc; ++i) {
+		std::string arg = argv[i];
+		if (arg == "--game" || arg == "-game" || arg == "/game" || arg == "--play" || arg == "-play") {
+			isGameOnlyMode = true;
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				gameProjectPath = argv[++i];
+			}
+		}
+	}
 
 	// 1. Initialize GLFW
 	if (!glfwInit())
@@ -2903,8 +3922,33 @@ int main()
 		return -1;
 	}
 
+	std::filesystem::path selectedProjectPath;
+	if (isGameOnlyMode) {
+		selectedProjectPath = gameProjectPath.empty() ? std::filesystem::current_path() : gameProjectPath;
+		std::cerr << "[INFO] Launching in Dedicated Game Mode for: " << selectedProjectPath.string() << std::endl;
+	} else {
+		// 1b. Run the Standalone Project Browser as a separate window BEFORE the editor
+		// This opens a lightweight OpenGL+ImGui window for project selection.
+		// The main D3D12 editor window only opens AFTER a project is selected.
+		selectedProjectPath = EngineUI::RunStandaloneProjectBrowser();
+		if (selectedProjectPath.empty())
+		{
+			// User closed the project browser without selecting — exit the application
+			std::cerr << "[INFO] No project selected. Exiting." << std::endl;
+			glfwTerminate();
+			return 0;
+		}
+		std::cerr << "[INFO] Project selected: " << selectedProjectPath.string() << std::endl;
+	}
+
+	// 2. Create main window (D3D12, NO_API)
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	g_window = glfwCreateWindow(WIDTH, HEIGHT, "Eunoia-Editor", nullptr, nullptr);
+	if (isGameOnlyMode) {
+		glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	}
+	std::string winTitle = isGameOnlyMode ? (selectedProjectPath.filename().string() + " - Game Mode") : "Eunoia-Editor";
+	g_window = glfwCreateWindow(WIDTH, HEIGHT, winTitle.c_str(), nullptr, nullptr);
 	if (!g_window)
 	{
 		std::cerr << "Failed to create GLFW window!" << std::endl;
@@ -2913,6 +3957,31 @@ int main()
 	}
 
 	HWND hwnd = glfwGetWin32Window(g_window);
+	if (!isGameOnlyMode) {
+		SetupCustomWindowFrame(hwnd);
+	}
+	g_engineUI.SetWindow(g_window);
+	g_engineUI.isGameOnlyWindow = isGameOnlyMode;
+
+#ifdef _WIN32
+	// Set window icon (both large for Taskbar/Alt-Tab and small for title bar / system menu)
+	HICON hIconBig = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+	HICON hIconSmall = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+	if (!hIconBig) {
+		hIconBig = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1));
+	}
+	if (!hIconSmall) {
+		hIconSmall = (HICON)LoadImageA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1), IMAGE_ICON, 16, 16, 0);
+		if (!hIconSmall) hIconSmall = hIconBig;
+	}
+	if (hIconBig) {
+		SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+	}
+	if (hIconSmall) {
+		SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+	}
+#endif
+
 	ShowWindow(hwnd, SW_SHOW);
 	UpdateWindow(hwnd);
 
@@ -3002,11 +4071,65 @@ int main()
 	ImGui_ImplDX12_Init(&init_info);
 
 	InitFallbackTextures();
-	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("resources/icons/light.png", g_fallbackWhite);
-	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr;
-	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("resources/icons/camera.png", g_fallbackWhite);
+	DX12GpuTexture dirLightIcon = GetOrLoadGPUTexture("Resources/Icons/directional_light.png", g_fallbackWhite);
+	g_engineUI.directionalLightIconGpuHandle = dirLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture ptLightIcon = GetOrLoadGPUTexture("Resources/Icons/point_light.png", g_fallbackWhite);
+	g_engineUI.pointLightIconGpuHandle = ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture spotLightIcon = GetOrLoadGPUTexture("Resources/Icons/spot_light.png", g_fallbackWhite);
+	g_engineUI.spotLightIconGpuHandle = spotLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture areaLightIcon = GetOrLoadGPUTexture("Resources/Icons/area_light.png", g_fallbackWhite);
+	g_engineUI.areaLightIconGpuHandle = areaLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture lightIcon = GetOrLoadGPUTexture("Resources/Icons/light.png", ptLightIcon);
+	g_engineUI.lightIconGpuHandle = lightIcon.gpuHandle.ptr ? lightIcon.gpuHandle.ptr : ptLightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture skyLightIcon = GetOrLoadGPUTexture("Resources/Icons/sky_light.png", lightIcon);
+	g_engineUI.skyLightIconGpuHandle = skyLightIcon.gpuHandle.ptr ? skyLightIcon.gpuHandle.ptr : lightIcon.gpuHandle.ptr;
+
+	DX12GpuTexture cameraIcon = GetOrLoadGPUTexture("Resources/Icons/camera.png", g_fallbackWhite);
 	g_engineUI.cameraIconGpuHandle = cameraIcon.gpuHandle.ptr;
+	DX12GpuTexture engineIcon = GetOrLoadGPUTexture("Resources/Icons/eunoia.png", g_fallbackWhite);
+	g_engineUI.engineIconGpuHandle = engineIcon.gpuHandle.ptr;
 	InputSystem::Get().SetupDefaultActions();
+
+	// Initialize EngineUI with the project selected from the standalone Project Browser window
+	g_engineUI.InitWithProject(selectedProjectPath, g_scene, g_camera);
+
+	if (isGameOnlyMode) {
+		GameObject* camObj = nullptr;
+		if (g_scene.activeLevelCameraId != -1) {
+			camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		}
+		if (!camObj) {
+			for (auto& obj : g_scene.objects) {
+				if (obj.isCamera || obj.type == PrimitiveType::Camera) {
+					camObj = &obj;
+					g_scene.activeLevelCameraId = obj.id;
+					break;
+				}
+			}
+		}
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera)) {
+				glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
+				glm::vec3 worldPos, worldRot, worldScale;
+				Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+				g_camera.yaw = worldRot.y;
+				g_camera.pitch = worldRot.x;
+				g_camera.fov = camObj->camera.fov;
+				g_camera.isOrthographic = camObj->camera.isOrthographic;
+				g_camera.orthoSize = camObj->camera.orthoSize;
+				g_camera.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+				g_camera.farPlane = std::max(1.0f, camObj->camera.farPlane);
+				g_camera.distance = 0.001f;
+				g_camera.target = worldPos + g_camera.GetForward() * 0.001f;
+			}
+		g_scene.showGrid = false;
+		g_engineUI.showGizmo = false;
+		g_scene.StartPlayMode();
+	}
 
 	auto lastTime = std::chrono::high_resolution_clock::now();
 	float frameCount = 0.0f;
@@ -3029,8 +4152,8 @@ int main()
 		if (deltaTime > 0.1f) deltaTime = 0.1f;
 		ScreenPrint::System::Get().Update(deltaTime);
 
-		// Process Fly Mode (Hold RMB + W, S, A, D, E, Q) - Active in Editor and in Play Mode
-		if (s_isRightMouseDown && g_camera.isFlying)
+		// Process Fly Mode (Hold RMB + W, S, A, D, E, Q) - Active only in Editor, NEVER in Play Mode
+		if (!g_scene.isPlayMode && s_isRightMouseDown && g_camera.isFlying)
 		{
 			float speed = g_camera.moveSpeed;
 			if (glfwGetKey(g_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
@@ -3059,10 +4182,11 @@ int main()
 			}
 		}
 
-		// Play Mode stop key listener (dev.md Section 34: DELETE stops Play Mode even if Game View has focus)
-		if (g_scene.isPlayMode && (InputSystem::Get().IsKeyPressed(Key::Delete) || glfwGetKey(g_window, GLFW_KEY_DELETE) == GLFW_PRESS))
+		// Game Mode exit key listener (ESC or DELETE closes external game window)
+		if (isGameOnlyMode && (InputSystem::Get().IsKeyPressed(Key::Escape) || glfwGetKey(g_window, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+		                       InputSystem::Get().IsKeyPressed(Key::Delete) || glfwGetKey(g_window, GLFW_KEY_DELETE) == GLFW_PRESS))
 		{
-			g_engineUI.ExitPlayMode(g_scene);
+			glfwSetWindowShouldClose(g_window, GLFW_TRUE);
 		}
 
 		frameCount += 1.0f;
@@ -3180,7 +4304,6 @@ int main()
 				// Synchronize: wait for the frame that previously used this backbuffer / upload buffers to finish on GPU
 				if (g_fence && g_fenceValues[g_frameIndex] > 0 && g_fence->GetCompletedValue() < g_fenceValues[g_frameIndex])
 				{
-					g_fence->SetEventOnCompletion(g_fenceValues[g_frameIndex], g_fenceEvent);
 					SafeWaitForFence(g_fence, g_fenceValues[g_frameIndex], g_fenceEvent, 5000, "Frame start buffer sync");
 				}
 
@@ -3203,6 +4326,10 @@ int main()
 	}
 
 	// 5. Cleanup
+	if (isGameOnlyMode) {
+		g_scene.StopPlayMode();
+	}
+
 	cleanUpD3D12();
 
 	glfwDestroyWindow(g_window);

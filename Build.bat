@@ -9,13 +9,19 @@ set "OUTPUT_DIR=%BUILD_ROOT%\Engine"
 set "INTERMEDIATES_DIR=%BUILD_ROOT%\Intermediates"
 set "TESTS_BUILD_DIR=%BUILD_ROOT%\Tests"
 set "RUNTIME_BUILD_DIR=%BUILD_ROOT%\Runtime"
-set "GAME_BUILD_DIR=%PROJECT_DIR%\Projects\test\Build"
+if exist "%PROJECT_DIR%\..\Projects" (
+    set "PROJECTS_ROOT=%PROJECT_DIR%\..\Projects"
+) else (
+    set "PROJECTS_ROOT=%PROJECT_DIR%\Projects"
+)
+set "GAME_BUILD_DIR=%PROJECTS_ROOT%\test\Build"
 
 if not exist "%BUILD_ROOT%" mkdir "%BUILD_ROOT%"
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if not exist "%INTERMEDIATES_DIR%" mkdir "%INTERMEDIATES_DIR%"
 if not exist "%TESTS_BUILD_DIR%" mkdir "%TESTS_BUILD_DIR%"
 if not exist "%RUNTIME_BUILD_DIR%" mkdir "%RUNTIME_BUILD_DIR%"
+if not exist "%PROJECTS_ROOT%" mkdir "%PROJECTS_ROOT%"
 if not exist "%GAME_BUILD_DIR%" mkdir "%GAME_BUILD_DIR%"
 
 set "COMPILER=%PROJECT_DIR%\tools\w64devkit\bin\g++.exe"
@@ -25,12 +31,47 @@ if not exist "%COMPILER%" (
         set "COMPILER=g++"
     ) else (
         echo [ERROR] C++ compiler not found!
-        exit /b 1
     )
 )
 
+set "WINDRES=%PROJECT_DIR%\tools\w64devkit\bin\windres.exe"
+if not exist "%WINDRES%" (
+    where windres >nul 2>&1
+    if !ERRORLEVEL! equ 0 (
+        set "WINDRES=windres"
+    ) else (
+        set "WINDRES="
+    )
+)
+
+set "RES_OBJ="
+if defined WINDRES (
+    if exist "%WINDRES%" (
+        echo [INFO] Compiling Windows application icon resource...
+        "%WINDRES%" -I"%PROJECT_DIR%" -i "%PROJECT_DIR%\Editor\Editor\Src\Eunoia.rc" -O coff -o "%INTERMEDIATES_DIR%\Eunoia.res.o"
+        if exist "%INTERMEDIATES_DIR%\Eunoia.res.o" (
+            set "RES_OBJ=%INTERMEDIATES_DIR%\Eunoia.res.o"
+        )
+    )
+)
+
+:: Find user behaviour scripts across projects under Projects/*/Content
+set "PROJECT_USER_SCRIPTS="
+if exist "%PROJECTS_ROOT%" (
+    for /d %%p in ("%PROJECTS_ROOT%\*") do (
+        if exist "%%p\Content" (
+            for /r "%%p\Content" %%s in (*.cpp) do (
+                set "PROJECT_USER_SCRIPTS=!PROJECT_USER_SCRIPTS! "%%s""
+            )
+        )
+    )
+)
+
+:: Terminate running editor to prevent file lock
+taskkill /F /IM Eunoia-Editor.exe >nul 2>&1
+
 echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DIR%...
-"%COMPILER%" -std=c++17 -O2 ^
+"%COMPILER%" -std=c++20 -O2 ^
     "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
     "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineRHI\Include" ^
@@ -38,6 +79,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "-I%PROJECT_DIR%\Engine\EngineScene\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineAssets\Include" ^
     "-I%PROJECT_DIR%\Engine\EunoiaPluginCore\Include" ^
+    "-I%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Include" ^
     "-I%PROJECT_DIR%\Editor\Editor\Include" ^
     "-I%PROJECT_DIR%\deps\tinyobj" ^
     "-I%PROJECT_DIR%\deps\cgltf" ^
@@ -49,23 +91,38 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "-I%PROJECT_DIR%\deps\json" ^
     "-I%PROJECT_DIR%" ^
     "%PROJECT_DIR%\deps\ufbx\ufbx.c" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\MeshClusterBuilder.cpp" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\MeshClusterCulling.cpp" ^
+    "%PROJECT_DIR%\Plugins\Mesh-Cluster-Culling\Source\HiZManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\TextureManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetRegistry.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineScene\Src\EunoiaBehaviour.cpp" ^
+    "%PROJECT_DIR%\Engine\EnginePlatform\Src\Window.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\Device.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\SwapChain.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\CommandContext.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\DescriptorAllocator.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\Fence.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\PipelineState.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRHI\Src\UploadHeap.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineRenderer\Src\SceneRenderer.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\Main.cpp" ^
     "%PROJECT_DIR%\Editor\Editor\Src\EngineUI.cpp" ^
-    "%PROJECT_DIR%\Projects\test\Behaviours\Behaviours\FPS_Player.cpp" ^
+    "%PROJECT_DIR%\Editor\Editor\Src\EditorGizmoSystem.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_draw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_tables.cpp" ^
     "%PROJECT_DIR%\deps\imgui\imgui_widgets.cpp" ^
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_glfw.cpp" ^
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_dx12.cpp" ^
+    "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_opengl3.cpp" ^
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
+    !PROJECT_USER_SCRIPTS! ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 ^
+    -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 -ldwmapi ^
+    !RES_OBJ! ^
     -o "%OUTPUT_DIR%\Eunoia-Editor.exe"
 
 if !ERRORLEVEL! neq 0 (
@@ -99,8 +156,9 @@ xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Docs" "%OUTPUT_DIR%\Docs\" >nul 2>&1
 xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Plugins" "%OUTPUT_DIR%\Plugins\" >nul 2>&1
 xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects" "%OUTPUT_DIR%\Projects\" >nul 2>&1
 
-:: Copy dependencies needed for project compiling (e.g. GLM)
-xcopy /s /e /y /d /q /i "%PROJECT_DIR%\deps\glm" "%OUTPUT_DIR%\Deps\glm\" >nul 2>&1
+:: Copy dependencies and toolchain needed for project compiling and IntelliSense
+xcopy /s /e /y /d /q /i "%PROJECT_DIR%\deps" "%OUTPUT_DIR%\deps\" >nul 2>&1
+xcopy /s /e /y /d /q /i "%PROJECT_DIR%\tools" "%OUTPUT_DIR%\tools\" >nul 2>&1
 
 :: Generate run script inside Build\Engine
 (
@@ -119,13 +177,33 @@ dir /b "%OUTPUT_DIR%"
 :: ─────────────────────────────────────────────────────────────────────────────
 echo.
 echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
-"%COMPILER%" -std=c++17 -O2 ^
+"%COMPILER%" -std=c++20 -O2 ^
     "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
     "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineScene\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineAssets\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineRHI\Include" ^
+    "-I%PROJECT_DIR%\Engine\EngineRenderer\Include" ^
+    "-I%PROJECT_DIR%\Engine\EunoiaPluginCore\Include" ^
+    "-I%PROJECT_DIR%\deps\tinyobj" ^
+    "-I%PROJECT_DIR%\deps\cgltf" ^
+    "-I%PROJECT_DIR%\deps\ufbx" ^
     "-I%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\include" ^
+    "-I%PROJECT_DIR%\deps\glm" ^
+    "-I%PROJECT_DIR%\deps\json" ^
+    "-I%PROJECT_DIR%" ^
+    "%PROJECT_DIR%\deps\ufbx\ufbx.c" ^
+    "%PROJECT_DIR%\Engine\EnginePlatform\Src\Window.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineScene\Src\EunoiaBehaviour.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetRegistry.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\AssetManager.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\TextureManager.cpp" ^
+    "%PROJECT_DIR%\Engine\EngineAssets\Src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Runtime\Src\Main.cpp" ^
+    !PROJECT_USER_SCRIPTS! ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
-    -lglfw3 -lgdi32 ^
+    -lglfw3 -lgdi32 -lole32 -lshell32 ^
+    !RES_OBJ! ^
     -o "%GAME_BUILD_DIR%\test.exe"
 
 if !ERRORLEVEL! equ 0 (
@@ -142,19 +220,19 @@ if !ERRORLEVEL! equ 0 (
     xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Resources" "%GAME_BUILD_DIR%\Resources\" >nul 2>&1
 
     :: Copy project cooked content, scenes, levels, registry, materials, models, and behaviours
-    if exist "%PROJECT_DIR%\Projects\test\Cooked" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Cooked" "%GAME_BUILD_DIR%\Cooked\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Scenes" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Scenes" "%GAME_BUILD_DIR%\Scenes\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Levels" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Levels" "%GAME_BUILD_DIR%\Levels\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Registry" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Registry" "%GAME_BUILD_DIR%\Registry\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Materials" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Materials" "%GAME_BUILD_DIR%\Materials\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Models" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Models" "%GAME_BUILD_DIR%\Models\" >nul 2>&1
-    if exist "%PROJECT_DIR%\Projects\test\Behaviours" xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects\test\Behaviours" "%GAME_BUILD_DIR%\Behaviours\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Cooked" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Cooked" "%GAME_BUILD_DIR%\Cooked\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Scenes" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Scenes" "%GAME_BUILD_DIR%\Scenes\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Levels" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Levels" "%GAME_BUILD_DIR%\Levels\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Registry" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Registry" "%GAME_BUILD_DIR%\Registry\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Materials" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Materials" "%GAME_BUILD_DIR%\Materials\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Models" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Models" "%GAME_BUILD_DIR%\Models\" >nul 2>&1
+    if exist "%PROJECTS_ROOT%\test\Behaviours" xcopy /s /e /y /d /q /i "%PROJECTS_ROOT%\test\Behaviours" "%GAME_BUILD_DIR%\Behaviours\" >nul 2>&1
 
     :: Copy project root files (*.emat, *.assetmeta, *.json, *.cpp)
-    copy /y "%PROJECT_DIR%\Projects\test\*.emat" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.assetmeta" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.json" "%GAME_BUILD_DIR%\" >nul 2>&1
-    copy /y "%PROJECT_DIR%\Projects\test\*.cpp" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.emat" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.assetmeta" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.json" "%GAME_BUILD_DIR%\" >nul 2>&1
+    copy /y "%PROJECTS_ROOT%\test\*.cpp" "%GAME_BUILD_DIR%\" >nul 2>&1
 
     (
     echo @echo off

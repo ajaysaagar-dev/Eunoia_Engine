@@ -2,6 +2,8 @@
 #include <EngineScene/EunoiaBehaviour.h>
 #include <string>
 #include <unordered_map>
+#include <map>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -13,6 +15,7 @@ struct BehaviourClassInfo {
     std::string description;
     std::string sourceHeader;
     std::string sourceCpp;
+    bool isNative = false;
     std::function<std::unique_ptr<EunoiaBehaviour>()> factory;
 };
 
@@ -192,35 +195,84 @@ public:
 // 6. Dynamic Script Behaviour (for user-created .cpp scripts)
 class DynamicScriptBehaviour : public EunoiaBehaviour {
 public:
-    float MoveSpeed = 5.0f;
-    bool IsActive = true;
-    Light* WarningLight = nullptr;
-
-    DynamicScriptBehaviour(const std::string& className = "CustomBehaviour") {
+    DynamicScriptBehaviour(const std::string& className = "CustomBehaviour", const std::string& sourceCpp = "") {
         m_className = className;
         m_displayName = className;
-        RegisterProperties();
+        m_sourceCppPath = sourceCpp;
+        if (!m_sourceCppPath.empty()) {
+            ParsePropertiesFromCpp(m_sourceCppPath);
+        } else {
+            RegisterProperties();
+        }
     }
 
     std::unique_ptr<EunoiaBehaviour> Clone() const override {
-        auto clone = std::make_unique<DynamicScriptBehaviour>(m_className);
+        auto clone = std::make_unique<DynamicScriptBehaviour>(m_className, m_sourceCppPath);
         clone->m_displayName = m_displayName;
-        clone->MoveSpeed = MoveSpeed;
-        clone->IsActive = IsActive;
-        clone->WarningLight = WarningLight;
+        clone->m_floatStorage = m_floatStorage;
+        clone->m_intStorage = m_intStorage;
+        clone->m_boolStorage = m_boolStorage;
+        clone->m_stringStorage = m_stringStorage;
+        clone->m_vec3Storage = m_vec3Storage;
+        clone->m_refStorage = m_refStorage;
+        clone->m_sourceTimestamp = m_sourceTimestamp;
+        clone->m_hasRotation = m_hasRotation;
+        clone->m_rotateAxis = m_rotateAxis;
+        clone->m_defaultSpeed = m_defaultSpeed;
+        clone->m_hasTranslation = m_hasTranslation;
+        clone->m_translateAxis = m_translateAxis;
+        clone->m_defaultMoveSpeed = m_defaultMoveSpeed;
+        clone->m_hasInput = m_hasInput;
+        clone->m_startPrintMessages = m_startPrintMessages;
+        clone->m_updatePrintMessages = m_updatePrintMessages;
+        clone->RegisterProperties();
         clone->CopyPropertiesFrom(*this);
+        clone->Transform.Init(clone.get());
+        clone->GetRespectiveObject.behaviour = clone.get();
         return clone;
     }
 
-    void RegisterProperties() override {
-        m_properties.clear();
-        RegisterProperty("Move Speed", &MoveSpeed, "Locomotion", 0.0f, 50.0f);
-        RegisterProperty("Is Active", &IsActive, "General");
-        RegisterReference("Warning Light", &WarningLight, ObjectRefType::Light, "References");
-    }
+    void RegisterProperties() override;
+    void ParsePropertiesFromCpp(const std::string& cppPath);
+    void RefreshPropertiesFromSource() override;
+    std::string GetSourceCppPath() const override { return m_sourceCppPath; }
 
     void Start() override;
     void Update(float deltaTime) override;
+
+    // Stable storage pools for dynamically reflected properties
+    std::map<std::string, float> m_floatStorage;
+    std::map<std::string, int> m_intStorage;
+    std::map<std::string, bool> m_boolStorage;
+    std::map<std::string, std::string> m_stringStorage;
+    std::map<std::string, glm::vec3> m_vec3Storage;
+    std::map<std::string, void*> m_refStorage;
+
+    // Dynamic runtime script execution state
+    bool m_hasRotation = false;
+    glm::vec3 m_rotateAxis{0.0f, 1.0f, 0.0f};
+    float m_defaultSpeed = 50.0f;
+
+    bool m_hasTranslation = false;
+    glm::vec3 m_translateAxis{0.0f, 0.0f, 0.0f};
+    float m_defaultMoveSpeed = 5.0f;
+
+    bool m_hasInput = false;
+    std::vector<std::string> m_startPrintMessages;
+
+    struct DynamicUpdatePrint {
+        std::string textPrefix;
+        std::string textSuffix;
+        bool appendDeltaTime = false;
+        bool appendPosition = false;
+        bool appendRotation = false;
+        std::string varName;
+        int printKey = -1;
+    };
+    std::vector<DynamicUpdatePrint> m_updatePrintMessages;
+
+    std::string m_sourceCppPath;
+    std::filesystem::file_time_type m_sourceTimestamp{};
 };
 
 // ============================================================================
@@ -239,6 +291,7 @@ public:
         info.className = className;
         info.displayName = displayName.empty() ? className : displayName;
         info.description = description;
+        info.isNative = true;
         info.factory = [className, displayName]() -> std::unique_ptr<EunoiaBehaviour> {
             auto b = std::make_unique<T>();
             b->SetClassName(className);
@@ -254,19 +307,24 @@ public:
     }
 
     void RegisterScriptFile(const std::string& scriptName, const std::string& cppPath) {
-        if (m_registry.find(scriptName) != m_registry.end()) {
-            m_registry[scriptName].sourceCpp = cppPath;
+        auto it = m_registry.find(scriptName);
+        if (it != m_registry.end() && it->second.isNative) {
+            // Already natively compiled into binary: retain factory, only record source path
+            it->second.sourceCpp = cppPath;
             return;
         }
+
         BehaviourClassInfo info;
         info.className = scriptName;
         info.displayName = scriptName;
         info.description = "User C++ Script: " + cppPath;
         info.sourceCpp = cppPath;
-        info.factory = [scriptName]() -> std::unique_ptr<EunoiaBehaviour> {
-            auto b = std::make_unique<DynamicScriptBehaviour>(scriptName);
+        info.isNative = false;
+        info.factory = [scriptName, cppPath]() -> std::unique_ptr<EunoiaBehaviour> {
+            auto b = std::make_unique<DynamicScriptBehaviour>(scriptName, cppPath);
             b->SetClassName(scriptName);
             b->SetDisplayName(scriptName);
+            b->ParsePropertiesFromCpp(cppPath);
             return b;
         };
         m_registry[scriptName] = info;

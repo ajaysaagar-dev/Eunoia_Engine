@@ -1,6 +1,14 @@
 #include "EnginePlatform/Window.h"
 #include <iostream>
 
+#ifdef _WIN32
+#ifndef GLFW_EXPOSE_NATIVE_WIN32
+#define GLFW_EXPOSE_NATIVE_WIN32
+#endif
+#include <GLFW/glfw3native.h>
+#include <windows.h>
+#endif
+
 namespace EnginePlatform {
 
 bool Window::Create(const WindowConfig& cfg) {
@@ -19,6 +27,21 @@ bool Window::Create(const WindowConfig& cfg) {
         std::cerr << "[EnginePlatform] Failed to create GLFW window\n";
         return false;
     }
+
+#ifdef _WIN32
+    HWND hwnd = glfwGetWin32Window(m_window);
+    if (hwnd) {
+        HICON hIconBig = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 32, 32, LR_LOADFROMFILE);
+        HICON hIconSmall = (HICON)LoadImageA(NULL, "Resources/Icons/eunoia.ico", IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+        if (!hIconBig) hIconBig = LoadIconA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1));
+        if (!hIconSmall) {
+            hIconSmall = (HICON)LoadImageA(GetModuleHandleA(NULL), MAKEINTRESOURCEA(1), IMAGE_ICON, 16, 16, 0);
+            if (!hIconSmall) hIconSmall = hIconBig;
+        }
+        if (hIconBig) SendMessageA(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIconBig);
+        if (hIconSmall) SendMessageA(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSmall);
+    }
+#endif
 
     return true;
 }
