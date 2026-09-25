@@ -55,8 +55,23 @@ if defined WINDRES (
     )
 )
 
+:: Find user behaviour scripts across projects under Projects/*/Content
+set "PROJECT_USER_SCRIPTS="
+if exist "%PROJECTS_ROOT%" (
+    for /d %%p in ("%PROJECTS_ROOT%\*") do (
+        if exist "%%p\Content" (
+            for /r "%%p\Content" %%s in (*.cpp) do (
+                set "PROJECT_USER_SCRIPTS=!PROJECT_USER_SCRIPTS! "%%s""
+            )
+        )
+    )
+)
+
+:: Terminate running editor to prevent file lock
+taskkill /F /IM Eunoia-Editor.exe >nul 2>&1
+
 echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DIR%...
-"%COMPILER%" -std=c++17 -O2 ^
+"%COMPILER%" -std=c++20 -O2 ^
     "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
     "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineRHI\Include" ^
@@ -104,6 +119,7 @@ echo [INFO] Compiling Eunoia-Editor (DirectX 12) with Dear ImGui into %OUTPUT_DI
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_dx12.cpp" ^
     "%PROJECT_DIR%\deps\imgui\backends\imgui_impl_opengl3.cpp" ^
     "%PROJECT_DIR%\deps\imgui\ImGuizmo.cpp" ^
+    !PROJECT_USER_SCRIPTS! ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
     -lglfw3 -ld3d12 -ldxgi -ld3dcompiler -lgdi32 -limm32 -lcomdlg32 -lshell32 -lole32 -lopengl32 -ldwmapi ^
     !RES_OBJ! ^
@@ -140,8 +156,9 @@ xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Docs" "%OUTPUT_DIR%\Docs\" >nul 2>&1
 xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Plugins" "%OUTPUT_DIR%\Plugins\" >nul 2>&1
 xcopy /s /e /y /d /q /i "%PROJECT_DIR%\Projects" "%OUTPUT_DIR%\Projects\" >nul 2>&1
 
-:: Copy dependencies needed for project compiling (e.g. GLM)
-xcopy /s /e /y /d /q /i "%PROJECT_DIR%\deps\glm" "%OUTPUT_DIR%\Deps\glm\" >nul 2>&1
+:: Copy dependencies and toolchain needed for project compiling and IntelliSense
+xcopy /s /e /y /d /q /i "%PROJECT_DIR%\deps" "%OUTPUT_DIR%\deps\" >nul 2>&1
+xcopy /s /e /y /d /q /i "%PROJECT_DIR%\tools" "%OUTPUT_DIR%\tools\" >nul 2>&1
 
 :: Generate run script inside Build\Engine
 (
@@ -160,13 +177,14 @@ dir /b "%OUTPUT_DIR%"
 :: ─────────────────────────────────────────────────────────────────────────────
 echo.
 echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
-"%COMPILER%" -std=c++17 -O2 ^
+"%COMPILER%" -std=c++20 -O2 ^
     "-I%PROJECT_DIR%\Engine\EngineCore\Include" ^
     "-I%PROJECT_DIR%\Engine\EnginePlatform\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineScene\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineAssets\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineRHI\Include" ^
     "-I%PROJECT_DIR%\Engine\EngineRenderer\Include" ^
+    "-I%PROJECT_DIR%\Engine\EunoiaPluginCore\Include" ^
     "-I%PROJECT_DIR%\deps\tinyobj" ^
     "-I%PROJECT_DIR%\deps\cgltf" ^
     "-I%PROJECT_DIR%\deps\ufbx" ^
@@ -182,6 +200,7 @@ echo [INFO] Building Game Project into %GAME_BUILD_DIR%...
     "%PROJECT_DIR%\Engine\EngineAssets\Src\TextureManager.cpp" ^
     "%PROJECT_DIR%\Engine\EngineAssets\Src\MeshImporter.cpp" ^
     "%PROJECT_DIR%\Runtime\Src\Main.cpp" ^
+    !PROJECT_USER_SCRIPTS! ^
     "-L%PROJECT_DIR%\deps\glfw-3.5.1.bin.WIN64\lib-mingw-w64" ^
     -lglfw3 -lgdi32 -lole32 -lshell32 ^
     !RES_OBJ! ^

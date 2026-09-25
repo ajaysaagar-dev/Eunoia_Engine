@@ -7,6 +7,10 @@
 #include <vector>
 #include <filesystem>
 #include <unordered_set>
+#include <unordered_map>
+#include <mutex>
+#include <atomic>
+#include <thread>
 
 struct GLFWwindow;
 
@@ -67,6 +71,11 @@ struct MaterialAsset {
     bool twoSided = false;
     bool castShadows = true;
     bool receiveShadows = true;
+    bool normalMapYFlip = false;
+    int metallicChannel = 0;  // 0=R, 1=G, 2=B, 3=A
+    int roughnessChannel = 1; // 0=R, 1=G, 2=B, 3=A
+    int aoChannel = 0;        // 0=R, 1=G, 2=B, 3=A
+    int materialDebugMode = 0;
 };
 
 class EngineUI {
@@ -154,7 +163,7 @@ public:
     };
 
     ViewportRect GetViewportRect(float windowWidth, float windowHeight) const {
-        if (isImmersiveMode) {
+        if (isImmersiveMode || isGameOnlyWindow) {
             return { 0.0f, 0.0f, windowWidth, windowHeight };
         }
         float topH = topBarHeight;
@@ -171,6 +180,40 @@ public:
         if (vpH < 10.0f) vpH = 10.0f;
 
         return { vpX, vpY, vpW, vpH };
+    }
+
+    struct CameraPipRect {
+        bool active = false;
+        float x = 0.0f;
+        float y = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+        int selectedCameraId = -1;
+    };
+
+    CameraPipRect GetCameraPipRect(float windowWidth, float windowHeight, const Scene& scene) const {
+        CameraPipRect rect;
+        if (isGameView || scene.isPlayMode || isGameOnlyWindow || scene.selectedId == -1) return rect;
+
+        const GameObject* selObj = scene.FindObject(scene.selectedId);
+        if (!selObj || (!selObj->isCamera && selObj->type != PrimitiveType::Camera)) return rect;
+
+        auto vpRect = GetViewportRect(windowWidth, windowHeight);
+        float pipW = 320.0f;
+        float pipH = 180.0f;
+        float headerH = 28.0f;
+        float margin = 14.0f;
+
+        float winX = vpRect.x + vpRect.width - pipW - margin;
+        float winY = vpRect.y + vpRect.height - (pipH + headerH) - margin;
+
+        rect.active = true;
+        rect.x = winX + 4.0f;
+        rect.y = winY + headerH;
+        rect.width = pipW - 8.0f;
+        rect.height = pipH - 4.0f;
+        rect.selectedCameraId = selObj->id;
+        return rect;
     }
 
     // Viewport display mode
@@ -272,7 +315,8 @@ public:
     bool showAddBehaviourPopup = false;
     char behaviourSearchBuf[64] = "";
     bool showNewBehaviourPopup = false;
-    char newBehaviourNameBuf[64] = "PlayerController";
+    char newBehaviourNameBuf[64] = "NewBehaviour";
+    bool IsBehaviourNameAlreadyExists(const std::string& name) const;
 
     // In-Editor Code Editor (dev.md & User Request)
     bool showCodeEditor = false;
@@ -280,12 +324,31 @@ public:
     std::string activeCodeEditorPath = "";
     std::string activeCodeEditorFilename = "";
     std::string activeCodeEditorContent = "";
+    void SetupProjectDependencies(const std::filesystem::path& projectRoot);
     void OpenScriptInCodeEditor(const std::string& path);
     void RenderCodeEditor();
     void RenderBehavioursSection(Scene& scene, GameObject* obj);
     void EnterPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
     void ExitPlayMode(Scene& scene, OrbitCamera* camera = nullptr);
+    void LaunchGameSeparateWindow(Scene& scene);
+    bool IsExternalGameRunning();
+    void StopExternalGame();
     void RenderScreenPrintOverlay(float startX, float startY);
+
+    bool isGameOnlyWindow = false;
+
+    // Behaviour Script Watcher & Compilation (User Request: ask compile or later)
+    bool showScriptCompileModal = false;
+    std::atomic<bool> isCompilingScripts{false};
+    float scriptWatchTimer = 0.0f;
+    std::unordered_map<std::string, std::filesystem::file_time_type> scriptFileTimestamps;
+    std::vector<std::string> pendingChangedScripts;
+    std::mutex asyncLogMutex;
+    std::vector<EngineLogEntry> pendingAsyncLogs;
+
+    void CheckForScriptChanges();
+    void TriggerCompileScripts(Scene* scene = nullptr);
+    void RenderScriptCompileModal(Scene& scene);
 
     uint64_t lightIconGpuHandle = 0;
     uint64_t directionalLightIconGpuHandle = 0;

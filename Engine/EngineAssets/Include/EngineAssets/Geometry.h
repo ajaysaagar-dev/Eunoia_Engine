@@ -16,18 +16,20 @@ struct Vertex {
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     glm::vec2 uv{0.0f, 0.0f};
     glm::vec3 color{1.0f, 1.0f, 1.0f};
+    glm::vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
 
     Vertex() = default;
     Vertex(const glm::vec3& p, const glm::vec3& c)
-        : position(p), normal(0.0f, 1.0f, 0.0f), uv(0.0f, 0.0f), color(c) {}
-    Vertex(const glm::vec3& p, const glm::vec3& n, const glm::vec2& u, const glm::vec3& c)
-        : position(p), normal(n), uv(u), color(c) {}
+        : position(p), normal(0.0f, 1.0f, 0.0f), uv(0.0f, 0.0f), color(c), tangent(1.0f, 0.0f, 0.0f, 1.0f) {}
+    Vertex(const glm::vec3& p, const glm::vec3& n, const glm::vec2& u, const glm::vec3& c, const glm::vec4& t = {1.0f, 0.0f, 0.0f, 1.0f})
+        : position(p), normal(n), uv(u), color(c), tangent(t) {}
 };
 
 struct MeshVertex {
-    glm::vec3 pos;
-    glm::vec3 normal;
+    glm::vec3 pos{0.0f, 0.0f, 0.0f};
+    glm::vec3 normal{0.0f, 1.0f, 0.0f};
     glm::vec2 uv{0.0f, 0.0f};
+    glm::vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f}; // xyz = tangent vector, w = handedness (+1.0 or -1.0)
 };
 
 struct PrimitiveMesh {
@@ -37,6 +39,86 @@ struct PrimitiveMesh {
 
 class GeometryBuilder {
 public:
+    // MikkTSpace-compatible standard tangent generation with Gram-Schmidt orthogonalization and bitangent handedness
+    static void CalculateTangents(std::vector<MeshVertex>& vertices, const std::vector<uint32_t>& indices) {
+        if (vertices.empty() || indices.size() < 3) return;
+
+        std::vector<glm::vec3> tan1(vertices.size(), glm::vec3(0.0f));
+        std::vector<glm::vec3> tan2(vertices.size(), glm::vec3(0.0f));
+
+        for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+            uint32_t i1 = indices[i];
+            uint32_t i2 = indices[i + 1];
+            uint32_t i3 = indices[i + 2];
+
+            if (i1 >= vertices.size() || i2 >= vertices.size() || i3 >= vertices.size()) continue;
+
+            const glm::vec3& v1 = vertices[i1].pos;
+            const glm::vec3& v2 = vertices[i2].pos;
+            const glm::vec3& v3 = vertices[i3].pos;
+
+            const glm::vec2& w1 = vertices[i1].uv;
+            const glm::vec2& w2 = vertices[i2].uv;
+            const glm::vec2& w3 = vertices[i3].uv;
+
+            float x1 = v2.x - v1.x;
+            float x2 = v3.x - v1.x;
+            float y1 = v2.y - v1.y;
+            float y2 = v3.y - v1.y;
+            float z1 = v2.z - v1.z;
+            float z2 = v3.z - v1.z;
+
+            float s1 = w2.x - w1.x;
+            float s2 = w3.x - w1.x;
+            float t1 = w2.y - w1.y;
+            float t2 = w3.y - w1.y;
+
+            float r = (s1 * t2 - s2 * t1);
+            if (std::abs(r) < 1e-7f) {
+                glm::vec3 e1 = v2 - v1;
+                glm::vec3 e2 = v3 - v1;
+                glm::vec3 n = glm::cross(e1, e2);
+                glm::vec3 t = (std::abs(n.x) > 0.1f || std::abs(n.z) > 0.1f) ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+                t = glm::normalize(glm::cross(n, t));
+                tan1[i1] += t; tan1[i2] += t; tan1[i3] += t;
+                tan2[i1] += glm::cross(n, t); tan2[i2] += glm::cross(n, t); tan2[i3] += glm::cross(n, t);
+                continue;
+            }
+
+            float invR = 1.0f / r;
+            glm::vec3 sdir((t2 * x1 - t1 * x2) * invR, (t2 * y1 - t1 * y2) * invR, (t2 * z1 - t1 * z2) * invR);
+            glm::vec3 tdir((s1 * x2 - s2 * x1) * invR, (s1 * y2 - s2 * y1) * invR, (s1 * z2 - s2 * z1) * invR);
+
+            tan1[i1] += sdir;
+            tan1[i2] += sdir;
+            tan1[i3] += sdir;
+
+            tan2[i1] += tdir;
+            tan2[i2] += tdir;
+            tan2[i3] += tdir;
+        }
+
+        for (size_t a = 0; a < vertices.size(); ++a) {
+            glm::vec3 n = vertices[a].normal;
+            float nLen = glm::length(n);
+            if (nLen > 1e-6f) n /= nLen;
+            else n = glm::vec3(0.0f, 1.0f, 0.0f);
+
+            glm::vec3 t = tan1[a];
+            float tLen = glm::length(t);
+
+            if (tLen < 1e-6f) {
+                glm::vec3 up = std::abs(n.y) < 0.999f ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(1.0f, 0.0f, 0.0f);
+                t = glm::normalize(glm::cross(up, n));
+                vertices[a].tangent = glm::vec4(t, 1.0f);
+                continue;
+            }
+
+            glm::vec3 orthoT = glm::normalize(t - n * glm::dot(n, t));
+            float handedness = (glm::dot(glm::cross(n, orthoT), tan2[a]) < 0.0f) ? -1.0f : 1.0f;
+            vertices[a].tangent = glm::vec4(orthoT, handedness);
+        }
+    }
     static PrimitiveMesh CreateCube(float size = 1.0f, int sub = 12) {
         PrimitiveMesh mesh;
         float s = size * 0.5f;
@@ -90,6 +172,7 @@ public:
                 }
             }
         }
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -139,6 +222,7 @@ public:
                 }
             }
         }
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -174,6 +258,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -213,6 +298,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -285,6 +371,7 @@ public:
             mesh.indices.push_back(tri.c);
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -355,6 +442,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -430,6 +518,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -499,6 +588,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -552,6 +642,7 @@ public:
             mesh.indices.push_back(centerIdx + 1 + i);
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -575,6 +666,7 @@ public:
             mesh.indices.push_back(i + 1);
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -594,6 +686,7 @@ public:
         mesh.vertices.push_back({ {-hx, 0.0f, -hy}, n, {0.0f, 0.0f} });
 
         mesh.indices = { 0, 1, 2, 0, 2, 3 };
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -608,6 +701,7 @@ public:
         mesh.vertices.push_back({ {0.0f, 0.0f, -hy}, n, {0.5f, 1.0f} });
 
         mesh.indices = { 0, 1, 2 };
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -665,6 +759,7 @@ public:
             mesh.indices.push_back(botCenter + 1 + i);
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 
@@ -709,6 +804,7 @@ public:
             }
         }
 
+        CalculateTangents(mesh.vertices, mesh.indices);
         return mesh;
     }
 

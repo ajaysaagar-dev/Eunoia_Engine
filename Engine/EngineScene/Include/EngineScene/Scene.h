@@ -14,6 +14,7 @@
 #include <EngineAssets/TextureManager.h>
 #include <EngineAssets/MeshImporter.h>
 #include <filesystem>
+#include <EngineScene/BehaviourRegistry.h>
 
 void AddEngineLog(const std::string& category, const std::string& message, int level);
 
@@ -842,6 +843,31 @@ public:
     void StartPlayMode() {
         if (isPlayMode) return;
 
+        // Ensure all registered script behaviours are upgraded to DynamicScriptBehaviour and properties refreshed from source
+        const auto& allRegistry = BehaviourRegistry::Get().GetAll();
+        for (auto& obj : objects) {
+            for (auto& b : obj.behaviours) {
+                if (!b) continue;
+                auto regIt = allRegistry.find(b->GetClassName());
+                if (regIt != allRegistry.end() && !regIt->second.sourceCpp.empty()) {
+                    if (regIt->second.isNative) {
+                        // Native compiled behaviour: retain native instance
+                        b->RefreshPropertiesFromSource();
+                    } else if (b->GetSourceCppPath().empty() || b->GetProperties().empty()) {
+                        auto dynB = std::make_unique<DynamicScriptBehaviour>(b->GetClassName(), regIt->second.sourceCpp);
+                        dynB->SetScene(this);
+                        dynB->SetOwner(&obj);
+                        dynB->SetEnabled(b->IsEnabled());
+                        dynB->CopyPropertiesFrom(*b);
+                        dynB->ResolveReferences(*this);
+                        b = std::move(dynB);
+                    } else {
+                        b->RefreshPropertiesFromSource();
+                    }
+                }
+            }
+        }
+
         // Ensure all editor behaviour references are resolved before cloning
         ResolveAllBehaviourReferences();
 
@@ -932,6 +958,16 @@ public:
         SyncLightPositionsFromActors();
 
         if (isPlayMode) {
+            // Update global World Delta Seconds (dev.md: "the global var called 'World Delta Seconds' use as a DeltaTime")
+            WorldDeltaSeconds = dt;
+            World_Delta_Seconds = dt;
+            worldDeltaSeconds = dt;
+            WorldDeltaTime = dt;
+
+            for (auto& obj : objects) {
+                obj.scene = this;
+            }
+
             // 1. FixedUpdate
             fixedTimeAccumulator += dt;
             const float fixedStep = 1.0f / 60.0f;
@@ -959,6 +995,14 @@ public:
                 }
             }
             return;
+        }
+
+        WorldDeltaSeconds = dt;
+        World_Delta_Seconds = dt;
+        worldDeltaSeconds = dt;
+        WorldDeltaTime = dt;
+        for (auto& obj : objects) {
+            obj.scene = this;
         }
 
         if (!playAnimations) return;
@@ -995,6 +1039,11 @@ struct RenderBatch {
     int objectId = -1;
     uint32_t vertexOffset = 0;
     glm::vec2 uvScale{1.0f, 1.0f};
+    bool normalMapYFlip = false;
+    int metallicChannel = 0;
+    int roughnessChannel = 1;
+    int aoChannel = 0;
+    int materialDebugMode = 0;
 };
 
     void BuildSceneMesh(
@@ -1057,7 +1106,13 @@ struct RenderBatch {
                 glm::vec3 n = normalMatrix * mv.normal;
                 float nLen = glm::length(n);
                 glm::vec3 worldNormal = (nLen > 1e-6f && !std::isnan(nLen)) ? (n / nLen) : glm::vec3(0.0f, 1.0f, 0.0f);
-                outVertices.push_back({ glm::vec3(worldPos), worldNormal, mv.uv, glm::vec3(1.0f, 1.0f, 1.0f) });
+
+                glm::vec3 t = glm::mat3(model) * glm::vec3(mv.tangent);
+                float tLen = glm::length(t);
+                glm::vec3 worldTangent = (tLen > 1e-6f && !std::isnan(tLen)) ? (t / tLen) : glm::vec3(1.0f, 0.0f, 0.0f);
+                glm::vec4 outTangent = glm::vec4(worldTangent, mv.tangent.w);
+
+                outVertices.push_back({ glm::vec3(worldPos), worldNormal, mv.uv, glm::vec3(1.0f, 1.0f, 1.0f), outTangent });
             }
 
             for (uint32_t idx : obj.mesh.indices) {
@@ -1095,6 +1150,11 @@ struct RenderBatch {
             b.objectId = obj.id;
             b.vertexOffset = vertexOffset;
             b.uvScale = obj.uvScale;
+            b.normalMapYFlip = obj.normalMapYFlip;
+            b.metallicChannel = obj.metallicChannel;
+            b.roughnessChannel = obj.roughnessChannel;
+            b.aoChannel = obj.aoChannel;
+            b.materialDebugMode = obj.materialDebugMode;
             outBatches.push_back(b);
         }
 

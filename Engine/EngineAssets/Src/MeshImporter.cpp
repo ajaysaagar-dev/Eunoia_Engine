@@ -14,6 +14,19 @@ static std::mutex s_modelCacheMutex;
 #define CGLTF_IMPLEMENTATION
 #include "cgltf.h"
 
+static void LogShaderResourceValidation(const ImportedMaterial& mat, bool hasTangent, bool hasNormal, bool hasUV) {
+    std::cout << "[PBR MATERIAL VALIDATION] Material: " << (mat.name.empty() ? "Material" : mat.name) << "\n"
+              << "  BaseColor: " << (mat.baseColorTexture.empty() ? "(None / Factor)" : mat.baseColorTexture) << " [SRGB]\n"
+              << "  Normal: " << (mat.normalTexture.empty() ? "(None)" : mat.normalTexture) << " [LINEAR]\n"
+              << "  NormalYFlip: " << (mat.normalMapYFlip ? "TRUE (OpenGL/Blender)" : "FALSE (DirectX)") << "\n"
+              << "  Metallic: " << (mat.metallicTexture.empty() ? "(None / Factor)" : mat.metallicTexture) << " [LINEAR] (Channel: " << mat.metallicChannel << ")\n"
+              << "  Roughness: " << (mat.roughnessTexture.empty() ? "(None / Factor)" : mat.roughnessTexture) << " [LINEAR] (Channel: " << mat.roughnessChannel << ")\n"
+              << "  AO: " << (mat.aoTexture.empty() ? "(None / 1.0)" : mat.aoTexture) << " [LINEAR] (Channel: " << mat.aoChannel << ")\n"
+              << "  Tangent: " << (hasTangent ? "YES" : "NO") << "\n"
+              << "  Vertex normal: " << (hasNormal ? "YES" : "NO") << "\n"
+              << "  UV0: " << (hasUV ? "YES" : "NO") << std::endl;
+}
+
 PrimitiveMesh ImportedModel::GetMergedMesh() const {
     PrimitiveMesh merged;
     uint32_t offset = 0;
@@ -140,6 +153,9 @@ ImportedModel MeshImporter::LoadOBJ(const std::string& filePath) {
             }
         }
 
+        GeometryBuilder::CalculateTangents(mesh.vertices, mesh.indices);
+        LogShaderResourceValidation(mesh.material, true, true, !attrib.texcoords.empty());
+
         mesh.valid = true;
         model.meshes.push_back(mesh);
     }
@@ -222,15 +238,31 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
                     auto& pbr = mat->pbr_metallic_roughness;
                     m.baseColorTexture = resolveGltfImage(pbr.base_color_texture.texture, m.name, "BaseColor");
                     m.metallicTexture  = resolveGltfImage(pbr.metallic_roughness_texture.texture, m.name, "MetallicRoughness");
-                    m.roughnessTexture = m.metallicTexture; // packed texture — see Task 4b limitation note
+                    m.roughnessTexture = m.metallicTexture; // packed GLTF metallic-roughness
+                    // GLTF specification: Green channel = Roughness, Blue channel = Metallic
+                    m.roughnessChannel = 1;
+                    m.metallicChannel = 2;
+                    m.aoChannel = 0;
+                    if (std::isfinite(pbr.base_color_factor[0])) {
+                        m.baseColor = glm::vec3(pbr.base_color_factor[0], pbr.base_color_factor[1], pbr.base_color_factor[2]);
+                    }
                     if (m.metallicTexture.empty() && std::isfinite(pbr.metallic_factor)) m.metallic = pbr.metallic_factor;
                     if (m.roughnessTexture.empty() && std::isfinite(pbr.roughness_factor)) m.roughness = pbr.roughness_factor;
                 }
                 m.normalTexture   = resolveGltfImage(mat->normal_texture.texture, m.name, "Normal");
+                m.normalMapYFlip  = true; // GLTF standard expects OpenGL normal map convention
                 m.aoTexture       = resolveGltfImage(mat->occlusion_texture.texture, m.name, "AO");
                 m.emissionTexture = resolveGltfImage(mat->emissive_texture.texture, m.name, "Emissive");
                 if (std::isfinite(mat->emissive_factor[0])) {
                     m.emissiveColor = glm::vec3(mat->emissive_factor[0], mat->emissive_factor[1], mat->emissive_factor[2]);
+                }
+                if (mat->alpha_mode == cgltf_alpha_mode_mask) {
+                    m.blendMode = 1;
+                    m.opacityMaskClipValue = std::isfinite(mat->alpha_cutoff) ? mat->alpha_cutoff : 0.5f;
+                } else if (mat->alpha_mode == cgltf_alpha_mode_blend) {
+                    m.blendMode = 2;
+                } else {
+                    m.blendMode = 0;
                 }
             }
 
@@ -239,12 +271,14 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
             cgltf_accessor* posAccessor = nullptr;
             cgltf_accessor* normAccessor = nullptr;
             cgltf_accessor* uvAccessor = nullptr;
+            cgltf_accessor* tanAccessor = nullptr;
 
             for (cgltf_size k = 0; k < primitive->attributes_count; ++k) {
                 cgltf_attribute* attr = &primitive->attributes[k];
                 if (attr->type == cgltf_attribute_type_position) posAccessor = attr->data;
                 if (attr->type == cgltf_attribute_type_normal) normAccessor = attr->data;
                 if (attr->type == cgltf_attribute_type_texcoord) uvAccessor = attr->data;
+                if (attr->type == cgltf_attribute_type_tangent) tanAccessor = attr->data;
             }
 
             if (!posAccessor) continue;
@@ -253,6 +287,7 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
                 MeshVertex vertex;
                 vertex.normal = {0.0f, 0.0f, 0.0f};
                 vertex.uv = {0.0f, 0.0f};
+                vertex.tangent = {1.0f, 0.0f, 0.0f, 1.0f};
                 cgltf_accessor_read_float(posAccessor, k, &vertex.pos.x, 3);
                 if (normAccessor) {
                     cgltf_accessor_read_float(normAccessor, k, &vertex.normal.x, 3);
@@ -260,6 +295,9 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
                 }
                 if (uvAccessor) {
                     cgltf_accessor_read_float(uvAccessor, k, &vertex.uv.x, 2);
+                }
+                if (tanAccessor) {
+                    cgltf_accessor_read_float(tanAccessor, k, &vertex.tangent.x, 4);
                 }
                 mesh.vertices.push_back(vertex);
             }
@@ -287,6 +325,19 @@ ImportedModel MeshImporter::LoadGLTF(const std::string& filePath) {
                 v2.normal = normal;
             }
         }
+
+        bool hasImportedTangents = false;
+        for (const auto& v : mesh.vertices) {
+            if (v.tangent != glm::vec4(1.0f, 0.0f, 0.0f, 1.0f)) {
+                hasImportedTangents = true;
+                break;
+            }
+        }
+        if (!hasImportedTangents) {
+            GeometryBuilder::CalculateTangents(mesh.vertices, mesh.indices);
+        }
+
+        LogShaderResourceValidation(mesh.material, true, true, true);
 
         mesh.valid = true;
         model.meshes.push_back(mesh);
@@ -400,6 +451,20 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
                     v.uv = { 0.0f, 0.0f };
                 }
 
+                if (mesh->vertex_tangent.exists) {
+                    ufbx_vec3 t = ufbx_get_vertex_vec3(&mesh->vertex_tangent, idx);
+                    ufbx_vec3 n = ufbx_get_vertex_vec3(&mesh->vertex_normal, idx);
+                    float h = 1.0f;
+                    if (mesh->vertex_bitangent.exists) {
+                        ufbx_vec3 b = ufbx_get_vertex_vec3(&mesh->vertex_bitangent, idx);
+                        glm::vec3 gn((float)n.x, (float)n.y, (float)n.z);
+                        glm::vec3 gt((float)t.x, (float)t.y, (float)t.z);
+                        glm::vec3 gb((float)b.x, (float)b.y, (float)b.z);
+                        h = (glm::dot(glm::cross(gn, gt), gb) < 0.0f) ? -1.0f : 1.0f;
+                    }
+                    v.tangent = { (float)t.x, (float)t.y, (float)t.z, h };
+                }
+
                 im.vertices.push_back(v);
                 im.indices.push_back((uint32_t)im.vertices.size() - 1);
             }
@@ -417,6 +482,10 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
             }
         }
 
+        if (!mesh->vertex_tangent.exists) {
+            GeometryBuilder::CalculateTangents(im.vertices, im.indices);
+        }
+
         if (mesh->materials.count > 0 && mesh->materials.data[0]) {
             ufbx_material* mat = mesh->materials.data[0];
             ImportedMaterial& m = im.material;
@@ -429,6 +498,22 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
             m.metallicTexture  = ResolveFbxTexturePath(mat->pbr.metalness.texture, fbxDir, cacheDir, m.name, "Metallic");
             m.aoTexture        = ResolveFbxTexturePath(mat->pbr.ambient_occlusion.texture, fbxDir, cacheDir, m.name, "AO");
             m.emissionTexture  = ResolveFbxTexturePath(mat->pbr.emission_color.texture, fbxDir, cacheDir, m.name, "Emissive");
+            m.normalMapYFlip   = true; // Blender FBX exports normal maps in OpenGL standard convention
+
+            if (mat->pbr.base_color.has_value) {
+                ufbx_vec3 bc = mat->pbr.base_color.value_vec3;
+                if (std::isfinite((float)bc.x) && std::isfinite((float)bc.y) && std::isfinite((float)bc.z))
+                    m.baseColor = glm::vec3((float)bc.x, (float)bc.y, (float)bc.z);
+            }
+            if (mat->pbr.opacity.texture) {
+                m.opacityTexture = ResolveFbxTexturePath(mat->pbr.opacity.texture, fbxDir, cacheDir, m.name, "Opacity");
+            }
+            if (mat->pbr.opacity.has_value && std::isfinite((float)mat->pbr.opacity.value_real)) {
+                m.opacity = (float)mat->pbr.opacity.value_real;
+            }
+            if (!m.opacityTexture.empty() || m.opacity < 0.999f) {
+                m.blendMode = 1;
+            }
 
             // Constant fallbacks when a slot has a value but no texture (e.g. a flat metalness/roughness number)
             if (mat->pbr.metalness.has_value && m.metallicTexture.empty())
@@ -443,6 +528,8 @@ ImportedModel MeshImporter::LoadFBX(const std::string& filePath) {
             if (mat->pbr.emission_factor.has_value && std::isfinite((float)mat->pbr.emission_factor.value_real))
                 m.emissiveIntensity = (float)mat->pbr.emission_factor.value_real;
         }
+
+        LogShaderResourceValidation(im.material, true, mesh->vertex_normal.exists, mesh->vertex_uv.exists);
 
         im.valid = !im.vertices.empty();
         if (im.valid) {

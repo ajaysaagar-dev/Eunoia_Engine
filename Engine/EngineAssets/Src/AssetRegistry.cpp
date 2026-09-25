@@ -4,9 +4,31 @@
 #include <sstream>
 #include <iostream>
 #include <set>
+#include <algorithm>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 bool AssetRegistry::RegisterAsset(const AssetMetadata& metadata) {
     if (!metadata.id.IsValid()) return false;
+
+    // Never register sidecar metadata files
+    std::string sPath = metadata.sourcePath;
+    std::transform(sPath.begin(), sPath.end(), sPath.begin(), ::tolower);
+    std::string vPath = metadata.virtualPath;
+    std::transform(vPath.begin(), vPath.end(), vPath.begin(), ::tolower);
+    std::string oName = metadata.objectName;
+    std::transform(oName.begin(), oName.end(), oName.begin(), ::tolower);
+    if (sPath.find(".assetmeta") != std::string::npos || sPath.find(".meta") != std::string::npos ||
+        vPath.find(".assetmeta") != std::string::npos || vPath.find(".meta") != std::string::npos ||
+        oName.find(".assetmeta") != std::string::npos || oName.find(".meta") != std::string::npos) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(m_registryMutex);
 
     std::string normPath = AssetPath::Normalize(metadata.virtualPath);
@@ -445,6 +467,9 @@ void AssetRegistry::WriteSidecar(const std::filesystem::path& diskFilePath, cons
         mf << "type: " << AssetTypeToString(meta.type) << "\n";
         mf << "virtualPath: " << meta.virtualPath << "\n";
     }
+#ifdef _WIN32
+    SetFileAttributesW(metaPath.wstring().c_str(), FILE_ATTRIBUTE_HIDDEN);
+#endif
 }
 
 void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot, AssetRegistryProgressFn onProgress) {
@@ -461,8 +486,11 @@ void AssetRegistry::ScanAndSync(const std::filesystem::path& projectRoot, AssetR
          it.increment(ec)) {
         if (!it->is_directory(ec)) {
             std::string filename = it->path().filename().string();
-            if (filename.find(".assetmeta") != std::string::npos ||
-                filename.find("AssetRegistry.json") != std::string::npos) {
+            std::string fLower = filename;
+            std::transform(fLower.begin(), fLower.end(), fLower.begin(), ::tolower);
+            if (fLower.find(".assetmeta") != std::string::npos ||
+                fLower.find(".meta") != std::string::npos ||
+                fLower.find("assetregistry.json") != std::string::npos) {
                 continue;
             }
 

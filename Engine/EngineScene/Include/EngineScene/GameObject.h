@@ -5,6 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <EngineAssets/Geometry.h>
+#include <EngineScene/TransformTypes.h>
 #include <EngineScene/EunoiaBehaviour.h>
 
 enum class LightType {
@@ -207,6 +208,205 @@ enum class Mobility {
     Movable
 };
 
+struct GameObject;
+
+// ============================================================================
+// GameObjectTransform
+// Supports dev.md requirements:
+//   <GameObject>.Transform.WorldLocation(new Vector3(0, 0, 0));
+//   <GameObject>.Transform.WorldRotation(new Vector3(0, 0, 0));
+//   <GameObject>.Transform.WorldScale(new Vector3(0, 0, 0));
+//   <GameObject>.Transform.RelativeLocation(new Vector3(0, 0, 0));
+//   <GameObject>.Transform.RelativeRotation(new Vector3(0, 0, 0));
+//   <GameObject>.Transform.RelativeScale(new Vector3(0, 0, 0));
+// ============================================================================
+struct GameObjectTransform {
+    struct AxisProxy {
+        enum class TargetType {
+            WorldLocation,
+            RelativeLocation,
+            WorldRotation,
+            RelativeRotation,
+            WorldScale,
+            RelativeScale
+        };
+
+        GameObjectTransform* parent = nullptr;
+        TargetType target = TargetType::WorldLocation;
+
+        AxisProxy() = default;
+        AxisProxy(GameObjectTransform* p, TargetType t) : parent(p), target(t) {}
+
+        void operator()(float inX, float inY, float inZ);
+        void operator()(const glm::vec3& v);
+        void operator()(const glm::vec3* v);
+        void operator()(const TransformVector3& v);
+        void operator()(const TransformVector3* v);
+
+        TransformVector3 operator()() const;
+
+        operator glm::vec3() const { return GetValue(); }
+        operator TransformVector3() const { return TransformVector3(GetValue()); }
+
+        void X(float val);
+        void Y(float val);
+        void Z(float val);
+
+        float GetX() const;
+        float GetY() const;
+        float GetZ() const;
+
+        float x() const { return GetX(); }
+        float y() const { return GetY(); }
+        float z() const { return GetZ(); }
+
+        float X() const { return GetX(); }
+        float Y() const { return GetY(); }
+        float Z() const { return GetZ(); }
+
+        void SetX(float val) { X(val); }
+        void SetY(float val) { Y(val); }
+        void SetZ(float val) { Z(val); }
+
+        glm::vec3 GetValue() const;
+        void SetValue(const glm::vec3& v);
+    };
+
+    GameObject* gameObject = nullptr;
+
+    AxisProxy WorldLocation{this, AxisProxy::TargetType::WorldLocation};
+    AxisProxy RelativeLocation{this, AxisProxy::TargetType::RelativeLocation};
+    AxisProxy WorldRotation{this, AxisProxy::TargetType::WorldRotation};
+    AxisProxy RelativeRotation{this, AxisProxy::TargetType::RelativeRotation};
+    AxisProxy WorldScale{this, AxisProxy::TargetType::WorldScale};
+    AxisProxy RelativeScale{this, AxisProxy::TargetType::RelativeScale};
+
+    AxisProxy WorldPosition{this, AxisProxy::TargetType::WorldLocation};
+    AxisProxy RelativePosition{this, AxisProxy::TargetType::RelativeLocation};
+
+    GameObjectTransform() : GameObjectTransform(nullptr) {}
+    GameObjectTransform(GameObject* go) : gameObject(go) {
+        InitProxies();
+    }
+    GameObjectTransform(const GameObjectTransform& other) : gameObject(other.gameObject) {
+        InitProxies();
+    }
+    GameObjectTransform& operator=(const GameObjectTransform& other) {
+        if (this != &other) {
+            gameObject = other.gameObject;
+            InitProxies();
+        }
+        return *this;
+    }
+
+    void InitProxies() {
+        WorldLocation = AxisProxy(this, AxisProxy::TargetType::WorldLocation);
+        RelativeLocation = AxisProxy(this, AxisProxy::TargetType::RelativeLocation);
+        WorldRotation = AxisProxy(this, AxisProxy::TargetType::WorldRotation);
+        RelativeRotation = AxisProxy(this, AxisProxy::TargetType::RelativeRotation);
+        WorldScale = AxisProxy(this, AxisProxy::TargetType::WorldScale);
+        RelativeScale = AxisProxy(this, AxisProxy::TargetType::RelativeScale);
+        WorldPosition = AxisProxy(this, AxisProxy::TargetType::WorldLocation);
+        RelativePosition = AxisProxy(this, AxisProxy::TargetType::RelativeLocation);
+    }
+
+    // Direct Getters (Docs/Behaviours/Transform.md: # GET)
+    TransformVector3 GetWorldLocation() const { return WorldLocation(); }
+    TransformVector3 GetRelativeLocation() const { return RelativeLocation(); }
+    TransformVector3 GetWorldRotation() const { return WorldRotation(); }
+    TransformVector3 GetRelativeRotation() const { return RelativeRotation(); }
+    TransformVector3 GetWorldScale() const { return WorldScale(); }
+    TransformVector3 GetRelativeScale() const { return RelativeScale(); }
+
+    TransformVector3 GetWorldPosition() const { return WorldLocation(); }
+    TransformVector3 GetRelativePosition() const { return RelativeLocation(); }
+
+    // Transform State (Docs/Behaviours/Transform.md: # TRANSFORM)
+    TransformState GetWorldTransform() const;
+    TransformState GetRelativeTransform() const;
+
+    // Directions (Docs/Behaviours/Transform.md: # DIRECTION & # DIRECTION AXIS)
+    TransformVector3 GetForwardVector() const;
+    TransformVector3 GetRightVector() const;
+    TransformVector3 GetUpVector() const;
+
+    glm::vec3 GetWorldLocationInternal() const;
+    void SetWorldLocationInternal(const glm::vec3& v);
+    glm::vec3 GetRelativeLocationInternal() const;
+    void SetRelativeLocationInternal(const glm::vec3& v);
+    glm::vec3 GetWorldRotationInternal() const;
+    void SetWorldRotationInternal(const glm::vec3& v);
+    glm::vec3 GetRelativeRotationInternal() const;
+    void SetRelativeRotationInternal(const glm::vec3& v);
+    glm::vec3 GetWorldScaleInternal() const;
+    void SetWorldScaleInternal(const glm::vec3& v);
+    glm::vec3 GetRelativeScaleInternal() const;
+    void SetRelativeScaleInternal(const glm::vec3& v);
+
+    // World Translate (dev.md: <GameObject>.Transform.WorldTranslate(0, 0, 0);)
+    // 1. By delta (x, y, z) / (delta) / (new Vector3(...))
+    void WorldTranslate(const glm::vec3& delta);
+    void WorldTranslate(float x, float y, float z) { WorldTranslate(glm::vec3(x, y, z)); }
+    void WorldTranslate(const glm::vec3* delta) { if (delta) { WorldTranslate(*delta); delete delta; } }
+
+    // 2. From exact point to another location in world space:
+    // Moves object such that point 'fromPoint' moves to 'toLocation' (delta = toLocation - fromPoint)
+    void WorldTranslate(const glm::vec3& fromPoint, const glm::vec3& toLocation);
+    void WorldTranslate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) {
+        WorldTranslate(glm::vec3(fromX, fromY, fromZ), glm::vec3(toX, toY, toZ));
+    }
+    void WorldTranslate(const glm::vec3* fromPoint, const glm::vec3* toLocation) {
+        if (fromPoint && toLocation) { WorldTranslate(*fromPoint, *toLocation); }
+        if (fromPoint) delete fromPoint;
+        if (toLocation) delete toLocation;
+    }
+    void WorldTranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { WorldTranslate(fromPoint, toLocation); }
+    void WorldTranslateFromTo(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) {
+        WorldTranslate(fromX, fromY, fromZ, toX, toY, toZ);
+    }
+    void WorldTranslateFromTo(const glm::vec3* fromPoint, const glm::vec3* toLocation) { WorldTranslate(fromPoint, toLocation); }
+    void WorldTranslateTo(const glm::vec3& targetLocation) { WorldLocation(targetLocation); }
+    void WorldTranslateTo(float x, float y, float z) { WorldLocation(x, y, z); }
+    void WorldTranslateTo(const glm::vec3* targetLocation) { WorldLocation(targetLocation); }
+
+    // Relative Translate (dev.md: <GameObject>.Transform.RelativeTranslate(0, 0, 0);)
+    // 1. By delta (x, y, z) / (delta) / (new Vector3(...))
+    void RelativeTranslate(const glm::vec3& delta);
+    void RelativeTranslate(float x, float y, float z) { RelativeTranslate(glm::vec3(x, y, z)); }
+    void RelativeTranslate(const glm::vec3* delta) { if (delta) { RelativeTranslate(*delta); delete delta; } }
+
+    // 2. From exact point to another location in relative space
+    void RelativeTranslate(const glm::vec3& fromPoint, const glm::vec3& toLocation);
+    void RelativeTranslate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) {
+        RelativeTranslate(glm::vec3(fromX, fromY, fromZ), glm::vec3(toX, toY, toZ));
+    }
+    void RelativeTranslate(const glm::vec3* fromPoint, const glm::vec3* toLocation) {
+        if (fromPoint && toLocation) { RelativeTranslate(*fromPoint, *toLocation); }
+        if (fromPoint) delete fromPoint;
+        if (toLocation) delete toLocation;
+    }
+    void RelativeTranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { RelativeTranslate(fromPoint, toLocation); }
+    void RelativeTranslateFromTo(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) {
+        RelativeTranslate(fromX, fromY, fromZ, toX, toY, toZ);
+    }
+    void RelativeTranslateFromTo(const glm::vec3* fromPoint, const glm::vec3* toLocation) { RelativeTranslate(fromPoint, toLocation); }
+    void RelativeTranslateTo(const glm::vec3& targetLocation) { RelativeLocation(targetLocation); }
+    void RelativeTranslateTo(float x, float y, float z) { RelativeLocation(x, y, z); }
+    void RelativeTranslateTo(const glm::vec3* targetLocation) { RelativeLocation(targetLocation); }
+
+    // General Translate
+    void Translate(const glm::vec3& delta) { RelativeTranslate(delta); }
+    void Translate(float x, float y, float z) { RelativeTranslate(x, y, z); }
+    void Translate(const glm::vec3* delta) { RelativeTranslate(delta); }
+    void Translate(const glm::vec3& fromPoint, const glm::vec3& toLocation) { RelativeTranslate(fromPoint, toLocation); }
+    void Translate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) {
+        RelativeTranslate(fromX, fromY, fromZ, toX, toY, toZ);
+    }
+    void Translate(const glm::vec3* fromPoint, const glm::vec3* toLocation) { RelativeTranslate(fromPoint, toLocation); }
+    void TranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { RelativeTranslate(fromPoint, toLocation); }
+    void TranslateTo(const glm::vec3& targetLocation) { RelativeTranslateTo(targetLocation); }
+};
+
 struct GameObject {
     int id = 0;
     std::string name = "Object";
@@ -244,6 +444,11 @@ struct GameObject {
     bool receiveShadows = true;
     bool meshClusterCulling = false; // dev.md: Mesh Cluster Culling (OFF by default)
     glm::vec2 uvScale{1.0f, 1.0f};
+    bool normalMapYFlip = false;     // Invert normal green/Y channel (OpenGL/Blender convention)
+    int metallicChannel = 0;         // 0=R, 1=G, 2=B, 3=A
+    int roughnessChannel = 1;        // 0=R, 1=G, 2=B, 3=A
+    int aoChannel = 0;               // 0=R, 1=G, 2=B, 3=A
+    int materialDebugMode = 0;       // 0=Final PBR, 1..10 diagnostic modes
 
     bool visible = true;
     bool autoRotate = false;
@@ -256,6 +461,11 @@ struct GameObject {
     // Hierarchy (parent-child)
     int parentId = -1;               // -1 = root
     std::vector<int> childIds;       // ordered child IDs
+
+    // Scene & Transform accessors (dev.md)
+    Scene* scene = nullptr;
+    GameObjectTransform Transform{this};
+    GameObjectTransform& transform = Transform;
 
     // Light actor proxy: when isLight==true this object represents a PointLight
     // Light actor proxy: when isLight==true this object represents a Light
@@ -272,9 +482,9 @@ struct GameObject {
     // Attached Behaviours (dev.md Section 1, 2)
     std::vector<std::shared_ptr<EunoiaBehaviour>> behaviours;
 
-    GameObject() = default;
+    GameObject() : Transform(this) {}
 
-    GameObject(const GameObject& other) {
+    GameObject(const GameObject& other) : Transform(this) {
         CopyFrom(other);
     }
 
@@ -285,8 +495,16 @@ struct GameObject {
         return *this;
     }
 
-    GameObject(GameObject&&) noexcept = default;
-    GameObject& operator=(GameObject&&) noexcept = default;
+    GameObject(GameObject&& other) noexcept : Transform(this) {
+        CopyFrom(other);
+    }
+
+    GameObject& operator=(GameObject&& other) noexcept {
+        if (this != &other) {
+            CopyFrom(other);
+        }
+        return *this;
+    }
 
     void CopyFrom(const GameObject& other) {
         id = other.id;
@@ -320,6 +538,11 @@ struct GameObject {
         receiveShadows = other.receiveShadows;
         meshClusterCulling = other.meshClusterCulling;
         uvScale = other.uvScale;
+        normalMapYFlip = other.normalMapYFlip;
+        metallicChannel = other.metallicChannel;
+        roughnessChannel = other.roughnessChannel;
+        aoChannel = other.aoChannel;
+        materialDebugMode = other.materialDebugMode;
         visible = other.visible;
         autoRotate = other.autoRotate;
         autoRotateSpeed = other.autoRotateSpeed;
@@ -335,7 +558,8 @@ struct GameObject {
         camera = other.camera;
         params = other.params;
         mesh = other.mesh;
-
+        scene = other.scene;
+        Transform.gameObject = this;
         behaviours.clear();
         for (const auto& b : other.behaviours) {
             if (b) {
@@ -380,7 +604,7 @@ struct GameObject {
     }
 
     GameObject(int objId, const std::string& objName, PrimitiveType objType, glm::vec3 pos, glm::vec3 col = {0.55f, 0.55f, 0.55f})
-        : id(objId), name(objName), type(objType), position(pos), color(col) {
+        : id(objId), name(objName), type(objType), position(pos), color(col), Transform(this) {
         if (type == PrimitiveType::Camera) {
             isCamera = true;
         }
@@ -489,6 +713,57 @@ struct GameObject {
     glm::mat4 GetModelMatrix() const {
         return GetLocalMatrix();
     }
+
+    // Direct Transform Translation helpers (dev.md)
+    void WorldTranslate(float x, float y, float z) { Transform.WorldTranslate(x, y, z); }
+    void WorldTranslate(const glm::vec3& delta) { Transform.WorldTranslate(delta); }
+    void WorldTranslate(const glm::vec3* delta) { Transform.WorldTranslate(delta); }
+    void WorldTranslate(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.WorldTranslate(fromPoint, toLocation); }
+    void WorldTranslate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) { Transform.WorldTranslate(fromX, fromY, fromZ, toX, toY, toZ); }
+    void WorldTranslate(const glm::vec3* fromPoint, const glm::vec3* toLocation) { Transform.WorldTranslate(fromPoint, toLocation); }
+    void WorldTranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.WorldTranslateFromTo(fromPoint, toLocation); }
+    void WorldTranslateFromTo(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) { Transform.WorldTranslateFromTo(fromX, fromY, fromZ, toX, toY, toZ); }
+    void WorldTranslateFromTo(const glm::vec3* fromPoint, const glm::vec3* toLocation) { Transform.WorldTranslateFromTo(fromPoint, toLocation); }
+    void WorldTranslateTo(const glm::vec3& targetLocation) { Transform.WorldTranslateTo(targetLocation); }
+    void WorldTranslateTo(float x, float y, float z) { Transform.WorldTranslateTo(x, y, z); }
+    void WorldTranslateTo(const glm::vec3* targetLocation) { Transform.WorldTranslateTo(targetLocation); }
+
+    void RelativeTranslate(float x, float y, float z) { Transform.RelativeTranslate(x, y, z); }
+    void RelativeTranslate(const glm::vec3& delta) { Transform.RelativeTranslate(delta); }
+    void RelativeTranslate(const glm::vec3* delta) { Transform.RelativeTranslate(delta); }
+    void RelativeTranslate(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.RelativeTranslate(fromPoint, toLocation); }
+    void RelativeTranslate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) { Transform.RelativeTranslate(fromX, fromY, fromZ, toX, toY, toZ); }
+    void RelativeTranslate(const glm::vec3* fromPoint, const glm::vec3* toLocation) { Transform.RelativeTranslate(fromPoint, toLocation); }
+    void RelativeTranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.RelativeTranslateFromTo(fromPoint, toLocation); }
+    void RelativeTranslateFromTo(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) { Transform.RelativeTranslateFromTo(fromX, fromY, fromZ, toX, toY, toZ); }
+    void RelativeTranslateFromTo(const glm::vec3* fromPoint, const glm::vec3* toLocation) { Transform.RelativeTranslateFromTo(fromPoint, toLocation); }
+    void RelativeTranslateTo(const glm::vec3& targetLocation) { Transform.RelativeTranslateTo(targetLocation); }
+    void RelativeTranslateTo(float x, float y, float z) { Transform.RelativeTranslateTo(x, y, z); }
+    void RelativeTranslateTo(const glm::vec3* targetLocation) { Transform.RelativeTranslateTo(targetLocation); }
+
+    void Translate(float x, float y, float z) { Transform.Translate(x, y, z); }
+    void Translate(const glm::vec3& delta) { Transform.Translate(delta); }
+    void Translate(const glm::vec3* delta) { Transform.Translate(delta); }
+    void Translate(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.Translate(fromPoint, toLocation); }
+    void Translate(float fromX, float fromY, float fromZ, float toX, float toY, float toZ) { Transform.Translate(fromX, fromY, fromZ, toX, toY, toZ); }
+    void Translate(const glm::vec3* fromPoint, const glm::vec3* toLocation) { Transform.Translate(fromPoint, toLocation); }
+    void TranslateFromTo(const glm::vec3& fromPoint, const glm::vec3& toLocation) { Transform.TranslateFromTo(fromPoint, toLocation); }
+    void TranslateTo(const glm::vec3& targetLocation) { Transform.TranslateTo(targetLocation); }
+
+    // Direct Transform Getters (Docs/Behaviours/Transform.md: # GET, # TRANSFORM, # DIRECTION)
+    TransformVector3 GetWorldLocation() const { return Transform.GetWorldLocation(); }
+    TransformVector3 GetRelativeLocation() const { return Transform.GetRelativeLocation(); }
+    TransformVector3 GetWorldRotation() const { return Transform.GetWorldRotation(); }
+    TransformVector3 GetRelativeRotation() const { return Transform.GetRelativeRotation(); }
+    TransformVector3 GetWorldScale() const { return Transform.GetWorldScale(); }
+    TransformVector3 GetRelativeScale() const { return Transform.GetRelativeScale(); }
+
+    TransformState GetWorldTransform() const { return Transform.GetWorldTransform(); }
+    TransformState GetRelativeTransform() const { return Transform.GetRelativeTransform(); }
+
+    TransformVector3 GetForwardVector() const { return Transform.GetForwardVector(); }
+    TransformVector3 GetRightVector() const { return Transform.GetRightVector(); }
+    TransformVector3 GetUpVector() const { return Transform.GetUpVector(); }
 
     void Update(float dt) {
         if (mobility == Mobility::Movable && autoRotate) {

@@ -130,31 +130,202 @@ static void SyncRegistryWithUIProgress(const std::filesystem::path& path) {
     EngineUI::FinishLoadingTask("Asset Registry synchronized (" + std::to_string(AssetRegistry::Get().GetAssetCount()) + " assets)");
 }
 
-static void LaunchVSCodeWorkspace(const std::string& filePath) {
-    try {
-        std::filesystem::path currentDir = std::filesystem::current_path();
-        std::filesystem::path vscodeDir = currentDir / ".vscode";
-        std::filesystem::path propPath = vscodeDir / "c_cpp_properties.json";
-        if (!std::filesystem::exists(propPath)) {
-            std::error_code ec;
-            std::filesystem::create_directories(vscodeDir, ec);
-            std::ofstream pf(propPath);
-            if (pf.is_open()) {
-                pf << "{\n  \"configurations\": [\n    {\n      \"name\": \"Eunoia-Engine\",\n"
-                   << "      \"includePath\": [\"${workspaceFolder}/**\", \"${workspaceFolder}/include\", \"${workspaceFolder}/Content/**\"],\n"
-                   << "      \"defines\": [\"_DEBUG\", \"UNICODE\", \"_UNICODE\", \"WIN32_LEAN_AND_MEAN\"],\n"
-                   << "      \"cStandard\": \"c11\",\n      \"cppStandard\": \"c++17\",\n"
-                   << "      \"intelliSenseMode\": \"windows-gcc-x64\"\n    }\n  ],\n  \"version\": 4\n}\n";
+static std::filesystem::path FindEngineSourceRoot() {
+    std::error_code ec;
+    std::vector<std::filesystem::path> candidates = {
+        std::filesystem::current_path(),
+        std::filesystem::current_path().parent_path(),
+        std::filesystem::current_path().parent_path().parent_path(),
+        "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine"
+    };
+    for (const auto& c : candidates) {
+        if (std::filesystem::exists(c / "Engine" / "EngineScene" / "Include", ec) &&
+            std::filesystem::exists(c / "deps" / "glm", ec)) {
+            return std::filesystem::canonical(c, ec);
+        }
+    }
+    return "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine";
+}
+
+static std::filesystem::path FindCompilerPath(const std::filesystem::path& engineRoot) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> candidates = {
+        engineRoot / "tools" / "w64devkit" / "bin" / "g++.exe",
+        "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine\\tools\\w64devkit\\bin\\g++.exe"
+    };
+    for (const auto& c : candidates) {
+        if (std::filesystem::exists(c, ec)) {
+            return c;
+        }
+    }
+    return "g++";
+}
+
+static void CopyHeadersRecursive(const std::filesystem::path& src, const std::filesystem::path& dst) {
+    std::error_code ec;
+    if (!std::filesystem::exists(src, ec)) return;
+    for (auto it = std::filesystem::recursive_directory_iterator(src, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) {
+            std::string ext = it->path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext == ".h" || ext == ".hpp" || ext == ".inl" || ext == ".c") {
+                std::filesystem::path rel = std::filesystem::relative(it->path(), src, ec);
+                std::filesystem::path target = dst / rel;
+                std::filesystem::create_directories(target.parent_path(), ec);
+                std::filesystem::copy_file(it->path(), target, std::filesystem::copy_options::overwrite_existing, ec);
             }
         }
-    } catch (...) {}
+    }
+}
 
-    std::filesystem::path cur = std::filesystem::current_path();
-    std::string projectDir = cur.string();
+void EngineUI::SetupProjectDependencies(const std::filesystem::path& projectRoot) {
+    std::error_code ec;
+    if (projectRoot.empty() || !std::filesystem::exists(projectRoot, ec)) return;
+
+    std::filesystem::path engineRoot = FindEngineSourceRoot();
+    std::filesystem::path compilerPath = FindCompilerPath(engineRoot);
+
+    std::filesystem::path depDir = projectRoot / "Dependencies";
+    std::filesystem::path depEngineDir = depDir / "Engine";
+    std::filesystem::path depDepsDir = depDir / "deps";
+
+    // 1. Copy Engine Include headers
+    std::vector<std::string> engineModules = {
+        "EngineCore", "EnginePlatform", "EngineRHI", "EngineRenderer",
+        "EngineScene", "EngineAssets", "EunoiaPluginCore"
+    };
+    for (const auto& mod : engineModules) {
+        std::filesystem::path srcInc = engineRoot / "Engine" / mod / "Include";
+        std::filesystem::path dstInc = depEngineDir / mod / "Include";
+        if (std::filesystem::exists(srcInc, ec) && !std::filesystem::exists(dstInc, ec)) {
+            CopyHeadersRecursive(srcInc, dstInc);
+        }
+    }
+
+    // 2. Copy third-party headers (GLFW, GLM, JSON, ImGui)
+    std::filesystem::path glfwSrc = engineRoot / "deps" / "glfw-3.5.1.bin.WIN64" / "include";
+    std::filesystem::path glfwDst = depDepsDir / "glfw-3.5.1.bin.WIN64" / "include";
+    if (std::filesystem::exists(glfwSrc, ec) && !std::filesystem::exists(glfwDst, ec)) {
+        CopyHeadersRecursive(glfwSrc, glfwDst);
+    }
+
+    std::filesystem::path glmSrc = engineRoot / "deps" / "glm";
+    std::filesystem::path glmDst = depDepsDir / "glm";
+    if (std::filesystem::exists(glmSrc, ec) && !std::filesystem::exists(glmDst, ec)) {
+        CopyHeadersRecursive(glmSrc, glmDst);
+    }
+
+    std::filesystem::path jsonSrc = engineRoot / "deps" / "json";
+    std::filesystem::path jsonDst = depDepsDir / "json";
+    if (std::filesystem::exists(jsonSrc, ec) && !std::filesystem::exists(jsonDst, ec)) {
+        CopyHeadersRecursive(jsonSrc, jsonDst);
+    }
+
+    std::filesystem::path imguiSrc = engineRoot / "deps" / "imgui";
+    std::filesystem::path imguiDst = depDepsDir / "imgui";
+    if (std::filesystem::exists(imguiSrc, ec) && !std::filesystem::exists(imguiDst, ec)) {
+        CopyHeadersRecursive(imguiSrc, imguiDst);
+    }
+
+    // 3. Write projectRoot/.vscode/c_cpp_properties.json
+    std::filesystem::path vscodeDir = projectRoot / ".vscode";
+    std::filesystem::create_directories(vscodeDir, ec);
+
+    std::string compStr = compilerPath.generic_string();
+    std::string engStr = engineRoot.generic_string();
+
+    std::filesystem::path propPath = vscodeDir / "c_cpp_properties.json";
+    std::ofstream pf(propPath);
+    if (pf.is_open()) {
+        pf << "{\n"
+           << "  \"configurations\": [\n"
+           << "    {\n"
+           << "      \"name\": \"Eunoia-Engine\",\n"
+           << "      \"includePath\": [\n"
+           << "        \"${workspaceFolder}/**\",\n"
+           << "        \"${workspaceFolder}/Content/**\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineCore/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EnginePlatform/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineRHI/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineRenderer/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineScene/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EngineAssets/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/Engine/EunoiaPluginCore/Include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/glfw-3.5.1.bin.WIN64/include\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/glm\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/json\",\n"
+           << "        \"${workspaceFolder}/Dependencies/deps/imgui\",\n"
+           << "        \"" << engStr << "/Engine/EngineCore/Include\",\n"
+           << "        \"" << engStr << "/Engine/EnginePlatform/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineRHI/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineRenderer/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineScene/Include\",\n"
+           << "        \"" << engStr << "/Engine/EngineAssets/Include\",\n"
+           << "        \"" << engStr << "/Engine/EunoiaPluginCore/Include\",\n"
+           << "        \"" << engStr << "/deps/glfw-3.5.1.bin.WIN64/include\",\n"
+           << "        \"" << engStr << "/deps/glm\",\n"
+           << "        \"" << engStr << "/deps/json\",\n"
+           << "        \"" << engStr << "/deps/imgui\"\n"
+           << "      ],\n"
+           << "      \"defines\": [\n"
+           << "        \"_DEBUG\",\n"
+           << "        \"UNICODE\",\n"
+           << "        \"_UNICODE\",\n"
+           << "        \"WIN32_LEAN_AND_MEAN\",\n"
+           << "        \"NOMINMAX\"\n"
+           << "      ],\n"
+           << "      \"compilerPath\": \"" << compStr << "\",\n"
+           << "      \"cStandard\": \"c11\",\n"
+           << "      \"cppStandard\": \"c++17\",\n"
+           << "      \"intelliSenseMode\": \"windows-gcc-x64\"\n"
+           << "    }\n"
+           << "  ],\n"
+           << "  \"version\": 4\n"
+           << "}\n";
+        pf.close();
+    }
+
+    // 4. Write projectRoot/.vscode/settings.json
+    std::filesystem::path settingsPath = vscodeDir / "settings.json";
+    std::ofstream sf(settingsPath);
+    if (sf.is_open()) {
+        sf << "{\n"
+           << "  \"files.exclude\": {\n"
+           << "    \"**/*.assetmeta\": true,\n"
+           << "    \"**/*.meta\": true\n"
+           << "  }\n"
+           << "}\n";
+        sf.close();
+    }
+}
+
+static void LaunchVSCodeWorkspace(const std::string& filePath) {
     std::filesystem::path absFilePath = std::filesystem::absolute(filePath);
+    std::filesystem::path targetWorkspace;
+    if (g_pEngineUI && !g_pEngineUI->activeProjectRoot.empty()) {
+        targetWorkspace = g_pEngineUI->activeProjectRoot;
+    } else {
+        std::filesystem::path p = absFilePath.parent_path();
+        while (p.has_parent_path() && p != p.parent_path()) {
+            if (std::filesystem::exists(p / "Content") || std::filesystem::exists(p / ".vscode")) {
+                targetWorkspace = p;
+                break;
+            }
+            p = p.parent_path();
+        }
+    }
+    if (targetWorkspace.empty()) {
+        targetWorkspace = std::filesystem::current_path();
+    }
 
-    // Launch: code "<projectDir>" "<absFilePath>"
-    std::string cmdParams = "/c code \"" + projectDir + "\" \"" + absFilePath.string() + "\"";
+    if (g_pEngineUI) {
+        g_pEngineUI->SetupProjectDependencies(targetWorkspace);
+    }
+
+    // Launch: code "<targetWorkspace>" "<absFilePath>"
+    std::string cmdParams = "/c code \"" + targetWorkspace.string() + "\" \"" + absFilePath.string() + "\"";
     HINSTANCE hInst = ShellExecuteA(NULL, "open", "cmd.exe", cmdParams.c_str(), NULL, SW_HIDE);
     if ((INT_PTR)hInst <= 32) {
         ShellExecuteA(NULL, "open", absFilePath.string().c_str(), NULL, NULL, SW_SHOWNORMAL);
@@ -1186,6 +1357,9 @@ bool EngineUI::CreateNewProject(const std::string& parentDir, const std::string&
         pf.close();
     }
 
+    // 5. Setup Project Dependencies & VS Code configuration
+    SetupProjectDependencies(root);
+
     AddLog("LogProject", "Created new empty project: " + projName + " at " + root.string(), 2);
     return LoadProject(root, scene, camera);
 }
@@ -1200,6 +1374,7 @@ bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, 
     activeProjectRoot = std::filesystem::absolute(projRoot);
     activeProjectName = activeProjectRoot.filename().string();
     LoadEditorConfig();
+    SetupProjectDependencies(activeProjectRoot);
 
     // The in-engine-editor content browser root is inside project's folder called Content!
     contentRootPath = activeProjectRoot / "Content";
@@ -1214,6 +1389,22 @@ bool EngineUI::LoadProject(const std::filesystem::path& projRoot, Scene& scene, 
     TextureManager::Get().SetProjectRoot(contentRootPath);
     AssetManager::Get().Initialize(contentRootPath);
     AssetRegistry::Get().ScanDirectory(contentRootPath);
+
+    // Scan and register all behaviour scripts in Content before loading the scene
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(contentRootPath, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (!entry.is_directory(ec) && entry.path().extension() == ".cpp") {
+            std::string pStr = entry.path().string();
+            std::string pLower = pStr;
+            std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+            if (pLower.find(".assetmeta") == std::string::npos && pLower.find(".meta") == std::string::npos) {
+                std::string stem = entry.path().stem().string();
+                if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" &&
+                    stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
+                    BehaviourRegistry::Get().RegisterScriptFile(stem, pStr);
+                }
+            }
+        }
+    }
 
     // Load project's initial scene
     std::filesystem::path mainScene = contentRootPath / "Scenes" / "Main.escene";
@@ -1604,6 +1795,30 @@ void EngineUI::SetupTheme() {
 }
 
 void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameTimeMs, uint32_t vertexCount, uint32_t indexCount, bool& outShouldExit) {
+    if (isGameOnlyWindow) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) || ImGui::IsKeyPressed(ImGuiKey_Delete)) {
+            outShouldExit = true;
+        }
+
+        // Render on-screen prints / HUD in game window
+        RenderScreenPrintOverlay(24.0f, 24.0f);
+
+        // Render subtle top-right exit hint
+        ImGuiViewport* vp = ImGui::GetMainViewport();
+        if (vp) {
+            ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x - 260.0f, vp->WorkPos.y + 16.0f));
+            ImGui::SetNextWindowBgAlpha(0.35f);
+            ImGuiWindowFlags hintFlags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                                         ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+            if (ImGui::Begin("##GameWindowHint", nullptr, hintFlags)) {
+                ImGui::TextColored(ImVec4(0.85f, 0.88f, 0.92f, 0.75f), "Game Mode | Press ESC to Exit");
+            }
+            ImGui::End();
+        }
+        return;
+    }
+
     currentCamera = &camera;
     if (!scene.onPreChange) {
         scene.onPreChange = [&scene](const std::string& action) {
@@ -1613,9 +1828,32 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
 
     ImGuizmo::BeginFrame();
 
+    // Flush asynchronous compilation logs
+    {
+        std::lock_guard<std::mutex> lock(asyncLogMutex);
+        if (!pendingAsyncLogs.empty()) {
+            for (const auto& logEntry : pendingAsyncLogs) {
+                AddLog(logEntry.category, logEntry.message, logEntry.level);
+            }
+            pendingAsyncLogs.clear();
+        }
+    }
+
+    // Periodic check for behaviour script modifications (User Request: ask as compile or later)
+    scriptWatchTimer += (frameTimeMs * 0.001f);
+    if (scriptWatchTimer >= 0.5f) {
+        scriptWatchTimer = 0.0f;
+        CheckForScriptChanges();
+    }
+
     // Unreal Keyboard Shortcuts (when not typing and not currently in free fly mode)
     // During Play Mode, suppress editor shortcuts so gameplay input is uninterrupted (dev.md §54)
     if (!ImGui::GetIO().WantTextInput && !camera.isFlying && !scene.isPlayMode) {
+        // F7: Compile Behaviour Scripts
+        if (ImGui::IsKeyPressed(ImGuiKey_F7) && !isCompilingScripts) {
+            TriggerCompileScripts(&scene);
+        }
+
         // F: Focus selected actor
         if (ImGui::IsKeyPressed(ImGuiKey_F) && scene.selectedId != -1) {
             GameObject* obj = scene.GetSelected();
@@ -1712,10 +1950,10 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         }
     }
 
-    // Play Mode Presentation & Stop-on-Delete / Stop-on-Escape (dev.md Section 32, 34)
+    // Play Mode Presentation & Stop-on-Delete (User Request: ESC does not exit game mode)
     if (scene.isPlayMode) {
-        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
-            InputSystem::Get().IsKeyPressed(Key::Delete) || InputSystem::Get().IsKeyPressed(Key::Escape)) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) ||
+            InputSystem::Get().IsKeyPressed(Key::Delete)) {
             ExitPlayMode(scene);
             return;
         }
@@ -1727,9 +1965,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
         if (ImGui::Begin("##PlayModeBanner", nullptr, playFlags)) {
             ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ GAME VIEW (PLAY MODE)");
             ImGui::SameLine();
-            ImGui::TextDisabled("| Press [ESC] or [DELETE] to Stop");
+            ImGui::TextDisabled("| Press [DELETE] or click Stop to exit");
             ImGui::SameLine();
-            if (ImGui::Button("⏹ Stop (ESC)")) {
+            if (ImGui::Button("⏹ Stop")) {
                 ExitPlayMode(scene);
                 ImGui::End();
                 return;
@@ -1813,6 +2051,9 @@ void EngineUI::Render(Scene& scene, OrbitCamera& camera, float fps, float frameT
     if (showCodeEditor) {
         RenderCodeEditor();
     }
+
+    // 10. Behaviour Script Change & Compilation Prompt (User Request: ask as compile or later)
+    RenderScriptCompileModal(scene);
 
     // Undo History Window (52 steps capacity)
     if (showUndoHistory) {
@@ -2236,6 +2477,10 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
             }
 
             if (ImGui::BeginMenu("Build")) {
+                if (ImGui::MenuItem("⚡ Compile Behaviour Scripts", "F7", false, !isCompilingScripts)) {
+                    TriggerCompileScripts(&scene);
+                }
+                ImGui::Separator();
                 if (ImGui::MenuItem("🎮 Build Game Project (Stand-Alone)")) {
                     std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
                     std::filesystem::path gameBuildDir = projectBase / "Build";
@@ -2329,6 +2574,9 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
                 if (ImGui::MenuItem("📦 Cook Project Assets")) {
                     OpenCookModal();
                 }
+                if (ImGui::MenuItem("🖥️ Launch Game in Separate Window")) {
+                    LaunchGameSeparateWindow(scene);
+                }
                 if (ImGui::MenuItem("📂 Open Project Build Folder")) {
                     std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
                     std::filesystem::path gameBuildDir = projectBase / "Build";
@@ -2413,19 +2661,36 @@ void EngineUI::RenderMainMenuBar(Scene& scene, OrbitCamera& camera, bool& outSho
 
             ImGui::TextDisabled("|");
 
-            // PIE Controls (Play In Editor) (dev.md Section 30-36)
-            ImGui::PushStyleColor(ImGuiCol_Button, scene.isPlayMode ? ImVec4(0.18f, 0.75f, 0.32f, 1.0f) : ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
-            if (ImGui::Button("▶ Play")) {
-                EnterPlayMode(scene);
+            // External Window Game Mode Controls (User Request: Only external window supported)
+            bool isExternalGameRunning = IsExternalGameRunning();
+
+            ImGui::PushStyleColor(ImGuiCol_Button, isExternalGameRunning ? ImVec4(0.18f, 0.75f, 0.32f, 1.0f) : ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
+            if (ImGui::Button(isExternalGameRunning ? "▶ Playing in Window" : "▶ Play")) {
+                if (!isExternalGameRunning) {
+                    LaunchGameSeparateWindow(scene);
+                }
             }
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Enter Play Mode (Runs Behaviours & Simulation; Press DELETE to stop)");
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Launch Game Mode in a separate external window");
             ImGui::PopStyleColor();
 
-            if (scene.isPlayMode) {
+            if (isExternalGameRunning) {
                 ImGui::SameLine();
-                if (ImGui::Button("⏹ Stop (DELETE)")) {
-                    ExitPlayMode(scene);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+                if (ImGui::Button("⏹ Stop Game")) {
+                    StopExternalGame();
                 }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Close external game window");
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::SameLine();
+            if (isCompilingScripts) {
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "⏳ Compiling...");
+            } else {
+                if (ImGui::Button("⚡ Compile")) {
+                    TriggerCompileScripts(&scene);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compile Behaviour Scripts and update standalone game binary (F7)");
             }
 
             if (ImGui::Button("Reset View")) {
@@ -2726,34 +2991,53 @@ void EngineUI::RenderScreenPrintOverlay(float startX, float startY) {
 }
 
 void EngineUI::RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera) {
-    if (isGameView || scene.selectedId == -1) return;
+    if (isGameView || scene.isPlayMode || isGameOnlyWindow || scene.selectedId == -1) return;
 
     GameObject* selObj = scene.FindObject(scene.selectedId);
     if (!selObj || (!selObj->isCamera && selObj->type != PrimitiveType::Camera)) return;
 
     ImGuiViewport* vp = ImGui::GetMainViewport();
-    auto vpRect = GetViewportRect(vp->Size.x, vp->Size.y);
+    auto pipRect = GetCameraPipRect(vp->Size.x, vp->Size.y, scene);
+    if (!pipRect.active) return;
 
-    float pipW = 280.0f;
-    float pipH = 196.0f;
-    float pipX = vp->Pos.x + vpRect.x + vpRect.width - pipW - 14.0f;
-    float pipY = vp->Pos.y + vpRect.y + vpRect.height - pipH - 14.0f;
+    float canvasX = vp->Pos.x + pipRect.x;
+    float canvasY = vp->Pos.y + pipRect.y;
+    float canvasW = pipRect.width;
+    float canvasH = pipRect.height;
 
-    ImGui::SetNextWindowPos(ImVec2(pipX, pipY), ImGuiCond_Always);
-    ImGui::SetNextWindowSize(ImVec2(pipW, pipH), ImGuiCond_Always);
+    float winX = canvasX - 4.0f;
+    float winY = canvasY - 28.0f;
+    float winW = canvasW + 8.0f;
+    float winH = canvasH + 32.0f;
+
+    ImGui::SetNextWindowPos(ImVec2(winX, winY), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(winW, winH), ImGuiCond_Always);
 
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
                              ImGuiWindowFlags_NoSavedSettings;
 
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(6.0f, 6.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4.0f, 4.0f));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.08f, 0.09f, 0.11f, 0.95f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.55f, 0.90f, 0.85f));
+    // Transparent window background so the D3D12 hardware rendering of the camera view shines through
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 
     if (ImGui::Begin("##CameraPiPWindow", nullptr, flags)) {
-        // Header
-        ImGui::TextColored(ImVec4(0.25f, 0.85f, 1.0f, 1.0f), "📷 %s", selObj->name.c_str());
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+
+        // 1. Header background (dark blue/slate with rounded top corners)
+        dl->AddRectFilled(ImVec2(winX, winY), ImVec2(winX + winW, winY + 28.0f), IM_COL32(16, 20, 28, 240), 6.0f, ImDrawFlags_RoundCornersTop);
+
+        // 2. Full window perimeter border
+        dl->AddRect(ImVec2(winX, winY), ImVec2(winX + winW, winY + winH), IM_COL32(40, 130, 230, 220), 6.0f, 0, 1.5f);
+
+        // 3. Viewport canvas inner border (accent framing D3D12 hardware preview)
+        dl->AddRect(ImVec2(canvasX, canvasY), ImVec2(canvasX + canvasW, canvasY + canvasH), IM_COL32(65, 75, 95, 255), 0.0f, 0, 1.0f);
+
+        // Header controls
+        ImGui::SetCursorPos(ImVec2(8.0f, 4.0f));
+        ImGui::TextColored(ImVec4(0.30f, 0.85f, 1.0f, 1.0f), "📷 %s", selObj->name.c_str());
         ImGui::SameLine();
         bool isLevelCam = (scene.activeLevelCameraId == selObj->id);
         if (isLevelCam) {
@@ -2774,137 +3058,33 @@ void EngineUI::RenderCameraPreviewOverlay(Scene& scene, OrbitCamera& camera) {
             AddLog("LogCamera", "Aligned Viewport to " + selObj->name, 0);
         }
 
-        // Viewport canvas
-        ImVec2 canvasP0 = ImGui::GetCursorScreenPos();
-        ImVec2 canvasSize = ImGui::GetContentRegionAvail();
-        float cW = canvasSize.x;
-        float cH = canvasSize.y;
+        // Crosshair on camera view
+        float midX = canvasX + canvasW * 0.5f;
+        float midY = canvasY + canvasH * 0.5f;
+        dl->AddLine(ImVec2(midX - 7.0f, midY), ImVec2(midX + 7.0f, midY), IM_COL32(255, 255, 255, 100));
+        dl->AddLine(ImVec2(midX, midY - 7.0f), ImVec2(midX, midY + 7.0f), IM_COL32(255, 255, 255, 100));
 
-        if (cW > 10.0f && cH > 10.0f) {
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->PushClipRect(canvasP0, ImVec2(canvasP0.x + cW, canvasP0.y + cH), true);
+        // Action Safe Area (90% rectangle)
+        dl->AddRect(ImVec2(canvasX + canvasW * 0.05f, canvasY + canvasH * 0.05f),
+                    ImVec2(canvasX + canvasW * 0.95f, canvasY + canvasH * 0.95f),
+                    IM_COL32(255, 255, 255, 45));
 
-            float targetAspect = (selObj->camera.aspectRatio > 0.1f) ? selObj->camera.aspectRatio : (16.0f / 9.0f);
-            float viewW = cW;
-            float viewH = cW / targetAspect;
-            if (viewH > cH) {
-                viewH = cH;
-                viewW = cH * targetAspect;
-            }
-            float viewX = canvasP0.x + (cW - viewW) * 0.5f;
-            float viewY = canvasP0.y + (cH - viewH) * 0.5f;
-
-            // Background of camera view
-            dl->AddRectFilled(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(14, 15, 18, 255));
-
-            // Camera VP Matrix
-            glm::vec3 camWorldPos = scene.GetWorldPosition(*selObj);
-            float rYaw = glm::radians(selObj->rotation.y);
-            float rPitch = glm::radians(selObj->rotation.x);
-            glm::vec3 camFwd = glm::normalize(glm::vec3(-std::cos(rPitch) * std::sin(rYaw), -std::sin(rPitch), -std::cos(rPitch) * std::cos(rYaw)));
-            glm::mat4 camViewMat = glm::lookAt(camWorldPos, camWorldPos + camFwd, glm::vec3(0, 1, 0));
-            glm::mat4 camProjMat;
-            if (!selObj->camera.isOrthographic) {
-                camProjMat = glm::perspective(glm::radians(std::clamp(selObj->camera.fov, 10.0f, 150.0f)), targetAspect, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
-            } else {
-                float halfH = std::max(0.1f, selObj->camera.orthoSize);
-                float halfW = halfH * targetAspect;
-                camProjMat = glm::ortho(-halfW, halfW, -halfH, halfH, std::max(0.01f, selObj->camera.nearPlane), std::max(1.0f, selObj->camera.farPlane));
-            }
-            glm::mat4 camVP = camProjMat * camViewMat;
-
-            // Project Ground Grid lines
-            auto ProjectPoint = [&](const glm::vec3& pt, ImVec2& outPt) -> bool {
-                glm::vec4 c = camVP * glm::vec4(pt, 1.0f);
-                if (c.w <= 0.05f) return false;
-                glm::vec3 ndc = glm::vec3(c) / c.w;
-                if (ndc.z < -1.0f || ndc.z > 1.0f) return false;
-                outPt.x = viewX + (ndc.x * 0.5f + 0.5f) * viewW;
-                outPt.y = viewY + ((1.0f - ndc.y) * 0.5f) * viewH;
-                return true;
-            };
-
-            // Ground grid lines
-            for (int gz = -6; gz <= 6; gz += 2) {
-                ImVec2 pA, pB;
-                if (ProjectPoint(glm::vec3(-6.0f, 0.0f, (float)gz), pA) && ProjectPoint(glm::vec3(6.0f, 0.0f, (float)gz), pB)) {
-                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
-                }
-            }
-            for (int gx = -6; gx <= 6; gx += 2) {
-                ImVec2 pA, pB;
-                if (ProjectPoint(glm::vec3((float)gx, 0.0f, -6.0f), pA) && ProjectPoint(glm::vec3((float)gx, 0.0f, 6.0f), pB)) {
-                    dl->AddLine(pA, pB, IM_COL32(50, 55, 65, 120), 1.0f);
-                }
-            }
-
-            // Project Scene Objects
-            int drawnTriangles = 0;
-            for (const auto& otherObj : scene.objects) {
-                if (!otherObj.visible || otherObj.id == selObj->id || otherObj.isCamera || otherObj.isLight) continue;
-                if (otherObj.mesh.vertices.empty() || otherObj.mesh.indices.empty()) continue;
-
-                glm::mat4 model = scene.GetWorldMatrix(otherObj);
-                glm::mat4 mvp = camVP * model;
-
-                size_t indCount = otherObj.mesh.indices.size();
-                size_t step = (indCount > 300) ? 6 : 3;
-
-                for (size_t i = 0; i + 2 < indCount; i += step) {
-                    if (drawnTriangles > 350) break;
-
-                    const auto& v0 = otherObj.mesh.vertices[otherObj.mesh.indices[i]];
-                    const auto& v1 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 1]];
-                    const auto& v2 = otherObj.mesh.vertices[otherObj.mesh.indices[i + 2]];
-
-                    glm::vec4 c0 = mvp * glm::vec4(v0.pos, 1.0f);
-                    glm::vec4 c1 = mvp * glm::vec4(v1.pos, 1.0f);
-                    glm::vec4 c2 = mvp * glm::vec4(v2.pos, 1.0f);
-
-                    if (c0.w <= 0.05f || c1.w <= 0.05f || c2.w <= 0.05f) continue;
-
-                    ImVec2 p0(viewX + (c0.x / c0.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c0.y / c0.w) * 0.5f) * viewH);
-                    ImVec2 p1(viewX + (c1.x / c1.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c1.y / c1.w) * 0.5f) * viewH);
-                    ImVec2 p2(viewX + (c2.x / c2.w * 0.5f + 0.5f) * viewW, viewY + ((1.0f - c2.y / c2.w) * 0.5f) * viewH);
-
-                    // 2D Backface test
-                    float cp = (p1.x - p0.x) * (p2.y - p0.y) - (p1.y - p0.y) * (p2.x - p0.x);
-                    if (cp < 0.0f) {
-                        int cr = std::clamp((int)(otherObj.color.r * 180.0f), 20, 255);
-                        int cg = std::clamp((int)(otherObj.color.g * 180.0f), 20, 255);
-                        int cb = std::clamp((int)(otherObj.color.b * 180.0f), 20, 255);
-                        dl->AddTriangleFilled(p0, p1, p2, IM_COL32(cr, cg, cb, 230));
-                        dl->AddTriangle(p0, p1, p2, IM_COL32(30, 32, 40, 150), 1.0f);
-                        drawnTriangles++;
-                    }
-                }
-            }
-
-            // Frame and overlays
-            dl->AddRect(ImVec2(viewX, viewY), ImVec2(viewX + viewW, viewY + viewH), IM_COL32(70, 75, 88, 255), 0.0f, 0, 1.0f);
-
-            // Crosshair
-            float midX = viewX + viewW * 0.5f;
-            float midY = viewY + viewH * 0.5f;
-            dl->AddLine(ImVec2(midX - 7.0f, midY), ImVec2(midX + 7.0f, midY), IM_COL32(255, 255, 255, 80));
-            dl->AddLine(ImVec2(midX, midY - 7.0f), ImVec2(midX, midY + 7.0f), IM_COL32(255, 255, 255, 80));
-
-            // Dotted Action Safe Area (90%)
-            dl->AddRect(ImVec2(viewX + viewW * 0.05f, viewY + viewH * 0.05f),
-                        ImVec2(viewX + viewW * 0.95f, viewY + viewH * 0.95f),
-                        IM_COL32(255, 255, 255, 35));
-
-            // Camera info overlay
-            char camInfo[64];
-            if (!selObj->camera.isOrthographic) {
-                snprintf(camInfo, sizeof(camInfo), "FOV: %.1f° | Persp", selObj->camera.fov);
-            } else {
-                snprintf(camInfo, sizeof(camInfo), "Size: %.1f | Ortho", selObj->camera.orthoSize);
-            }
-            dl->AddText(ImVec2(viewX + 6.0f, viewY + viewH - 16.0f), IM_COL32(180, 200, 220, 190), camInfo);
-
-            dl->PopClipRect();
+        // Camera info overlay badge (bottom-left)
+        char camInfo[64];
+        if (!selObj->camera.isOrthographic) {
+            snprintf(camInfo, sizeof(camInfo), "FOV: %.1f° | Persp", selObj->camera.fov);
+        } else {
+            snprintf(camInfo, sizeof(camInfo), "Size: %.1f | Ortho", selObj->camera.orthoSize);
         }
+        ImVec2 badgePos(canvasX + 6.0f, canvasY + canvasH - 22.0f);
+        dl->AddRectFilled(badgePos, ImVec2(badgePos.x + 130.0f, badgePos.y + 18.0f), IM_COL32(12, 14, 18, 200), 4.0f);
+        dl->AddText(ImVec2(badgePos.x + 6.0f, badgePos.y + 2.0f), IM_COL32(200, 225, 255, 230), camInfo);
+
+        // Game Mode appearance indicator (bottom-right)
+        const char* previewTag = "GAME PREVIEW";
+        ImVec2 tagPos(canvasX + canvasW - 100.0f, canvasY + canvasH - 22.0f);
+        dl->AddRectFilled(tagPos, ImVec2(tagPos.x + 94.0f, tagPos.y + 18.0f), IM_COL32(20, 60, 40, 210), 4.0f);
+        dl->AddText(ImVec2(tagPos.x + 6.0f, tagPos.y + 2.0f), IM_COL32(80, 240, 140, 230), previewTag);
     }
     ImGui::End();
     ImGui::PopStyleColor(2);
@@ -4251,6 +4431,11 @@ void EngineUI::ApplyMaterialToActorAndChildren(Scene& scene, GameObject* rootObj
             cur->emissionTexture = ma.emissionTexture;
             cur->opacityTexture = ma.opacityTexture;
             cur->uvScale = ma.uvScale;
+            cur->normalMapYFlip = ma.normalMapYFlip;
+            cur->metallicChannel = ma.metallicChannel;
+            cur->roughnessChannel = ma.roughnessChannel;
+            cur->aoChannel = ma.aoChannel;
+            cur->materialDebugMode = ma.materialDebugMode;
             if (cur != rootObj) {
                 childCount++;
             }
@@ -4344,6 +4529,21 @@ bool EngineUI::LoadMaterialFile(const std::string& path, MaterialAsset& outMat) 
         else if (key == "opacityMaskClipValue") {
             try { outMat.opacityMaskClipValue = std::stof(val); } catch (...) {}
         }
+        else if (key == "normalMapYFlip") {
+            outMat.normalMapYFlip = (val == "1" || val == "true");
+        }
+        else if (key == "metallicChannel") {
+            try { outMat.metallicChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "roughnessChannel") {
+            try { outMat.roughnessChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "aoChannel") {
+            try { outMat.aoChannel = std::stoi(val); } catch (...) {}
+        }
+        else if (key == "materialDebugMode") {
+            try { outMat.materialDebugMode = std::stoi(val); } catch (...) {}
+        }
         else if (key == "baseColorAssetId") outMat.baseColorAssetId = AssetID::FromString(val);
         else if (key == "normalAssetId") outMat.normalAssetId = AssetID::FromString(val);
         else if (key == "roughnessAssetId") outMat.roughnessAssetId = AssetID::FromString(val);
@@ -4413,6 +4613,11 @@ bool EngineUI::SaveMaterialFile(const std::string& path, const MaterialAsset& ma
     file << "opacity: " << mat.opacity << "\n";
     file << "opacityMaskClipValue: " << mat.opacityMaskClipValue << "\n";
     file << "uvScale: " << mat.uvScale.x << " " << mat.uvScale.y << "\n";
+    file << "normalMapYFlip: " << (mat.normalMapYFlip ? 1 : 0) << "\n";
+    file << "metallicChannel: " << mat.metallicChannel << "\n";
+    file << "roughnessChannel: " << mat.roughnessChannel << "\n";
+    file << "aoChannel: " << mat.aoChannel << "\n";
+    file << "materialDebugMode: " << mat.materialDebugMode << "\n";
     if (mat.baseColorAssetId.IsValid()) file << "baseColorAssetId: " << mat.baseColorAssetId.ToString() << "\n";
     file << "baseColorTexture: " << mat.baseColorTexture << "\n";
     if (mat.normalAssetId.IsValid()) file << "normalAssetId: " << mat.normalAssetId.ToString() << "\n";
@@ -4487,6 +4692,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                         obj.aoTexture = activeMaterial.aoTexture;
                         obj.emissionTexture = activeMaterial.emissionTexture;
                         obj.uvScale = activeMaterial.uvScale;
+                        obj.normalMapYFlip = activeMaterial.normalMapYFlip;
+                        obj.metallicChannel = activeMaterial.metallicChannel;
+                        obj.roughnessChannel = activeMaterial.roughnessChannel;
+                        obj.aoChannel = activeMaterial.aoChannel;
+                        obj.materialDebugMode = activeMaterial.materialDebugMode;
                         updatedCount++;
                     }
                 }
@@ -4511,6 +4721,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     sel->aoTexture = activeMaterial.aoTexture;
                     sel->emissionTexture = activeMaterial.emissionTexture;
                     sel->uvScale = activeMaterial.uvScale;
+                    sel->normalMapYFlip = activeMaterial.normalMapYFlip;
+                    sel->metallicChannel = activeMaterial.metallicChannel;
+                    sel->roughnessChannel = activeMaterial.roughnessChannel;
+                    sel->aoChannel = activeMaterial.aoChannel;
+                    sel->materialDebugMode = activeMaterial.materialDebugMode;
                 }
                 AddLog("LogMaterial", "Saved Material to " + activeMaterial.filePath + " (Reflected in " + std::to_string(updatedCount) + " actors in viewport)", 2);
             }
@@ -4763,6 +4978,21 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (ImGui::SliderFloat("Normal Strength", &activeMaterial.normalStrength, 0.0f, 2.0f, "%.2f")) {
                 materialDirty = true;
             }
+            if (ImGui::Checkbox("Normal Map Y / Green Flip (OpenGL / Blender)", &activeMaterial.normalMapYFlip)) {
+                materialDirty = true;
+            }
+            ImGui::Spacing();
+            const char* channelNames[] = { "Red (R)", "Green (G)", "Blue (B)", "Alpha (A)" };
+            if (ImGui::Combo("Metallic Channel", &activeMaterial.metallicChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            if (ImGui::Combo("Roughness Channel", &activeMaterial.roughnessChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            if (ImGui::Combo("AO Channel", &activeMaterial.aoChannel, channelNames, IM_ARRAYSIZE(channelNames))) {
+                materialDirty = true;
+            }
+            ImGui::Spacing();
             if (ImGui::ColorEdit3("Emission Color", &activeMaterial.emissiveColor.r)) {
                 materialDirty = true;
             }
@@ -4833,6 +5063,23 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
             if (ImGui::Checkbox("Receive Shadows", &activeMaterial.receiveShadows)) {
                 materialDirty = true;
             }
+
+            const char* debugModes[] = {
+                "0: Final PBR",
+                "1: Base Color Only",
+                "2: Normal Visualization",
+                "3: Roughness",
+                "4: Metallic",
+                "5: AO",
+                "6: Tangent",
+                "7: Bitangent",
+                "8: Vertex Normal",
+                "9: UV0",
+                "10: Simple Diffuse (Diagnostic)"
+            };
+            if (ImGui::Combo("Material Debug Mode", &activeMaterial.materialDebugMode, debugModes, IM_ARRAYSIZE(debugModes))) {
+                materialDirty = true;
+            }
             ImGui::Spacing();
         }
 
@@ -4864,6 +5111,11 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
                     obj.emissionTexture = activeMaterial.emissionTexture;
                     obj.opacityTexture = activeMaterial.opacityTexture;
                     obj.uvScale = activeMaterial.uvScale;
+                    obj.normalMapYFlip = activeMaterial.normalMapYFlip;
+                    obj.metallicChannel = activeMaterial.metallicChannel;
+                    obj.roughnessChannel = activeMaterial.roughnessChannel;
+                    obj.aoChannel = activeMaterial.aoChannel;
+                    obj.materialDebugMode = activeMaterial.materialDebugMode;
                 }
             }
         }
@@ -4871,6 +5123,62 @@ void EngineUI::RenderMaterialEditor(Scene& scene) {
         ImGui::EndChild();
     }
     ImGui::End();
+}
+
+bool EngineUI::IsBehaviourNameAlreadyExists(const std::string& rawName) const {
+    if (rawName.empty()) return false;
+
+    std::string nameLower = rawName;
+    std::transform(nameLower.begin(), nameLower.end(), nameLower.begin(), ::tolower);
+
+    // 1. Check BehaviourRegistry (built-in and registered scripts)
+    const auto& all = BehaviourRegistry::Get().GetAll();
+    for (const auto& pair : all) {
+        std::string classLower = pair.second.className;
+        std::transform(classLower.begin(), classLower.end(), classLower.begin(), ::tolower);
+        std::string displayLower = pair.second.displayName;
+        std::transform(displayLower.begin(), displayLower.end(), displayLower.begin(), ::tolower);
+        if (classLower == nameLower || displayLower == nameLower) {
+            return true;
+        }
+    }
+
+    // 2. Check AssetRegistry
+    const auto& assets = AssetRegistry::Get().GetAllAssets();
+    for (const auto& pair : assets) {
+        if (pair.second.type == AssetType::Behaviour || pair.second.type == AssetType::Script) {
+            std::string objLower = pair.second.objectName;
+            std::transform(objLower.begin(), objLower.end(), objLower.begin(), ::tolower);
+            if (objLower == nameLower) {
+                return true;
+            }
+        }
+    }
+
+    // 3. Scan Content root directory and project directory on disk
+    std::filesystem::path searchRoot = !contentRootPath.empty() ? contentRootPath : activeProjectRoot;
+    if (!searchRoot.empty()) {
+        std::error_code ec;
+        if (std::filesystem::exists(searchRoot, ec)) {
+            for (auto it = std::filesystem::recursive_directory_iterator(searchRoot, std::filesystem::directory_options::skip_permission_denied, ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator();
+                 it.increment(ec)) {
+                if (!it->is_directory(ec)) {
+                    std::string ext = it->path().extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".behaviour") {
+                        std::string fileStem = it->path().stem().string();
+                        std::transform(fileStem.begin(), fileStem.end(), fileStem.begin(), ::tolower);
+                        if (fileStem == nameLower) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
 }
 
 void EngineUI::RenderContentBrowser(Scene& scene) {
@@ -4991,7 +5299,15 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 ImGui::SameLine();
                 if (ImGui::Button("🧩 New Behaviour")) {
                     showNewBehaviourPopup = true;
-                    snprintf(newBehaviourNameBuf, sizeof(newBehaviourNameBuf), "PlayerController");
+                    std::string defName = "NewBehaviour";
+                    if (IsBehaviourNameAlreadyExists(defName)) {
+                        int idx = 1;
+                        while (IsBehaviourNameAlreadyExists("NewBehaviour_" + std::to_string(idx))) {
+                            idx++;
+                        }
+                        defName = "NewBehaviour_" + std::to_string(idx);
+                    }
+                    snprintf(newBehaviourNameBuf, sizeof(newBehaviourNameBuf), "%s", defName.c_str());
                 }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip("Create a new EunoiaBehaviour C++ script asset (dev.md Section 4, 21)");
                 ImGui::SameLine();
@@ -5088,106 +5404,140 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
                 }
                 if (ImGui::BeginPopupModal("Create Behaviour##Modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                     ImGui::Text("Enter Behaviour Class Name (inherits EunoiaBehaviour):");
-                    ImGui::SetNextItemWidth(280.0f);
+                    ImGui::SetNextItemWidth(300.0f);
                     ImGui::InputText("##BehNameInput", newBehaviourNameBuf, sizeof(newBehaviourNameBuf));
+
+                    std::string inputName = newBehaviourNameBuf;
+                    while (!inputName.empty() && isspace((unsigned char)inputName.front())) inputName.erase(inputName.begin());
+                    while (!inputName.empty() && isspace((unsigned char)inputName.back())) inputName.pop_back();
+
+                    bool isDuplicate = !inputName.empty() && IsBehaviourNameAlreadyExists(inputName);
+                    bool isValidName = !inputName.empty();
+
+                    if (isDuplicate) {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "⚠️ A behaviour named '%s' already exists in this project!", inputName.c_str());
+                    } else if (isValidName) {
+                        ImGui::Spacing();
+                        ImGui::TextColored(ImVec4(0.35f, 0.9f, 0.45f, 1.0f), "✓ Valid name (will be created in current folder: %s)", currentVirtualDir.c_str());
+                    }
+
                     ImGui::Spacing();
-                    if (ImGui::Button("Create", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter)) {
-                        if (strlen(newBehaviourNameBuf) > 0) {
-                            std::string behName = newBehaviourNameBuf;
-                            std::string diskSub = currentVirtualDir;
-                            if (diskSub.rfind("/Game", 0) == 0) diskSub = diskSub.substr(5);
-                            if (!diskSub.empty() && diskSub[0] == '/') diskSub.erase(0, 1);
-                            std::filesystem::path behDir = contentRootPath / diskSub / "Behaviours";
-                            std::error_code bec;
-                            std::filesystem::create_directories(behDir, bec);
 
-                            // User Request: ONLY create a single .cpp file
-                            std::filesystem::path cppPath = behDir / (behName + ".cpp");
-                            std::filesystem::path metaPath = behDir / (behName + ".cpp.assetmeta");
+                    bool canCreate = isValidName && !isDuplicate;
+                    if (!canCreate) {
+                        ImGui::BeginDisabled();
+                    }
 
-                            std::ofstream cppFile(cppPath);
-                            if (cppFile.is_open()) {
-                                cppFile << "#include <EngineScene/EunoiaBehaviour.h>\n"
-                                    << "#include <EngineScene/BehaviourRegistry.h>\n"
-                                    << "#include <EngineScene/GameObject.h>\n"
-                                    << "#include <EnginePlatform/InputSystem.h>\n"
-                                    << "#include <EngineCore/Log.h>\n\n"
-                                    << "// ============================================================================\n"
-                                    << "// Empty Base Behaviour Structure\n"
-                                    << "// ============================================================================\n"
-                                    << "class " << behName << " : public EunoiaBehaviour {\n"
-                                    << "public:\n"
-                                    << "    " << behName << "() {\n"
-                                    << "        m_className   = \"" << behName << "\";\n"
-                                    << "        m_displayName = \"" << behName << "\";\n"
-                                    << "        RegisterProperties();\n"
-                                    << "    }\n\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    // Property Registration (Exposed in Editor Details Panel)\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    void RegisterProperties() override {\n"
-                                    << "        m_properties.clear();\n"
-                                    << "        // RegisterProperty(\"Property Name\", &variable, \"Category\");\n"
-                                    << "    }\n\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    // Deep copy support for Play Mode and Undo / Redo\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
-                                    << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
-                                    << "        clone->CopyPropertiesFrom(*this);\n"
-                                    << "        return clone;\n"
-                                    << "    }\n\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    // Lifecycle Methods\n"
-                                    << "    // ------------------------------------------------------------------------\n"
-                                    << "    void OnCreate() override {\n"
-                                    << "        // Called once when behaviour is instantiated or attached\n"
-                                    << "    }\n\n"
-                                    << "    void OnEnable() override {\n"
-                                    << "        // Called when behaviour or owner becomes enabled\n"
-                                    << "    }\n\n"
-                                    << "    void Start() override {\n"
-                                    << "        // Called once before the first frame Update\n"
-                                    << "    }\n\n"
-                                    << "    void Update(float deltaTime) override {\n"
-                                    << "        // Called every frame\n"
-                                    << "    }\n\n"
-                                    << "    void FixedUpdate(float fixedDeltaTime) override {\n"
-                                    << "        // Called at fixed time intervals (physics / fixed tick)\n"
-                                    << "    }\n\n"
-                                    << "    void LateUpdate(float deltaTime) override {\n"
-                                    << "        // Called after all Update calls each frame\n"
-                                    << "    }\n\n"
-                                    << "    void OnDisable() override {\n"
-                                    << "        // Called when behaviour or owner becomes disabled\n"
-                                    << "    }\n\n"
-                                    << "    void OnDestroy() override {\n"
-                                    << "        // Called when behaviour is removed or owner is destroyed\n"
-                                    << "    }\n"
-                                    << "};\n\n"
-                                    << "// Register behaviour with the engine's BehaviourRegistry\n"
-                                    << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
-                            }
+                    bool enterPressed = ImGui::IsKeyPressed(ImGuiKey_Enter);
+                    bool createClicked = ImGui::Button("Create", ImVec2(120, 0));
 
-                            std::ofstream metaFile(metaPath);
-                            if (metaFile.is_open()) {
-                                AssetID aid = AssetID::CreateRandom();
-                                metaFile << "# Eunoia-Editor Asset Sidecar Metadata\n"
-                                         << "assetId: " << aid.ToString() << "\n"
-                                         << "type: Behaviour\n"
-                                         << "baseClass: EunoiaBehaviour\n"
-                                         << "virtualPath: " << currentVirtualDir << "/Behaviours/" << behName << ".cpp\n";
-                            }
+                    if (!canCreate) {
+                        ImGui::EndDisabled();
+                    }
 
-                            // Register the newly created script file immediately so it appears in Details Panel Behaviours list
-                            BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
-                            SyncRegistryWithUIProgress(contentRootPath);
-                            AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir + "/Behaviours/", 2);
+                    if (canCreate && (createClicked || enterPressed)) {
+                        std::string behName = inputName;
+                        std::string diskSub = currentVirtualDir;
+                        if (diskSub.rfind("/Game", 0) == 0) diskSub = diskSub.substr(5);
+                        if (!diskSub.empty() && diskSub[0] == '/') diskSub.erase(0, 1);
+                        // Create directly in current folder (do NOT create a folder called "Behaviours")
+                        std::filesystem::path behDir = diskSub.empty() ? contentRootPath : (contentRootPath / diskSub);
+                        std::error_code bec;
+                        std::filesystem::create_directories(behDir, bec);
 
-                            // Open project as workspace in VS Code and open the script file
-                            LaunchVSCodeWorkspace(cppPath.string());
-                            OpenScriptInCodeEditor(cppPath.string());
+                        // Create behaviour .cpp file in the current folder
+                        std::filesystem::path cppPath = behDir / (behName + ".cpp");
+                        std::filesystem::path metaPath = behDir / (behName + ".cpp.assetmeta");
+
+                        std::ofstream cppFile(cppPath);
+                        if (cppFile.is_open()) {
+                            cppFile << "#include <EngineScene/EunoiaBehaviour.h>\n"
+                                << "#include <EngineScene/BehaviourRegistry.h>\n"
+                                << "#include <EngineScene/GameObject.h>\n"
+                                << "#include <EnginePlatform/InputSystem.h>\n"
+                                << "#include <EngineCore/Log.h>\n\n"
+                                << "// ============================================================================\n"
+                                << "// Empty Base Behaviour Structure\n"
+                                << "// ============================================================================\n"
+                                << "class " << behName << " : public EunoiaBehaviour {\n"
+                                << "public:\n"
+                                << "    " << behName << "() {\n"
+                                << "        m_className   = \"" << behName << "\";\n"
+                                << "        m_displayName = \"" << behName << "\";\n"
+                                << "        RegisterProperties();\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Property Registration (Exposed in Editor Details Panel)\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    void RegisterProperties() override {\n"
+                                << "        m_properties.clear();\n"
+                                << "        // RegisterProperty(\"Property Name\", &variable, \"Category\");\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Deep copy support for Play Mode and Undo / Redo\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    std::unique_ptr<EunoiaBehaviour> Clone() const override {\n"
+                                << "        auto clone = std::make_unique<" << behName << ">(*this);\n"
+                                << "        clone->CopyPropertiesFrom(*this);\n"
+                                << "        return clone;\n"
+                                << "    }\n\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    // Lifecycle Methods\n"
+                                << "    // ------------------------------------------------------------------------\n"
+                                << "    void OnCreate() override {\n"
+                                << "        // Called once when behaviour is instantiated or attached\n"
+                                << "    }\n\n"
+                                << "    void OnEnable() override {\n"
+                                << "        // Called when behaviour or owner becomes enabled\n"
+                                << "    }\n\n"
+                                << "    void Start() override {\n"
+                                << "        // Called once before the first frame Update\n"
+                                << "    }\n\n"
+                                << "    void Update(float deltaTime) override {\n"
+                                << "        // Called every frame\n"
+                                << "    }\n\n"
+                                << "    void FixedUpdate(float fixedDeltaTime) override {\n"
+                                << "        // Called at fixed time intervals (physics / fixed tick)\n"
+                                << "    }\n\n"
+                                << "    void LateUpdate(float deltaTime) override {\n"
+                                << "        // Called after all Update calls each frame\n"
+                                << "    }\n\n"
+                                << "    void OnDisable() override {\n"
+                                << "        // Called when behaviour or owner becomes disabled\n"
+                                << "    }\n\n"
+                                << "    void OnDestroy() override {\n"
+                                << "        // Called when behaviour is removed or owner is destroyed\n"
+                                << "    }\n"
+                                << "};\n\n"
+                                << "// Register behaviour with the engine's BehaviourRegistry\n"
+                                << "REGISTER_BEHAVIOUR(" << behName << ", \"" << behName << "\")\n";
                         }
+
+                        std::ofstream metaFile(metaPath);
+                        if (metaFile.is_open()) {
+                            AssetID aid = AssetID::CreateRandom();
+                            std::string vPath = (currentVirtualDir.empty() || currentVirtualDir == "/") ?
+                                ("/" + behName) : (currentVirtualDir + "/" + behName);
+                            metaFile << "# Eunoia-Editor Asset Sidecar Metadata\n"
+                                     << "assetId: " << aid.ToString() << "\n"
+                                     << "type: Behaviour\n"
+                                     << "baseClass: EunoiaBehaviour\n"
+                                     << "virtualPath: " << vPath << "\n";
+                        }
+#ifdef _WIN32
+                        SetFileAttributesW(metaPath.wstring().c_str(), FILE_ATTRIBUTE_HIDDEN);
+#endif
+
+                        // Register the newly created script file immediately so it appears in Details Panel Behaviours list
+                        BehaviourRegistry::Get().RegisterScriptFile(behName, cppPath.string());
+                        SyncRegistryWithUIProgress(contentRootPath);
+                        AddLog("LogContent", "Created Behaviour asset: " + behName + ".cpp in " + currentVirtualDir, 2);
+
+                        // Open project as workspace in VS Code and open the script file
+                        LaunchVSCodeWorkspace(cppPath.string());
+                        OpenScriptInCodeEditor(cppPath.string());
+
                         ImGui::CloseCurrentPopup();
                     }
                     ImGui::SameLine();
@@ -5326,6 +5676,23 @@ void EngineUI::RenderContentBrowser(Scene& scene) {
 
                     // 2. Assets from AssetRegistry
                     for (const auto& meta : displayAssets) {
+                        std::string sPath = meta.sourcePath;
+                        std::transform(sPath.begin(), sPath.end(), sPath.begin(), ::tolower);
+                        std::string vPath = meta.virtualPath;
+                        std::transform(vPath.begin(), vPath.end(), vPath.begin(), ::tolower);
+                        std::string oName = meta.objectName;
+                        std::transform(oName.begin(), oName.end(), oName.begin(), ::tolower);
+
+                        // Do not show metadata files (.assetmeta, .meta) in Content Browser
+                        if (sPath.find(".assetmeta") != std::string::npos ||
+                            sPath.find(".meta") != std::string::npos ||
+                            vPath.find(".assetmeta") != std::string::npos ||
+                            vPath.find(".meta") != std::string::npos ||
+                            oName.find(".assetmeta") != std::string::npos ||
+                            oName.find(".meta") != std::string::npos) {
+                            continue;
+                        }
+
                         ImGui::TableNextRow();
                         ImGui::PushID(meta.id.ToString().c_str());
 
@@ -6411,112 +6778,293 @@ void EngineUI::RenderCookModal() {
 }
 
 // ============================================================================
-// Play Mode / Editor Mode Management (dev.md Section 30-36)
+// Play Mode / External Game Window Management (User Request: external window only)
 // ============================================================================
 
-extern void WaitForGpuIdle();
+static HANDLE s_gameProcessHandle = NULL;
+static DWORD s_gameProcessId = 0;
+
+bool EngineUI::IsExternalGameRunning() {
+    if (!s_gameProcessHandle) return false;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(s_gameProcessHandle, &exitCode)) {
+        if (exitCode == STILL_ACTIVE) {
+            return true;
+        }
+    }
+    CloseHandle(s_gameProcessHandle);
+    s_gameProcessHandle = NULL;
+    s_gameProcessId = 0;
+    return false;
+}
+
+void EngineUI::StopExternalGame() {
+    if (!s_gameProcessHandle) return;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(s_gameProcessHandle, &exitCode) && exitCode == STILL_ACTIVE) {
+        TerminateProcess(s_gameProcessHandle, 0);
+        AddLog("LogPlayLevel", "External Game window closed.", 0);
+    }
+    CloseHandle(s_gameProcessHandle);
+    s_gameProcessHandle = NULL;
+    s_gameProcessId = 0;
+}
 
 void EngineUI::EnterPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
-    if (scene.isPlayMode) return;
-
-    // Flush and wait for in-flight GPU frames before modifying scene state and UI viewport
-    WaitForGpuIdle();
-
-    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
-    if (cam && scene.activeLevelCameraId != -1) {
-        GameObject* camObj = scene.FindObject(scene.activeLevelCameraId);
-        if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera)) {
-            savedCameraTarget = cam->target;
-            savedCameraDistance = cam->distance;
-            savedCameraYaw = cam->yaw;
-            savedCameraPitch = cam->pitch;
-            savedCameraFov = cam->fov;
-            savedCameraIsOrtho = cam->isOrthographic;
-            savedCameraOrthoSize = cam->orthoSize;
-            savedCameraNearPlane = cam->nearPlane;
-            savedCameraFarPlane = cam->farPlane;
-            hasSavedPlayModeCamera = true;
-
-            glm::mat4 worldMat = scene.GetWorldMatrix(*camObj);
-            glm::vec3 worldPos, worldRot, worldScale;
-            Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
-
-            cam->yaw = worldRot.y;
-            cam->pitch = worldRot.x;
-            cam->fov = camObj->camera.fov;
-            cam->isOrthographic = camObj->camera.isOrthographic;
-            cam->orthoSize = camObj->camera.orthoSize;
-            cam->nearPlane = std::max(0.01f, camObj->camera.nearPlane);
-            cam->farPlane = std::max(1.0f, camObj->camera.farPlane);
-            cam->distance = 1.0f;
-            cam->target = worldPos + cam->GetForward() * 1.0f;
-            AddLog("LogCamera", "Started Play Mode with Level Camera: " + camObj->name, 0);
-        } else {
-            hasSavedPlayModeCamera = false;
-        }
-    } else {
-        hasSavedPlayModeCamera = false;
-    }
-
-    // Hide all editor UI panels so the game view takes the full window
-    prevShowOutliner     = showOutliner;
-    prevShowDetails      = showDetails;
-    prevShowBottomDrawer = showBottomDrawer;
-    showOutliner     = false;
-    showDetails      = false;
-    showBottomDrawer = false;
-
-    // Hide gizmo and grid
-    prevShowGizmo = showGizmo;
-    prevShowGrid  = scene.showGrid;
-    showGizmo       = false;
-    scene.showGrid  = false;
-
-    g_pendingPickClick = false;
-    scene.StartPlayMode();
-    AddLog("LogPlayLevel", "PIE: Play Mode Started — Editor UI hidden. Press ESC or DELETE to stop.", 0);
+    // Only external window game mode is supported (User Request: dont same window game mode)
+    LaunchGameSeparateWindow(scene);
 }
 
 void EngineUI::ExitPlayMode(Scene& scene, OrbitCamera* cameraPtr) {
-    if (!scene.isPlayMode) return;
+    StopExternalGame();
+}
 
-    // Flush and wait for in-flight GPU frames before restoring scene actors and editor UI
-    WaitForGpuIdle();
-
-    scene.StopPlayMode();
-
-    g_pendingPickClick = false;
-    s_justExitedPlayMode = true;
-
-    // Ensure selected actor is preserved upon exiting Play Mode
-    if (scene.playModePreSelectedId != -1 && scene.FindObject(scene.playModePreSelectedId)) {
-        scene.selectedId = scene.playModePreSelectedId;
-    }
-    scene.ResolveAllBehaviourReferences();
-
-    OrbitCamera* cam = cameraPtr ? cameraPtr : currentCamera;
-    if (cam && hasSavedPlayModeCamera) {
-        cam->target = savedCameraTarget;
-        cam->distance = savedCameraDistance;
-        cam->yaw = savedCameraYaw;
-        cam->pitch = savedCameraPitch;
-        cam->fov = savedCameraFov;
-        cam->isOrthographic = savedCameraIsOrtho;
-        cam->orthoSize = savedCameraOrthoSize;
-        cam->nearPlane = savedCameraNearPlane;
-        cam->farPlane = savedCameraFarPlane;
-        hasSavedPlayModeCamera = false;
-        AddLog("LogCamera", "Restored Viewport Camera after exiting Play Mode.", 0);
+void EngineUI::LaunchGameSeparateWindow(Scene& scene) {
+    if (IsExternalGameRunning()) {
+        AddLog("LogPlayLevel", "Game Mode is already running in an external window.", 1);
+        return;
     }
 
-    // Restore all editor panels
-    showOutliner     = prevShowOutliner;
-    showDetails      = prevShowDetails;
-    showBottomDrawer = prevShowBottomDrawer;
-    showGizmo        = prevShowGizmo;
-    scene.showGrid   = prevShowGrid;
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::string projName = projectBase.filename().string();
+    std::filesystem::path gameBuildDir = projectBase / "Build";
+    std::error_code ec;
 
-    AddLog("LogPlayLevel", "PIE: Play Mode Stopped. Editor restored.", 0);
+    // Auto-save current active scene so the separate game window always has latest actors & behaviours
+    std::filesystem::create_directories(gameBuildDir / "Scenes", ec);
+    std::filesystem::create_directories(projectBase / "Content" / "Scenes", ec);
+    SceneSerializer::SaveScene(scene, (gameBuildDir / "Scenes" / "Main.escene").string());
+    SceneSerializer::SaveScene(scene, (gameBuildDir / "Main.escene").string());
+    SceneSerializer::SaveScene(scene, (projectBase / "Content" / "Scenes" / "Main.escene").string());
+    AddLog("LogPlayLevel", "Saved active scene before opening Game Mode.", 0);
+
+    // Get current Eunoia-Editor.exe executable path
+    char exePathBuf[MAX_PATH] = {};
+    GetModuleFileNameA(NULL, exePathBuf, MAX_PATH);
+    std::filesystem::path editorExe(exePathBuf);
+
+    if (std::filesystem::exists(editorExe, ec)) {
+        std::string cmdArgs = "--game \"" + projectBase.string() + "\"";
+        std::string fullCmd = "\"" + editorExe.string() + "\" " + cmdArgs;
+
+        STARTUPINFOA si = { sizeof(si) };
+        PROCESS_INFORMATION pi = {};
+        std::vector<char> cmdBuf(fullCmd.begin(), fullCmd.end());
+        cmdBuf.push_back('\0');
+
+        BOOL success = CreateProcessA(
+            NULL,
+            cmdBuf.data(),
+            NULL,
+            NULL,
+            FALSE,
+            0,
+            NULL,
+            projectBase.string().c_str(),
+            &si,
+            &pi
+        );
+
+        if (success) {
+            s_gameProcessHandle = pi.hProcess;
+            s_gameProcessId = pi.dwProcessId;
+            CloseHandle(pi.hThread);
+            AddLog("LogPlayLevel", "Launched Game Mode in separate window (PID: " + std::to_string(pi.dwProcessId) + ")", 2);
+        } else {
+            AddLog("LogPlayLevel", "Failed to launch game process (Error code: " + std::to_string(GetLastError()) + ")", 3);
+        }
+    } else {
+        AddLog("LogPlayLevel", "Could not locate engine executable: " + editorExe.string(), 3);
+    }
+}
+
+// ============================================================================
+// Behaviour Script Watcher & Compilation (User Request: ask compile or later)
+// ============================================================================
+
+void EngineUI::CheckForScriptChanges() {
+    if (showScriptCompileModal || isCompilingScripts) return;
+
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path contentDir = projectBase / "Content";
+    std::error_code ec;
+    if (!std::filesystem::exists(contentDir, ec)) return;
+
+    std::vector<std::string> detectedChanges;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(contentDir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".cpp") {
+            std::string pStr = entry.path().string();
+            std::string pLower = pStr;
+            std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+            if (pLower.find(".assetmeta") != std::string::npos || pLower.find(".meta") != std::string::npos) continue;
+
+            auto currentLwt = entry.last_write_time(ec);
+            if (ec) continue;
+
+            std::string stem = entry.path().stem().string();
+            BehaviourRegistry::Get().RegisterScriptFile(stem, pStr);
+
+            auto it = scriptFileTimestamps.find(pStr);
+            if (it == scriptFileTimestamps.end()) {
+                // Initial recording of this script file
+                scriptFileTimestamps[pStr] = currentLwt;
+            } else {
+                // If timestamp is newer, file was modified externally
+                if (currentLwt > it->second) {
+                    detectedChanges.push_back(pStr);
+                    // Update timestamp to current so we only notify once per file edit
+                    scriptFileTimestamps[pStr] = currentLwt;
+                }
+            }
+        }
+    }
+
+    if (!detectedChanges.empty()) {
+        pendingChangedScripts = detectedChanges;
+        showScriptCompileModal = true;
+    }
+}
+
+void EngineUI::TriggerCompileScripts(Scene* scene) {
+    if (isCompilingScripts) return;
+    isCompilingScripts = true;
+
+    AddLog("LogScript", "Starting compilation of behaviour scripts...", 0);
+
+    std::filesystem::path projectBase = activeProjectRoot.empty() ? contentRootPath.parent_path() : activeProjectRoot;
+    std::filesystem::path gameBuildDir = projectBase / "Build";
+    std::error_code ec;
+    std::filesystem::create_directories(gameBuildDir / "Scenes", ec);
+    std::filesystem::create_directories(projectBase / "Content" / "Scenes", ec);
+
+    if (scene) {
+        SceneSerializer::SaveScene(*scene, (gameBuildDir / "Scenes" / "Main.escene").string());
+        SceneSerializer::SaveScene(*scene, (gameBuildDir / "Main.escene").string());
+        SceneSerializer::SaveScene(*scene, (projectBase / "Content" / "Scenes" / "Main.escene").string());
+        AddLog("LogScript", "Active scene exported to game build.", 0);
+    }
+
+    std::filesystem::path engineRoot = FindEngineSourceRoot();
+    std::filesystem::path batPath = engineRoot / "CompileGameScripts.bat";
+    if (!std::filesystem::exists(batPath, ec)) {
+        batPath = "C:\\Projects\\Eunoia-Engine\\Eunoia-Engine\\CompileGameScripts.bat";
+    }
+
+    std::string cmd = "cmd.exe /c \"" + batPath.string() + "\" \"" + projectBase.string() + "\" 2>&1";
+
+    // Asynchronously run compiler process in background thread
+    std::thread([this, cmd, projectBase]() {
+        FILE* pipe = _popen(cmd.c_str(), "r");
+        if (!pipe) {
+            std::lock_guard<std::mutex> lock(asyncLogMutex);
+            pendingAsyncLogs.push_back({ "LogScript", "Failed to launch script compiler batch process.", 3 });
+            isCompilingScripts = false;
+            return;
+        }
+
+        char buffer[256];
+        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+            std::string line = buffer;
+            while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+            if (!line.empty()) {
+                std::lock_guard<std::mutex> lock(asyncLogMutex);
+                if (line.rfind("[ERROR]", 0) == 0 || line.find("error:") != std::string::npos) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 3 });
+                } else if (line.rfind("[SUCCESS]", 0) == 0) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 2 });
+                } else if (line.rfind("[INFO]", 0) == 0) {
+                    pendingAsyncLogs.push_back({ "LogScript", line, 0 });
+                } else {
+                    pendingAsyncLogs.push_back({ "LogBuild", line, 0 });
+                }
+            }
+        }
+
+        int exitCode = _pclose(pipe);
+        {
+            std::lock_guard<std::mutex> lock(asyncLogMutex);
+            if (exitCode == 0) {
+                pendingAsyncLogs.push_back({ "LogScript", "All behaviour scripts compiled successfully! Standalone Game binary is ready.", 2 });
+            } else {
+                pendingAsyncLogs.push_back({ "LogScript", "Script compilation finished with errors (Exit code " + std::to_string(exitCode) + ").", 3 });
+            }
+            pendingChangedScripts.clear();
+        }
+
+        // Update timestamps to latest after compile
+        std::error_code sEc;
+        std::filesystem::path contentDir = projectBase / "Content";
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(contentDir, std::filesystem::directory_options::skip_permission_denied, sEc)) {
+            if (entry.is_regular_file(sEc) && entry.path().extension() == ".cpp") {
+                scriptFileTimestamps[entry.path().string()] = entry.last_write_time(sEc);
+            }
+        }
+
+        isCompilingScripts = false;
+    }).detach();
+}
+
+void EngineUI::RenderScriptCompileModal(Scene& scene) {
+    if (!showScriptCompileModal) return;
+
+    ImGui::OpenPopup("Script Changes Detected##CompilePrompt");
+    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+    if (ImGui::BeginPopupModal("Script Changes Detected##CompilePrompt", &showScriptCompileModal, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextColored(ImVec4(0.2f, 0.75f, 1.0f, 1.0f), "⚡ Behaviour Script Changes Detected");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        ImGui::TextWrapped("The following behaviour script(s) have been modified externally:");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.12f, 1.0f));
+        float childHeight = std::min(140.0f, std::max(40.0f, (float)pendingChangedScripts.size() * 26.0f + 12.0f));
+        ImGui::BeginChild("##ChangedScriptsList", ImVec2(420.0f, childHeight), true);
+        for (const auto& scriptPath : pendingChangedScripts) {
+            std::string filename = std::filesystem::path(scriptPath).filename().string();
+            ImGui::BulletText("%s", filename.c_str());
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", scriptPath.c_str());
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::TextWrapped("Would you like to compile the updated behaviour script(s) now?");
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // [ Compile ] button (Primary green)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.60f, 0.25f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.75f, 0.32f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.10f, 0.45f, 0.18f, 1.0f));
+        if (ImGui::Button("⚡ Compile", ImVec2(120, 32))) {
+            showScriptCompileModal = false;
+            ImGui::CloseCurrentPopup();
+            TriggerCompileScripts(&scene);
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::SameLine();
+        ImGui::Spacing();
+        ImGui::SameLine();
+
+        // [ Later ] button (Neutral gray)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.25f, 0.28f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.35f, 0.38f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.20f, 0.20f, 0.22f, 1.0f));
+        if (ImGui::Button("Later", ImVec2(100, 32))) {
+            showScriptCompileModal = false;
+            pendingChangedScripts.clear();
+            ImGui::CloseCurrentPopup();
+            AddLog("LogScript", "Behaviour script compilation deferred. You can compile anytime via [⚡ Compile] or Build menu.", 0);
+        }
+        ImGui::PopStyleColor(3);
+
+        ImGui::EndPopup();
+    }
 }
 
 // ============================================================================
@@ -6558,6 +7106,9 @@ void EngineUI::RenderCodeEditor() {
                 LaunchVSCodeWorkspace(activeCodeEditorPath);
                 AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
             }
+            if (ImGui::MenuItem("⚡ Compile Script", "F7", false, !isCompilingScripts)) {
+                TriggerCompileScripts(nullptr);
+            }
             ImGui::EndMenuBar();
         }
 
@@ -6574,6 +7125,15 @@ void EngineUI::RenderCodeEditor() {
         if (ImGui::Button("🚀 Open in External IDE (VS Code)")) {
             LaunchVSCodeWorkspace(activeCodeEditorPath);
             AddLog("LogContent", "Launched VS Code workspace for: " + activeCodeEditorFilename, 0);
+        }
+        ImGui::SameLine();
+        if (isCompilingScripts) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "⏳ Compiling...");
+        } else {
+            if (ImGui::Button("⚡ Compile")) {
+                TriggerCompileScripts(nullptr);
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Compile this behaviour script and rebuild standalone game");
         }
         ImGui::SameLine();
         ImGui::TextDisabled("| %s", activeCodeEditorPath.c_str());
@@ -6629,17 +7189,23 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
         }
 
         if (!obj->behaviours.empty()) {
-            if (!scene.isPlayMode) {
+            bool isGameRunning = IsExternalGameRunning();
+            if (!isGameRunning) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.55f, 0.25f, 1.0f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.70f, 0.32f, 1.0f));
-                if (ImGui::Button("▶ Run Play Mode to Test Movement", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
-                    EnterPlayMode(scene);
+                if (ImGui::Button("▶ Run Game in Separate Window", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                    LaunchGameSeparateWindow(scene);
                 }
                 ImGui::PopStyleColor(2);
-                ImGui::TextDisabled("ℹ Press [▶ Play] in toolbar or above to run behaviours.");
+                ImGui::TextDisabled("ℹ Runs behaviour scripts in a dedicated game window.");
                 ImGui::Spacing();
             } else {
-                ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ Simulation Active — Move with W, A, S, D keys!");
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f, 0.20f, 0.20f, 1.0f));
+                if (ImGui::Button("⏹ Stop External Game", ImVec2(ImGui::GetContentRegionAvail().x, 26.0f))) {
+                    StopExternalGame();
+                }
+                ImGui::PopStyleColor();
+                ImGui::TextColored(ImVec4(0.2f, 0.95f, 0.4f, 1.0f), "▶ Simulation Active in External Window");
                 ImGui::Spacing();
             }
         }
@@ -6665,9 +7231,14 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
                      !sEc && it != std::filesystem::recursive_directory_iterator();
                      it.increment(sEc)) {
                     if (!it->is_directory(sEc) && it->path().extension() == ".cpp") {
-                        std::string stem = it->path().stem().string();
-                        if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" && stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
-                            BehaviourRegistry::Get().RegisterScriptFile(stem, it->path().string());
+                        std::string pStr = it->path().string();
+                        std::string pLower = pStr;
+                        std::transform(pLower.begin(), pLower.end(), pLower.begin(), ::tolower);
+                        if (pLower.find(".assetmeta") == std::string::npos && pLower.find(".meta") == std::string::npos) {
+                            std::string stem = it->path().stem().string();
+                            if (stem != "Cube" && stem != "EngineUI" && stem != "EunoiaBehaviour" && stem != "TextureManager" && stem != "AssetRegistry" && stem != "AssetManager") {
+                                BehaviourRegistry::Get().RegisterScriptFile(stem, it->path().string());
+                            }
                         }
                     }
                 }
@@ -6724,6 +7295,28 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
             auto& b = obj->behaviours[i];
             if (!b) continue;
 
+            // Ensure user script behaviours are upgraded to dynamic script reflection with latest properties from .cpp
+            const auto& allRegistry = BehaviourRegistry::Get().GetAll();
+            auto regIt = allRegistry.find(b->GetClassName());
+            if (regIt != allRegistry.end() && !regIt->second.sourceCpp.empty()) {
+                if (regIt->second.isNative) {
+                    // Native compiled behaviour: retain native instance
+                    b->RefreshPropertiesFromSource();
+                } else if (b->GetSourceCppPath().empty() || b->GetProperties().empty()) {
+                    auto dynB = std::make_unique<DynamicScriptBehaviour>(b->GetClassName(), regIt->second.sourceCpp);
+                    dynB->SetScene(&scene);
+                    dynB->SetOwner(obj);
+                    dynB->SetEnabled(b->IsEnabled());
+                    dynB->CopyPropertiesFrom(*b);
+                    dynB->ResolveReferences(scene);
+                    b = std::move(dynB);
+                } else {
+                    b->RefreshPropertiesFromSource();
+                }
+            } else {
+                b->RefreshPropertiesFromSource();
+            }
+
             ImGui::PushID((int)i);
             ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 4.0f);
             ImGui::BeginChild("BehaviourCard", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
@@ -6762,6 +7355,9 @@ void EngineUI::RenderBehavioursSection(Scene& scene, GameObject* obj) {
 
             // Properties list
             auto& props = b->GetProperties();
+            if (props.empty()) {
+                ImGui::TextDisabled("  (No exposed properties)");
+            }
             for (size_t pi = 0; pi < props.size(); ++pi) {
                 auto& prop = props[pi];
                 ImGui::PushID((int)pi);

@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include <sstream>
+#include <iostream>
 #include <mutex>
 #include <algorithm>
 #include <glm/glm.hpp>
@@ -13,6 +14,8 @@ struct Message {
     float totalTime = 2.5f;
     float remainingTime = 2.5f;
     glm::vec4 color{0.3f, 1.0f, 0.45f, 1.0f}; // Vibrant green-cyan default
+    int key = -1;
+    uint32_t updateCount = 1;
 };
 
 class System {
@@ -22,13 +25,51 @@ public:
         return instance;
     }
 
-    void AddMessage(const std::string& text, float duration = 2.5f, const glm::vec4& color = glm::vec4(0.3f, 1.0f, 0.45f, 1.0f)) {
+    void AddMessage(const std::string& text, float duration = 2.5f, const glm::vec4& color = glm::vec4(0.3f, 1.0f, 0.45f, 1.0f), int key = -1) {
         std::lock_guard<std::mutex> lock(m_mutex);
+
+        // Check if an existing message matches (same key, exact text, or matching label prefix before ':' or '=')
+        for (auto& existing : m_messages) {
+            bool matches = false;
+            if (key >= 0 && existing.key == key) {
+                matches = true;
+            } else if (existing.text == text) {
+                matches = true;
+            } else {
+                size_t sep = text.find_first_of(":=");
+                if (sep != std::string::npos && sep >= 3) {
+                    std::string prefix = text.substr(0, sep + 1);
+                    if (existing.text.rfind(prefix, 0) == 0) {
+                        matches = true;
+                    }
+                } else {
+                    size_t firstDigit = text.find_first_of("0123456789-");
+                    if (firstDigit != std::string::npos && firstDigit >= 3) {
+                        std::string nonDigitPrefix = text.substr(0, firstDigit);
+                        if (existing.text.rfind(nonDigitPrefix, 0) == 0) {
+                            matches = true;
+                        }
+                    }
+                }
+            }
+
+            if (matches) {
+                existing.text = text;
+                existing.totalTime = duration > 0.05f ? duration : 0.05f;
+                existing.remainingTime = existing.totalTime;
+                existing.color = color;
+                existing.updateCount++;
+                return;
+            }
+        }
+
         Message msg;
         msg.text = text;
         msg.totalTime = duration > 0.05f ? duration : 0.05f;
         msg.remainingTime = msg.totalTime;
         msg.color = color;
+        msg.key = key;
+        msg.updateCount = 1;
         m_messages.push_back(msg);
 
         // Keep maximum 25 messages on screen
@@ -114,14 +155,19 @@ template<typename T>
 inline void Print(const T& value, float time) {
     std::ostringstream ss;
     ScreenPrint::Detail::Append(ss, value);
-    ScreenPrint::System::Get().AddMessage(ss.str(), time);
+    std::string s = ss.str();
+    std::cout << "[Print] " << s << std::endl;
+    ScreenPrint::System::Get().AddMessage(s, time);
 }
 
 inline void Print(const char* value, float time) {
-    ScreenPrint::System::Get().AddMessage(value ? value : "null", time);
+    std::string s = value ? value : "null";
+    std::cout << "[Print] " << s << std::endl;
+    ScreenPrint::System::Get().AddMessage(s, time);
 }
 
 inline void Print(const std::string& value, float time) {
+    std::cout << "[Print] " << value << std::endl;
     ScreenPrint::System::Get().AddMessage(value, time);
 }
 
@@ -129,14 +175,19 @@ template<typename T>
 inline void Print(const T& value) {
     std::ostringstream ss;
     ScreenPrint::Detail::Append(ss, value);
-    ScreenPrint::System::Get().AddMessage(ss.str(), 2.5f);
+    std::string s = ss.str();
+    std::cout << "[Print] " << s << std::endl;
+    ScreenPrint::System::Get().AddMessage(s, 2.5f);
 }
 
 inline void Print(const char* value) {
-    ScreenPrint::System::Get().AddMessage(value ? value : "null", 2.5f);
+    std::string s = value ? value : "null";
+    std::cout << "[Print] " << s << std::endl;
+    ScreenPrint::System::Get().AddMessage(s, 2.5f);
 }
 
 inline void Print(const std::string& value) {
+    std::cout << "[Print] " << value << std::endl;
     ScreenPrint::System::Get().AddMessage(value, 2.5f);
 }
 
@@ -144,5 +195,13 @@ template<typename T1, typename T2, typename... Rest>
 inline void Print(const T1& v1, const T2& v2, const Rest&... rest) {
     std::ostringstream ss;
     ScreenPrint::Detail::FormatHelper(ss, v1, v2, rest...);
-    ScreenPrint::System::Get().AddMessage(ss.str(), 2.5f);
+    std::string s = ss.str();
+    std::cout << "[Print] " << s << std::endl;
+    ScreenPrint::System::Get().AddMessage(s, 2.5f);
+}
+
+// PrintWithKey: allows explicit in-place update by key in Update() loop
+inline void PrintWithKey(int key, const std::string& value, float time = 2.5f) {
+    std::cout << "[Print] " << value << "\n";
+    ScreenPrint::System::Get().AddMessage(value, time, glm::vec4(0.3f, 1.0f, 0.45f, 1.0f), key);
 }

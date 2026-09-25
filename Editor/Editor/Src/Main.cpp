@@ -123,7 +123,16 @@ struct MaterialShaderConstants
 	float opacity;
 	float opacityMaskClipValue;
 	float hasOpacityTex;
+	float normalMapYFlip;
+	float roughnessChannel;
+	float metallicChannel;
+	float aoChannel;
+	float materialDebugMode;
+	float pad1;
+	float pad2;
+	float pad3;
 };
+static_assert(sizeof(MaterialShaderConstants) == 128, "MaterialShaderConstants must be 128 bytes (32 floats)");
 
 // Window & GLFW
 static GLFWwindow* g_window = nullptr;
@@ -187,6 +196,7 @@ static Scene g_scene;
 static OrbitCamera g_camera;
 static EngineUI g_engineUI;
 static std::vector<Scene::RenderBatch> g_sceneBatches;
+static size_t g_numPureSceneBatches = 0;
 
 struct DX12GpuTexture {
 	ID3D12Resource* resource = nullptr;
@@ -831,7 +841,16 @@ void InitFallbackTextures()
 	}
 }
 
-DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture& fallback)
+enum class TextureUsageSlot {
+	BaseColor,
+	Normal,
+	Roughness,
+	Metallic,
+	AO,
+	Opacity
+};
+
+DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture& fallback, TextureUsageSlot slot = TextureUsageSlot::BaseColor)
 {
 	if (name.empty() || name == "none") return fallback;
 
@@ -848,7 +867,8 @@ DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture
 		if (!tmResolved.empty()) resolved = tmResolved;
 	}
 
-	auto it = g_gpuTextureMap.find(resolved);
+	std::string cacheKey = resolved + "@slot=" + std::to_string((int)slot);
+	auto it = g_gpuTextureMap.find(cacheKey);
 	if (it != g_gpuTextureMap.end()) {
 		return it->second;
 	}
@@ -861,7 +881,7 @@ DX12GpuTexture GetOrLoadGPUTexture(const std::string& name, const DX12GpuTexture
 
 	DX12GpuTexture tex = UploadTextureToD3D12(cached->data.data(), cached->width, cached->height, resolved);
 	if (tex.resource) {
-		g_gpuTextureMap[resolved] = tex;
+		g_gpuTextureMap[cacheKey] = tex;
 		return tex;
 	}
 	return fallback;
@@ -882,14 +902,14 @@ D3D12_GPU_DESCRIPTOR_HANDLE GetOrCreateMaterialTable(
 	}
 
 	DX12GpuTexture texAlbedo  = (!albedo.empty() && albedo != "none")
-		? GetOrLoadGPUTexture(albedo, g_fallbackMissing)
+		? GetOrLoadGPUTexture(albedo, g_fallbackMissing, TextureUsageSlot::BaseColor)
 		: g_fallbackWhite;
-	DX12GpuTexture texNormal  = GetOrLoadGPUTexture(normal,  g_fallbackNormal);
-	DX12GpuTexture texRough   = GetOrLoadGPUTexture(rough,   g_fallbackRoughness);
-	DX12GpuTexture texMetal   = GetOrLoadGPUTexture(metal,   g_fallbackMetallic);
-	DX12GpuTexture texAO      = GetOrLoadGPUTexture(ao,      g_fallbackAO);
+	DX12GpuTexture texNormal  = GetOrLoadGPUTexture(normal,  g_fallbackNormal, TextureUsageSlot::Normal);
+	DX12GpuTexture texRough   = GetOrLoadGPUTexture(rough,   g_fallbackRoughness, TextureUsageSlot::Roughness);
+	DX12GpuTexture texMetal   = GetOrLoadGPUTexture(metal,   g_fallbackMetallic, TextureUsageSlot::Metallic);
+	DX12GpuTexture texAO      = GetOrLoadGPUTexture(ao,      g_fallbackAO, TextureUsageSlot::AO);
 	DX12GpuTexture texOpacity = (!opacity.empty() && opacity != "none")
-		? GetOrLoadGPUTexture(opacity, g_fallbackWhite)
+		? GetOrLoadGPUTexture(opacity, g_fallbackWhite, TextureUsageSlot::Opacity)
 		: g_fallbackWhite;
 
 	static D3D12_GPU_DESCRIPTOR_HANDLE s_fallbackTable = {};
@@ -1558,11 +1578,11 @@ int createShadersAndPipeline()
 	rootParams[0].Descriptor.RegisterSpace = 0;
 	rootParams[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-	// 1: 32-bit Constants b1 (24 floats Material Constants)
+	// 1: 32-bit Constants b1 (32 floats Material Constants)
 	rootParams[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
 	rootParams[1].Constants.ShaderRegister = 1;
 	rootParams[1].Constants.RegisterSpace = 0;
-	rootParams[1].Constants.Num32BitValues = 24;
+	rootParams[1].Constants.Num32BitValues = 32;
 	rootParams[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
 	// 2: Descriptor Table t0-t5 (6 SRVs for Material Textures)
@@ -1703,6 +1723,14 @@ int createShadersAndPipeline()
 			float opacity;
 			float opacityMaskClipValue;
 			float hasOpacityTex;
+			float normalMapYFlip;
+			float roughnessChannel;
+			float metallicChannel;
+			float aoChannel;
+			float materialDebugMode;
+			float pad1;
+			float pad2;
+			float pad3;
 		};
 
 		Texture2D g_albedoTex : register(t0);
@@ -1725,6 +1753,7 @@ int createShadersAndPipeline()
 			float3 normal   : NORMAL;
 			float2 uv       : TEXCOORD;
 			float3 color    : COLOR;
+			float4 tangent  : TANGENT;
 		};
 
 		struct PSInput
@@ -1735,7 +1764,16 @@ int createShadersAndPipeline()
 			float2 uv          : TEXCOORD;
 			float3 color       : COLOR;
 			float4 shadowCoord : SHADOW_COORD;
+			float4 tangent     : TANGENT;
 		};
+
+		float SamplePbrChannel(float4 smp, float chIdx)
+		{
+			if (chIdx < 0.5f) return smp.r;
+			if (chIdx < 1.5f) return smp.g;
+			if (chIdx < 2.5f) return smp.b;
+			return smp.a;
+		}
 
 		PSInput VSMain(VSInput input)
 		{
@@ -1746,6 +1784,7 @@ int createShadersAndPipeline()
 			output.uv       = input.uv;
 			output.color    = input.color;
 			output.shadowCoord = mul(lightSpaceMatrix, float4(input.position, 1.0f));
+			output.tangent  = input.tangent;
 			return output;
 		}
 
@@ -1929,55 +1968,106 @@ int createShadersAndPipeline()
 				clip(currentOpacity - opacityMaskClipValue);
 			}
 
-			if (isUnlit > 0.5f)
-			{
-				float3 col = input.color * baseColor;
-				if (hasAlbedoTex > 0.5f)
-				{
-					col = g_albedoTex.Sample(g_sampler, uv).rgb;
-				}
-				return float4(col + emissiveColor * emissiveIntensity, currentOpacity);
-			}
+			float3 V = normalize(cameraPos - input.worldPos);
+			float3 L = normalize(lightDir);
+			float3 H = normalize(L + V);
 
 			float3 N = normalize(input.normal);
+			float3 T = normalize(input.tangent.xyz);
+			T = normalize(T - dot(T, N) * N);
+			float3 B = normalize(cross(N, T) * input.tangent.w);
+			float3x3 TBN = float3x3(T, B, N);
+
 			if (hasNormalTex > 0.5f && normalStrength > 0.01f)
 			{
 				float3 nSample = g_normalTex.Sample(g_sampler, uv).rgb * 2.0f - 1.0f;
+				if (normalMapYFlip > 0.5f)
+				{
+					nSample.y = -nSample.y;
+				}
 				nSample.xy *= normalStrength;
-				float3 up = abs(N.y) < 0.999f ? float3(0, 1, 0) : float3(1, 0, 0);
-				float3 T = normalize(cross(up, N));
-				float3 B = cross(N, T);
-				N = normalize(T * nSample.x + B * nSample.y + N * nSample.z);
+				nSample = normalize(nSample);
+				N = normalize(mul(nSample, TBN));
 			}
 
 			float3 albedo = input.color * baseColor;
 			if (hasAlbedoTex > 0.5f)
 			{
-				albedo = g_albedoTex.Sample(g_sampler, uv).rgb;
+				float4 albedoSample = g_albedoTex.Sample(g_sampler, uv);
+				albedo = pow(max(albedoSample.rgb, 0.0001f), 2.2f) * baseColor;
 			}
 
 			float rough = roughness;
 			if (hasRoughTex > 0.5f)
 			{
-				rough = g_roughTex.Sample(g_sampler, uv).r;
+				float4 rSamp = g_roughTex.Sample(g_sampler, uv);
+				rough = SamplePbrChannel(rSamp, roughnessChannel);
 			}
 			rough = clamp(rough, 0.04f, 1.0f);
 
 			float metal = metallic;
-			if (hasAlbedoTex > 0.5f && metallic > 0.0f)
+			if (hasAlbedoTex > 0.5f || hasRoughTex > 0.5f)
 			{
-				metal = clamp(g_metalTex.Sample(g_sampler, uv).r, 0.0f, 1.0f);
+				float4 mSamp = g_metalTex.Sample(g_sampler, uv);
+				metal = clamp(SamplePbrChannel(mSamp, metallicChannel), 0.0f, 1.0f);
 			}
 
 			float ao = 1.0f;
 			if (hasAoTex > 0.5f)
 			{
-				ao = clamp(g_aoTex.Sample(g_sampler, uv).r, 0.05f, 1.0f);
+				float4 aoSamp = g_aoTex.Sample(g_sampler, uv);
+				ao = clamp(SamplePbrChannel(aoSamp, aoChannel), 0.05f, 1.0f);
 			}
 
-			float3 V = normalize(cameraPos - input.worldPos);
-			float3 L = normalize(lightDir);
-			float3 H = normalize(L + V);
+			// Diagnostic Material Debug Modes (dev.md Section 11 & 15)
+			if (materialDebugMode > 0.5f && materialDebugMode < 1.5f) // 1: Base Color Only
+			{
+				return float4(pow(saturate(albedo), 1.0f / 2.2f), currentOpacity);
+			}
+			else if (materialDebugMode > 1.5f && materialDebugMode < 2.5f) // 2: Normal Visualization
+			{
+				return float4(N * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 2.5f && materialDebugMode < 3.5f) // 3: Roughness
+			{
+				return float4(rough, rough, rough, currentOpacity);
+			}
+			else if (materialDebugMode > 3.5f && materialDebugMode < 4.5f) // 4: Metallic
+			{
+				return float4(metal, metal, metal, currentOpacity);
+			}
+			else if (materialDebugMode > 4.5f && materialDebugMode < 5.5f) // 5: AO
+			{
+				return float4(ao, ao, ao, currentOpacity);
+			}
+			else if (materialDebugMode > 5.5f && materialDebugMode < 6.5f) // 6: Tangent
+			{
+				return float4(T * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 6.5f && materialDebugMode < 7.5f) // 7: Bitangent
+			{
+				return float4(B * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 7.5f && materialDebugMode < 8.5f) // 8: Vertex Normal
+			{
+				float3 vN = normalize(input.normal);
+				return float4(vN * 0.5f + 0.5f, currentOpacity);
+			}
+			else if (materialDebugMode > 8.5f && materialDebugMode < 9.5f) // 9: UV0
+			{
+				return float4(frac(uv.x), frac(uv.y), 0.0f, currentOpacity);
+			}
+			else if (materialDebugMode > 9.5f && materialDebugMode < 10.5f) // 10: Simple Diffuse (diagnostic)
+			{
+				float3 vN = normalize(input.normal);
+				float3 simpleDiff = albedo * (max(dot(vN, L), 0.0f) * lightColor + ambientColor.rgb * ambientIntensity);
+				return float4(pow(saturate(simpleDiff), 1.0f / 2.2f), currentOpacity);
+			}
+
+			if (isUnlit > 0.5f)
+			{
+				return float4(pow(saturate(albedo + emissiveColor * emissiveIntensity), 1.0f / 2.2f), currentOpacity);
+			}
 
 			float NdotL = max(dot(N, L), 0.0f);
 			float NdotV = max(dot(N, V), 0.001f);
@@ -2100,7 +2190,8 @@ int createShadersAndPipeline()
 
 			float3 emissive = emissiveColor * emissiveIntensity;
 			float3 litColor = ambientDiff + ambientSpec + directLit + pointLightsContribution + emissive;
-			return float4(saturate(litColor), currentOpacity);
+			litColor = pow(saturate(litColor), 1.0f / 2.2f);
+			return float4(litColor, currentOpacity);
 		}
 	)";
 
@@ -2121,17 +2212,18 @@ int createShadersAndPipeline()
 		return EXIT_FAILURE;
 	}
 
-	// 3. Input Layout (Position, Normal, UV, Color)
+	// 3. Input Layout (Position, Normal, UV, Color, Tangent)
 	D3D12_INPUT_ELEMENT_DESC inputElementDescs[] = {
-		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-		{ "COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+		{ "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "COLOR",    0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+		{ "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 44, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
 	};
 
 	// 4. Graphics Pipeline State Object (PSO) for Main Lit Pass
 	D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-	psoDesc.InputLayout = { inputElementDescs, 4 };
+	psoDesc.InputLayout = { inputElementDescs, 5 };
 	psoDesc.pRootSignature = g_rootSignature;
 	psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
 	psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
@@ -2294,7 +2386,7 @@ int createDynamicBuffers()
 
 	// 3. Constant Buffer
 	UINT64 cbSize = (sizeof(SceneConstantBuffer) + 255) & ~255;
-	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(cbSize);
+	D3D12_RESOURCE_DESC cbDesc = CreateBufferResourceDesc(cbSize * 2);
 
 	g_d3dDevice->CreateCommittedResource(
 		&uploadHeap, D3D12_HEAP_FLAG_NONE, &cbDesc,
@@ -2309,47 +2401,32 @@ int createDynamicBuffers()
 
 static void SyncViewportCameraToLevelCamera()
 {
-	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
-	{
-		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
-		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
-		{
-			camObj->rotation.x = g_camera.pitch;
-			camObj->rotation.y = g_camera.yaw;
-
-			glm::vec3 camPos = g_camera.GetPosition();
-			if (camObj->parentId != -1)
-			{
-				GameObject* parent = g_scene.FindObject(camObj->parentId);
-				if (parent)
-				{
-					glm::mat4 invParent = glm::inverse(g_scene.GetWorldMatrix(*parent));
-					camObj->position = glm::vec3(invParent * glm::vec4(camPos, 1.0f));
-				}
-				else
-				{
-					camObj->position = camPos;
-				}
-			}
-			else
-			{
-				camObj->position = camPos;
-			}
-		}
-	}
+	// In Play Mode, camera is completely static unless controlled by a behaviour script.
+	// Viewport mouse dragging never alters the camera actor.
+	return;
 }
 
 static void SyncLevelCameraToViewportCamera()
 {
-	if (g_scene.isPlayMode && g_scene.activeLevelCameraId != -1)
+	if (g_scene.isPlayMode)
 	{
-		// While user actively pilots camera via RMB fly or viewport controls, do not overwrite from level camera actor
-		if (g_camera.isFlying || s_isRightMouseDown || s_isMiddleMouseDown)
+		GameObject* camObj = nullptr;
+		if (g_scene.activeLevelCameraId != -1)
 		{
-			return;
+			camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
 		}
-
-		GameObject* camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		if (!camObj)
+		{
+			for (auto& obj : g_scene.objects)
+			{
+				if (obj.isCamera || obj.type == PrimitiveType::Camera)
+				{
+					camObj = &obj;
+					g_scene.activeLevelCameraId = obj.id;
+					break;
+				}
+			}
+		}
 		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
 		{
 			glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
@@ -2363,8 +2440,8 @@ static void SyncLevelCameraToViewportCamera()
 			g_camera.orthoSize = camObj->camera.orthoSize;
 			g_camera.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
 			g_camera.farPlane = std::max(1.0f, camObj->camera.farPlane);
-			g_camera.distance = 1.0f;
-			g_camera.target = worldPos + g_camera.GetForward() * 1.0f;
+			g_camera.distance = 0.001f;
+			g_camera.target = worldPos + g_camera.GetForward() * 0.001f;
 		}
 	}
 }
@@ -2376,6 +2453,7 @@ void updateSceneGeometry()
 	static std::vector<uint32_t> sceneIndices;
 
 	g_scene.BuildSceneMesh(sceneVertices, sceneIndices, g_sceneBatches, g_camera.GetPosition());
+	g_numPureSceneBatches = g_sceneBatches.size();
 
 	// Light & Camera Editor Gizmos (dev.md)
 	Eunoia::EditorGizmoSystem::Get().RenderGizmos(g_scene, g_camera.GetPosition(), sceneVertices, sceneIndices, g_sceneBatches);
@@ -2633,6 +2711,40 @@ void updateConstantBuffer()
 	g_activeShadowSpotLights = activeShadowSpotLights;
 
 	memcpy(g_pConstantMapped, &cb, sizeof(cb));
+
+	// If Camera Picture-in-Picture (PiP) preview is active, compute and upload camera's view/projection into slot 1
+	EngineUI::CameraPipRect pipRect = g_engineUI.GetCameraPipRect((float)g_currentWidth, (float)g_currentHeight, g_scene);
+	if (pipRect.active && g_pConstantMapped)
+	{
+		GameObject* camObj = g_scene.FindObject(pipRect.selectedCameraId);
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera))
+		{
+			glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
+			glm::vec3 worldPos, worldRot, worldScale;
+			Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+
+			OrbitCamera pipCam;
+			pipCam.yaw = worldRot.y;
+			pipCam.pitch = worldRot.x;
+			pipCam.fov = camObj->camera.fov;
+			pipCam.isOrthographic = camObj->camera.isOrthographic;
+			pipCam.orthoSize = camObj->camera.orthoSize;
+			pipCam.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+			pipCam.farPlane = std::max(1.0f, camObj->camera.farPlane);
+			pipCam.distance = 0.001f;
+			pipCam.target = worldPos + pipCam.GetForward() * 0.001f;
+
+			float pipAspect = (pipRect.width > 0.0f && pipRect.height > 0.0f) ? (pipRect.width / pipRect.height) : 1.777f;
+			glm::mat4 pipView = pipCam.GetViewMatrix();
+			glm::mat4 pipProj = pipCam.GetProjectionMatrix(pipAspect);
+
+			SceneConstantBuffer pipCb = cb;
+			pipCb.mvp = pipProj * pipView * model;
+			pipCb.cameraPos = pipCam.GetPosition();
+
+			memcpy((uint8_t*)g_pConstantMapped + sizeof(SceneConstantBuffer), &pipCb, sizeof(pipCb));
+		}
+	}
 }
 
 void resizeBuffers(int width, int height)
@@ -2877,16 +2989,24 @@ void renderFrame()
 
 	D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = g_dsvDescHeap->GetCPUDescriptorHandleForHeapStart();
 
-	// First clear entire backbuffer to editor background #2B2B2B (RGB 0.169f, 0.169f, 0.169f)
-	const float editorBgColor[4] = { 0.169f, 0.169f, 0.169f, 1.0f };
-	g_commandList->ClearRenderTargetView(rtvHandle, editorBgColor, 0, nullptr);
-
-	// Clear the 3D viewport area to scene clear color
 	const float clearColor[4] = { g_scene.clearColor.r, g_scene.clearColor.g, g_scene.clearColor.b, 1.0f };
 	char bufClearRtv[64];
 	snprintf(bufClearRtv, sizeof(bufClearRtv), "[ClearRTV] BackBuffer[%u]", g_frameIndex);
 	RecordGpuBreadcrumbOp(bufClearRtv);
-	g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &scissor);
+
+	if (g_engineUI.isGameOnlyWindow)
+	{
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+	}
+	else
+	{
+		// First clear entire backbuffer to editor background #2B2B2B (RGB 0.169f, 0.169f, 0.169f)
+		const float editorBgColor[4] = { 0.169f, 0.169f, 0.169f, 1.0f };
+		g_commandList->ClearRenderTargetView(rtvHandle, editorBgColor, 0, nullptr);
+
+		// Clear the 3D viewport area to scene clear color
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &scissor);
+	}
 
 	RecordGpuBreadcrumbOp("[ClearDSV] DepthStencilBuffer");
 	g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
@@ -2942,8 +3062,13 @@ void renderFrame()
 			matConsts.opacity = batch.opacity;
 			matConsts.opacityMaskClipValue = batch.opacityMaskClipValue > 0.0f ? batch.opacityMaskClipValue : 0.333f;
 			matConsts.hasOpacityTex = (!batch.opacityTex.empty() && batch.opacityTex != "none") ? 1.0f : 0.0f;
+			matConsts.normalMapYFlip = batch.normalMapYFlip ? 1.0f : 0.0f;
+			matConsts.roughnessChannel = (float)batch.roughnessChannel;
+			matConsts.metallicChannel = (float)batch.metallicChannel;
+			matConsts.aoChannel = (float)batch.aoChannel;
+			matConsts.materialDebugMode = (float)batch.materialDebugMode;
 
-			g_commandList->SetGraphicsRoot32BitConstants(1, 24, &matConsts, 0);
+			g_commandList->SetGraphicsRoot32BitConstants(1, 32, &matConsts, 0);
 
 			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
 				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
@@ -2978,6 +3103,95 @@ void renderFrame()
 				g_commandList->DrawIndexedInstanced(drawCount, 1, batch.startIndex, 0, 0);
 			}
 		}
+	}
+
+	// ----------------------------------------------------
+	// PASS 2.5: Selected Camera Picture-in-Picture (PiP) Hardware Pass
+	// ----------------------------------------------------
+	EngineUI::CameraPipRect pipRect = g_engineUI.GetCameraPipRect((float)g_currentWidth, (float)g_currentHeight, g_scene);
+	if (!g_deviceLost && pipRect.active && g_currentIndexCount > 0 && g_numPureSceneBatches > 0)
+	{
+		float px = std::max(0.0f, std::min((float)g_currentWidth - 1.0f, pipRect.x));
+		float py = std::max(0.0f, std::min((float)g_currentHeight - 1.0f, pipRect.y));
+		float pw = std::max(1.0f, std::min((float)g_currentWidth - px, pipRect.width));
+		float ph = std::max(1.0f, std::min((float)g_currentHeight - py, pipRect.height));
+
+		D3D12_VIEWPORT pipViewport = { px, py, pw, ph, 0.0f, 1.0f };
+		D3D12_RECT pipScissor = { (LONG)px, (LONG)py, (LONG)(px + pw), (LONG)(py + ph) };
+
+		RecordGpuBreadcrumbOp("[PiP Pass] Selected Camera Preview");
+		g_commandList->RSSetViewports(1, &pipViewport);
+		g_commandList->RSSetScissorRects(1, &pipScissor);
+
+		// Clear Depth & Stencil exclusively within the PiP rect for a fresh camera z-buffer
+		g_commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &pipScissor);
+		// Clear PiP color rectangle to scene background clear color
+		g_commandList->ClearRenderTargetView(rtvHandle, clearColor, 1, &pipScissor);
+
+		// Set camera Constant Buffer from Slot 1 (Camera MVP & Pos)
+		g_commandList->SetGraphicsRootSignature(g_rootSignature);
+		g_commandList->SetPipelineState(g_pipelineState);
+		g_commandList->SetGraphicsRootConstantBufferView(0, g_constantBuffer->GetGPUVirtualAddress() + sizeof(SceneConstantBuffer));
+		g_commandList->SetGraphicsRootDescriptorTable(3, g_shadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(4, g_pointShadowSrvGpuHandle);
+		g_commandList->SetGraphicsRootDescriptorTable(5, g_spotShadowSrvGpuHandle);
+
+		g_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+		g_commandList->IASetVertexBuffers(0, 1, &g_vertexBufferView);
+		g_commandList->IASetIndexBuffer(&g_indexBufferView);
+
+		// Render all pure scene geometry (batches [0, g_numPureSceneBatches))
+		// This automatically excludes editor-only gizmos (lights, camera frustum lines, transform gizmo, grid)
+		for (size_t bIdx = 0; bIdx < g_numPureSceneBatches; ++bIdx)
+		{
+			const auto& batch = g_sceneBatches[bIdx];
+			if (batch.startIndex >= g_currentIndexCount || batch.indexCount == 0) continue;
+			UINT drawCount = (UINT)std::min((size_t)batch.indexCount, (size_t)(g_currentIndexCount - batch.startIndex));
+			if (drawCount == 0) continue;
+
+			MaterialShaderConstants matConsts = {};
+			matConsts.baseColor[0] = batch.baseColor.r;
+			matConsts.baseColor[1] = batch.baseColor.g;
+			matConsts.baseColor[2] = batch.baseColor.b;
+			matConsts.metallic     = batch.metallic;
+			matConsts.roughness    = batch.roughness;
+			matConsts.normalStrength = batch.normalStrength;
+			matConsts.specular     = batch.specular;
+			matConsts.emissiveIntensity = batch.emissiveIntensity;
+			matConsts.emissiveColor[0] = batch.emissiveColor.r;
+			matConsts.emissiveColor[1] = batch.emissiveColor.g;
+			matConsts.emissiveColor[2] = batch.emissiveColor.b;
+			matConsts.isUnlit      = batch.isUnlit ? 1.0f : 0.0f;
+			matConsts.hasAlbedoTex = (!batch.albedoTex.empty() && batch.albedoTex != "none") ? 1.0f : 0.0f;
+			matConsts.hasNormalTex = (!batch.normalTex.empty() && batch.normalTex != "none") ? 1.0f : 0.0f;
+			matConsts.hasRoughTex  = (!batch.roughTex.empty() && batch.roughTex != "none")  ? 1.0f : 0.0f;
+			matConsts.hasAoTex     = (!batch.aoTex.empty() && batch.aoTex != "none")        ? 1.0f : 0.0f;
+			matConsts.receiveShadows = batch.receiveShadows ? 1.0f : 0.0f;
+			matConsts.uvScale[0]   = batch.uvScale.x != 0.0f ? batch.uvScale.x : 1.0f;
+			matConsts.uvScale[1]   = batch.uvScale.y != 0.0f ? batch.uvScale.y : 1.0f;
+			matConsts.blendMode    = (float)batch.blendMode;
+			matConsts.opacity      = batch.opacity;
+			matConsts.opacityMaskClipValue = batch.opacityMaskClipValue > 0.0f ? batch.opacityMaskClipValue : 0.333f;
+			matConsts.hasOpacityTex = (!batch.opacityTex.empty() && batch.opacityTex != "none") ? 1.0f : 0.0f;
+			matConsts.normalMapYFlip = batch.normalMapYFlip ? 1.0f : 0.0f;
+			matConsts.roughnessChannel = (float)batch.roughnessChannel;
+			matConsts.metallicChannel = (float)batch.metallicChannel;
+			matConsts.aoChannel = (float)batch.aoChannel;
+			matConsts.materialDebugMode = (float)batch.materialDebugMode;
+
+			g_commandList->SetGraphicsRoot32BitConstants(1, 32, &matConsts, 0);
+
+			D3D12_GPU_DESCRIPTOR_HANDLE tableHandle = GetOrCreateMaterialTable(
+				batch.albedoTex, batch.normalTex, batch.roughTex, batch.metalTex, batch.aoTex, batch.opacityTex);
+			if (tableHandle.ptr == 0) continue;
+
+			g_commandList->SetGraphicsRootDescriptorTable(2, tableHandle);
+			g_commandList->DrawIndexedInstanced(drawCount, 1, (UINT)batch.startIndex, 0, 0);
+		}
+
+		// Restore main viewport and scissor
+		g_commandList->RSSetViewports(1, &viewport);
+		g_commandList->RSSetScissorRects(1, &scissor);
 	}
 
 	// 2. Render Unreal Engine 5 UI with Dear ImGui
@@ -3276,6 +3490,14 @@ static void PickObjectAtCursor(float mouseX, float mouseY)
 
 static void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
 {
+	if (g_scene.isPlayMode)
+	{
+		if (button == GLFW_MOUSE_BUTTON_LEFT) s_isLeftMouseDown = (action == GLFW_PRESS);
+		else if (button == GLFW_MOUSE_BUTTON_MIDDLE) s_isMiddleMouseDown = (action == GLFW_PRESS);
+		else if (button == GLFW_MOUSE_BUTTON_RIGHT) s_isRightMouseDown = (action == GLFW_PRESS);
+		return;
+	}
+
 	ImGuiIO& io = ImGui::GetIO();
 
 	if (button == GLFW_MOUSE_BUTTON_LEFT)
@@ -3304,14 +3526,12 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 			s_isRightMouseDown = true;
 			bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 			              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
-			bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+			bool wantCapture = io.WantCaptureMouse;
 			if (!isAlt && !wantCapture)
 			{
 				double mx, my;
 				glfwGetCursorPos(window, &mx, &my);
-				EngineUI::ViewportRect vpRect = g_scene.isPlayMode ?
-					EngineUI::ViewportRect{0.0f, 0.0f, (float)g_currentWidth, (float)g_currentHeight} :
-					g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
+				EngineUI::ViewportRect vpRect = g_engineUI.GetViewportRect((float)g_currentWidth, (float)g_currentHeight);
 				if (mx >= vpRect.x && mx <= vpRect.x + vpRect.width &&
 				    my >= vpRect.y && my <= vpRect.y + vpRect.height)
 				{
@@ -3334,6 +3554,17 @@ static void mouseButtonCallback(GLFWwindow* window, int button, int action, int 
 
 static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 {
+	double deltaX = xpos - s_lastMouseX;
+	double deltaY = ypos - s_lastMouseY;
+	s_lastMouseX = xpos;
+	s_lastMouseY = ypos;
+
+	if (g_scene.isPlayMode)
+	{
+		// Game mode: Camera is static unless controlled by a behaviour script
+		return;
+	}
+
 	if (s_firstMouseAfterCapture && g_camera.isFlying)
 	{
 		s_lastMouseX = xpos;
@@ -3342,18 +3573,13 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		return;
 	}
 
-	double deltaX = xpos - s_lastMouseX;
-	double deltaY = ypos - s_lastMouseY;
-	s_lastMouseX = xpos;
-	s_lastMouseY = ypos;
-
 	ImGuiIO& io = ImGui::GetIO();
 	if (ImGuizmo::IsUsing()) return;
 
 	bool isAlt = (glfwGetKey(window, GLFW_KEY_LEFT_ALT) == GLFW_PRESS ||
 	              glfwGetKey(window, GLFW_KEY_RIGHT_ALT) == GLFW_PRESS);
 
-	// 1. Fly Camera (Hold RMB + Mouse Movement -> Look around) - Active in Editor and in Play Mode
+	// 1. Fly Camera (Hold RMB + Mouse Movement -> Look around)
 	if (g_camera.isFlying && s_isRightMouseDown && !isAlt)
 	{
 		g_camera.LookAround((float)deltaX, (float)deltaY);
@@ -3361,7 +3587,7 @@ static void cursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 		return;
 	}
 
-	bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+	bool wantCapture = io.WantCaptureMouse;
 	if (wantCapture || ImGuizmo::IsOver()) return;
 
 	// 2. Alt Navigation (Unreal Engine Maya-style viewport controls)
@@ -3401,6 +3627,12 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 {
 	InputSystem::ScrollCallback(window, xoffset, yoffset);
 
+	if (g_scene.isPlayMode)
+	{
+		// Game mode: Viewport zoom is disabled
+		return;
+	}
+
 	ImGuiIO& io = ImGui::GetIO();
 
 	if (s_isRightMouseDown && g_camera.isFlying)
@@ -3411,7 +3643,7 @@ static void scrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 	}
 	else
 	{
-		bool wantCapture = g_scene.isPlayMode ? ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) : io.WantCaptureMouse;
+		bool wantCapture = io.WantCaptureMouse;
 		if (wantCapture) return;
 		g_camera.Zoom((float)yoffset);
 		SyncViewportCameraToLevelCamera();
@@ -3665,10 +3897,23 @@ static void SetupCustomWindowFrame(HWND hwnd)
 		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-int main()
+int main(int argc, char** argv)
 {
 	EngineLogger::Get().Init("logs.elogs");
 	EngineLogger::Get().LogAction("ENGINE_START", "Eunoia-Editor", "DirectX 12 Initializing");
+
+	bool isGameOnlyMode = false;
+	std::filesystem::path gameProjectPath;
+
+	for (int i = 1; i < argc; ++i) {
+		std::string arg = argv[i];
+		if (arg == "--game" || arg == "-game" || arg == "/game" || arg == "--play" || arg == "-play") {
+			isGameOnlyMode = true;
+			if (i + 1 < argc && argv[i + 1][0] != '-') {
+				gameProjectPath = argv[++i];
+			}
+		}
+	}
 
 	// 1. Initialize GLFW
 	if (!glfwInit())
@@ -3677,22 +3922,33 @@ int main()
 		return -1;
 	}
 
-	// 1b. Run the Standalone Project Browser as a separate window BEFORE the editor
-	// This opens a lightweight OpenGL+ImGui window for project selection.
-	// The main D3D12 editor window only opens AFTER a project is selected.
-	std::filesystem::path selectedProjectPath = EngineUI::RunStandaloneProjectBrowser();
-	if (selectedProjectPath.empty())
-	{
-		// User closed the project browser without selecting — exit the application
-		std::cerr << "[INFO] No project selected. Exiting." << std::endl;
-		glfwTerminate();
-		return 0;
+	std::filesystem::path selectedProjectPath;
+	if (isGameOnlyMode) {
+		selectedProjectPath = gameProjectPath.empty() ? std::filesystem::current_path() : gameProjectPath;
+		std::cerr << "[INFO] Launching in Dedicated Game Mode for: " << selectedProjectPath.string() << std::endl;
+	} else {
+		// 1b. Run the Standalone Project Browser as a separate window BEFORE the editor
+		// This opens a lightweight OpenGL+ImGui window for project selection.
+		// The main D3D12 editor window only opens AFTER a project is selected.
+		selectedProjectPath = EngineUI::RunStandaloneProjectBrowser();
+		if (selectedProjectPath.empty())
+		{
+			// User closed the project browser without selecting — exit the application
+			std::cerr << "[INFO] No project selected. Exiting." << std::endl;
+			glfwTerminate();
+			return 0;
+		}
+		std::cerr << "[INFO] Project selected: " << selectedProjectPath.string() << std::endl;
 	}
-	std::cerr << "[INFO] Project selected: " << selectedProjectPath.string() << std::endl;
 
-	// 2. Create main editor window (D3D12, NO_API)
+	// 2. Create main window (D3D12, NO_API)
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-	g_window = glfwCreateWindow(WIDTH, HEIGHT, "Eunoia-Editor", nullptr, nullptr);
+	if (isGameOnlyMode) {
+		glfwWindowHint(GLFW_DECORATED, GLFW_TRUE);
+		glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+	}
+	std::string winTitle = isGameOnlyMode ? (selectedProjectPath.filename().string() + " - Game Mode") : "Eunoia-Editor";
+	g_window = glfwCreateWindow(WIDTH, HEIGHT, winTitle.c_str(), nullptr, nullptr);
 	if (!g_window)
 	{
 		std::cerr << "Failed to create GLFW window!" << std::endl;
@@ -3701,8 +3957,11 @@ int main()
 	}
 
 	HWND hwnd = glfwGetWin32Window(g_window);
-	SetupCustomWindowFrame(hwnd);
+	if (!isGameOnlyMode) {
+		SetupCustomWindowFrame(hwnd);
+	}
 	g_engineUI.SetWindow(g_window);
+	g_engineUI.isGameOnlyWindow = isGameOnlyMode;
 
 #ifdef _WIN32
 	// Set window icon (both large for Taskbar/Alt-Tab and small for title bar / system menu)
@@ -3839,6 +4098,39 @@ int main()
 	// Initialize EngineUI with the project selected from the standalone Project Browser window
 	g_engineUI.InitWithProject(selectedProjectPath, g_scene, g_camera);
 
+	if (isGameOnlyMode) {
+		GameObject* camObj = nullptr;
+		if (g_scene.activeLevelCameraId != -1) {
+			camObj = g_scene.FindObject(g_scene.activeLevelCameraId);
+		}
+		if (!camObj) {
+			for (auto& obj : g_scene.objects) {
+				if (obj.isCamera || obj.type == PrimitiveType::Camera) {
+					camObj = &obj;
+					g_scene.activeLevelCameraId = obj.id;
+					break;
+				}
+			}
+		}
+		if (camObj && (camObj->isCamera || camObj->type == PrimitiveType::Camera)) {
+				glm::mat4 worldMat = g_scene.GetWorldMatrix(*camObj);
+				glm::vec3 worldPos, worldRot, worldScale;
+				Scene::DecomposeMatrix(worldMat, worldPos, worldRot, worldScale);
+				g_camera.yaw = worldRot.y;
+				g_camera.pitch = worldRot.x;
+				g_camera.fov = camObj->camera.fov;
+				g_camera.isOrthographic = camObj->camera.isOrthographic;
+				g_camera.orthoSize = camObj->camera.orthoSize;
+				g_camera.nearPlane = std::max(0.01f, camObj->camera.nearPlane);
+				g_camera.farPlane = std::max(1.0f, camObj->camera.farPlane);
+				g_camera.distance = 0.001f;
+				g_camera.target = worldPos + g_camera.GetForward() * 0.001f;
+			}
+		g_scene.showGrid = false;
+		g_engineUI.showGizmo = false;
+		g_scene.StartPlayMode();
+	}
+
 	auto lastTime = std::chrono::high_resolution_clock::now();
 	float frameCount = 0.0f;
 	float fpsTimer = 0.0f;
@@ -3860,8 +4152,8 @@ int main()
 		if (deltaTime > 0.1f) deltaTime = 0.1f;
 		ScreenPrint::System::Get().Update(deltaTime);
 
-		// Process Fly Mode (Hold RMB + W, S, A, D, E, Q) - Active in Editor and in Play Mode
-		if (s_isRightMouseDown && g_camera.isFlying)
+		// Process Fly Mode (Hold RMB + W, S, A, D, E, Q) - Active only in Editor, NEVER in Play Mode
+		if (!g_scene.isPlayMode && s_isRightMouseDown && g_camera.isFlying)
 		{
 			float speed = g_camera.moveSpeed;
 			if (glfwGetKey(g_window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
@@ -3890,10 +4182,11 @@ int main()
 			}
 		}
 
-		// Play Mode stop key listener (dev.md Section 34: DELETE stops Play Mode even if Game View has focus)
-		if (g_scene.isPlayMode && (InputSystem::Get().IsKeyPressed(Key::Delete) || glfwGetKey(g_window, GLFW_KEY_DELETE) == GLFW_PRESS))
+		// Game Mode exit key listener (ESC or DELETE closes external game window)
+		if (isGameOnlyMode && (InputSystem::Get().IsKeyPressed(Key::Escape) || glfwGetKey(g_window, GLFW_KEY_ESCAPE) == GLFW_PRESS ||
+		                       InputSystem::Get().IsKeyPressed(Key::Delete) || glfwGetKey(g_window, GLFW_KEY_DELETE) == GLFW_PRESS))
 		{
-			g_engineUI.ExitPlayMode(g_scene);
+			glfwSetWindowShouldClose(g_window, GLFW_TRUE);
 		}
 
 		frameCount += 1.0f;
@@ -4033,6 +4326,10 @@ int main()
 	}
 
 	// 5. Cleanup
+	if (isGameOnlyMode) {
+		g_scene.StopPlayMode();
+	}
+
 	cleanUpD3D12();
 
 	glfwDestroyWindow(g_window);

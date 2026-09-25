@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
     // Start play mode (initializes behaviours, resolves references, calls OnCreate)
     scene.StartPlayMode();
 
-    std::cout << "[Eunoia Runtime] Entering game loop. Press ESC to quit.\n";
+    std::cout << "[Eunoia Runtime] Entering game loop. Close window to exit." << std::endl;
 
     auto lastTime = std::chrono::high_resolution_clock::now();
 
@@ -78,10 +78,6 @@ int main(int argc, char** argv) {
         InputSystem::Get().BeginFrame();
         window.PollEvents();
         InputSystem::Get().Update(window.Handle());
-
-        if (glfwGetKey(window.Handle(), GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-            break;
-        }
 
         auto currentTime = std::chrono::high_resolution_clock::now();
         float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
